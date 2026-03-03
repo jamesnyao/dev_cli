@@ -1,0 +1,28 @@
+#!/bin/bash
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+
+if command -v python3 &>/dev/null; then
+  python3 "$SCRIPT_DIR/dev.py" "$@"
+elif [ "$1" = "python" ]; then
+  echo -e "\033[0;34mPython not found. Bootstrapping...\033[0m"
+  if command -v apt &>/dev/null; then
+    sudo apt update && sudo apt install -y python3.12
+  elif command -v dnf &>/dev/null; then
+    sudo dnf install -y python3.12
+  elif command -v brew &>/dev/null; then
+    brew install python@3.12
+  else
+    echo -e "\033[0;31mNo supported package manager found (apt, dnf, brew).\033[0m"
+    exit 1
+  fi
+  if [ $? -eq 0 ]; then
+    echo -e "\033[0;32mPython installed. Re-running dev command...\033[0m"
+    python3 "$SCRIPT_DIR/dev.py" "$@"
+  else
+    echo -e "\033[0;31mFailed to install Python.\033[0m"
+    exit 1
+  fi
+else
+  echo -e "\033[0;31mPython is not installed. Run 'dev python update' to bootstrap it.\033[0m"
+  exit 1
+fi
