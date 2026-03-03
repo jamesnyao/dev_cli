@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Tests for dev.py"""
+"""
+Lightweight unit tests for dev.py
 
-import argparse
+Run with: python3 test_dev.py
+Or: python3 -m pytest test_dev.py -v
+"""
+
 import json
 import os
-import shutil
 import sys
 import tempfile
 import unittest
@@ -16,7 +19,7 @@ import dev
 
 
 class TestGetOsType(unittest.TestCase):
-    """Test OS type detection."""
+    """Test OS type detection"""
     
     @patch('platform.system')
     def test_linux(self, mock_system):
@@ -35,7 +38,7 @@ class TestGetOsType(unittest.TestCase):
 
 
 class TestConfig(unittest.TestCase):
-    """Test config loading and saving."""
+    """Test config loading and saving"""
     
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -47,15 +50,16 @@ class TestConfig(unittest.TestCase):
     def tearDown(self):
         dev.CONFIG_DIR = self.orig_config_dir
         dev.CONFIG_FILE = self.orig_config_file
+        import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
     
     def test_load_config_creates_default(self):
-        """load_config raises when config file is missing."""
+        """load_config should raise when config file is missing"""
         with self.assertRaises(FileNotFoundError):
             dev.load_config()
     
     def test_save_and_load_config(self):
-        """Config round-trips correctly."""
+        """Config should round-trip correctly"""
         config = {
             'version': 1,
             'repos': [{'name': 'test-repo', 'remoteUrl': 'https://example.com/test.git'}]
@@ -66,10 +70,10 @@ class TestConfig(unittest.TestCase):
 
 
 class TestComputeRepoName(unittest.TestCase):
-    """Test repo name computation."""
+    """Test repo name computation"""
     
     def test_simple_repo_name(self):
-        """Simple repo uses folder name."""
+        """Simple repo should use folder name"""
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / 'my-repo'
             repo.mkdir()
@@ -77,8 +81,9 @@ class TestComputeRepoName(unittest.TestCase):
             self.assertEqual(name, 'my-repo')
     
     def test_nested_gclient_repo(self):
-        """Repo under gclient enlistment uses parent/name format."""
+        """Repo under gclient enlistment should use parent/name format"""
         with tempfile.TemporaryDirectory() as tmp:
+            # Create structure: platform/.gclient, platform/src
             platform = Path(tmp) / 'platform'
             platform.mkdir()
             (platform / '.gclient').touch()
@@ -90,27 +95,31 @@ class TestComputeRepoName(unittest.TestCase):
 
 
 class TestHasRealConflictMarkers(unittest.TestCase):
-    """Test conflict marker detection."""
+    """Test conflict marker detection"""
     
     def test_no_conflicts(self):
+        """Normal content should not be detected as conflict"""
         content = "# Title\n\n## Section\nSome content\n"
         self.assertFalse(dev.has_real_conflict_markers(content))
     
     def test_real_conflict_markers(self):
+        """Real conflict markers should be detected"""
         content = "## Section\n<<<<<<< HEAD\nVersion A\n=======\nVersion B\n>>>>>>> branch\n"
         self.assertTrue(dev.has_real_conflict_markers(content))
     
     def test_example_markers_in_backticks(self):
+        """Example markers in backticks should NOT be detected as conflicts"""
         content = "If you see `<<<<<<<` markers, resolve them.\n"
         self.assertFalse(dev.has_real_conflict_markers(content))
     
     def test_example_markers_in_code_block(self):
+        """Example markers in code blocks should NOT be detected as conflicts"""
         content = "```\n<<<<<<< branch\n=======\n>>>>>>> other\n```\n"
         self.assertFalse(dev.has_real_conflict_markers(content))
 
 
 class TestGetBasePath(unittest.TestCase):
-    """Test base path resolution."""
+    """Test base path resolution"""
     
     @patch.dict(os.environ, {'DEV': '/workspace'})
     def test_uses_dev_env(self):
@@ -133,272 +142,370 @@ class TestRunGit(unittest.TestCase):
         self.assertFalse(success)
 
 
-class TestCopilotInstructionsSync(unittest.TestCase):
-    """Test copilot instructions merge and sync."""
-    
+class TestTrackedFilesSync(unittest.TestCase):
+    """Test unified tracked file sync (built-in md files + user files)"""
+
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.orig_config_dir = dev.CONFIG_DIR
+        self.orig_config_file = dev.CONFIG_FILE
+        self.orig_rcfiles_dir = dev.RCFILES_DIR
         dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
         dev.CONFIG_DIR.mkdir(parents=True)
+        dev.CONFIG_FILE = dev.CONFIG_DIR / 'repos.json'
+        dev.RCFILES_DIR = dev.CONFIG_DIR / 'rcfiles'
+
         self.workspace = Path(self.temp_dir) / 'workspace'
         self.workspace.mkdir()
         (self.workspace / '.github').mkdir()
-    
-    def tearDown(self):
-        dev.CONFIG_DIR = self.orig_config_dir
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-    
-    def test_workspace_changes_sync_to_repoconfig(self):
-        """Workspace edits propagate to repoconfig on merge."""
-        initial = "# Copilot\n\n## Rules\nInitial rules\n"
-        (dev.CONFIG_DIR / 'copilot-instructions.md').write_text(initial)
-        (self.workspace / '.github' / 'copilot-instructions.md').write_text(initial)
-        
-        updated = "# Copilot\n\n## Rules\nInitial rules\n\n## ADO PAT\nThe PAT is used for PRs and builds.\n"
-        (self.workspace / '.github' / 'copilot-instructions.md').write_text(updated)
-        
-        dev.merge_copilot_instructions_to_repoconfig(self.workspace)
-        
-        repoconfig_content = (dev.CONFIG_DIR / 'copilot-instructions.md').read_text()
-        self.assertIn("ADO PAT", repoconfig_content)
-        self.assertIn("PRs and builds", repoconfig_content)
-    
-    def test_repoconfig_changes_sync_to_workspace(self):
-        """Remote repoconfig updates propagate to workspace on apply."""
-        initial = "# Copilot\n\n## Rules\nInitial rules\n"
-        (self.workspace / '.github' / 'copilot-instructions.md').write_text(initial)
-        
-        updated_from_remote = "# Copilot\n\n## Rules\nInitial rules\n\n## New Section\nContent from another machine.\n"
-        (dev.CONFIG_DIR / 'copilot-instructions.md').write_text(updated_from_remote)
-        
-        dev.apply_copilot_instructions_to_workspace(self.workspace)
-        
-        workspace_content = (self.workspace / '.github' / 'copilot-instructions.md').read_text()
-        self.assertIn("New Section", workspace_content)
-        self.assertIn("Content from another machine", workspace_content)
-    
-    def test_workspace_is_source_of_truth_during_merge(self):
-        """Workspace content replaces repoconfig on merge."""
-        repoconfig_content = "## Old Section\nOld content\n"
-        workspace_content = "## New Section\nNew content\n"
-        
-        (dev.CONFIG_DIR / 'copilot-instructions.md').write_text(repoconfig_content)
-        (self.workspace / '.github' / 'copilot-instructions.md').write_text(workspace_content)
-        
-        dev.merge_copilot_instructions_to_repoconfig(self.workspace)
-        
-        result = (dev.CONFIG_DIR / 'copilot-instructions.md').read_text()
-        self.assertEqual(result, workspace_content)
-        self.assertNotIn("Old Section", result)
-    
-    def test_merge_skips_when_workspace_has_conflicts(self):
-        """Merge skips if workspace file has conflict markers."""
-        conflict_content = "## Section\n<<<<<<< HEAD\nVersion A\n=======\nVersion B\n>>>>>>> branch\n"
-        (self.workspace / '.github' / 'copilot-instructions.md').write_text(conflict_content)
-        (dev.CONFIG_DIR / 'copilot-instructions.md').write_text("original")
-        
-        dev.merge_copilot_instructions_to_repoconfig(self.workspace)
-        
-        result = (dev.CONFIG_DIR / 'copilot-instructions.md').read_text()
-        self.assertEqual(result, "original")
-    
-    def test_apply_skips_when_repoconfig_has_conflicts(self):
-        """Apply skips if repoconfig file has conflict markers."""
-        conflict_content = "## Section\n<<<<<<< HEAD\nVersion A\n=======\nVersion B\n>>>>>>> branch\n"
-        (dev.CONFIG_DIR / 'copilot-instructions.md').write_text(conflict_content)
-        (self.workspace / '.github' / 'copilot-instructions.md').write_text("original")
-        
-        dev.apply_copilot_instructions_to_workspace(self.workspace)
-        
-        result = (self.workspace / '.github' / 'copilot-instructions.md').read_text()
-        self.assertEqual(result, "original")
-    
-    def test_merge_handles_empty_repoconfig(self):
-        """Merge works when repoconfig doesn't exist yet."""
-        workspace_content = "# Copilot\n\nNew content\n"
-        (self.workspace / '.github' / 'copilot-instructions.md').write_text(workspace_content)
-        
-        repoconfig_file = dev.CONFIG_DIR / 'copilot-instructions.md'
-        if repoconfig_file.exists():
-            repoconfig_file.unlink()
-        
-        dev.merge_copilot_instructions_to_repoconfig(self.workspace)
-        
-        self.assertTrue(repoconfig_file.exists())
-        self.assertEqual(repoconfig_file.read_text(), workspace_content)
-    
-    def test_apply_creates_workspace_github_dir(self):
-        """Apply creates .github dir if missing."""
-        shutil.rmtree(self.workspace / '.github')
-        
-        repoconfig_content = "# Copilot\n\nContent\n"
-        (dev.CONFIG_DIR / 'copilot-instructions.md').write_text(repoconfig_content)
-        
-        dev.apply_copilot_instructions_to_workspace(self.workspace)
-        
-        workspace_file = self.workspace / '.github' / 'copilot-instructions.md'
-        self.assertTrue(workspace_file.exists())
-        self.assertEqual(workspace_file.read_text(), repoconfig_content)
-    
-    def test_no_change_when_content_identical(self):
-        content = "# Copilot\n\n## Rules\nSome rules\n"
-        (self.workspace / '.github' / 'copilot-instructions.md').write_text(content)
-        (dev.CONFIG_DIR / 'copilot-instructions.md').write_text(content)
-        
-        result = dev.merge_copilot_instructions_to_repoconfig(self.workspace)
-        self.assertFalse(result)
-        
-        result = dev.apply_copilot_instructions_to_workspace(self.workspace)
-        self.assertFalse(result)
-
-
-class TestPythonList(unittest.TestCase):
-    """Test python list command."""
-
-    @patch('subprocess.run')
-    @patch('dev.get_os_type', return_value='linux')
-    @patch.dict(os.environ, {'PATH': '/usr/bin'})
-    @patch('os.listdir', return_value=['python3', 'python3.12'])
-    @patch('os.path.isfile', return_value=True)
-    @patch('os.access', return_value=True)
-    @patch('os.path.realpath', side_effect=lambda p: p)
-    def test_finds_python_versions(self, mock_real, mock_access, mock_isfile, mock_listdir, mock_os, mock_run):
-        from unittest.mock import MagicMock
-        mock_run.return_value = MagicMock(returncode=0, stdout='Python 3.12.0')
-        args = argparse.Namespace()
-        result = dev.cmd_python_list(args)
-        self.assertEqual(result, 0)
-        self.assertTrue(mock_run.called)
-
-    @patch('dev.get_os_type', return_value='linux')
-    @patch.dict(os.environ, {'PATH': ''})
-    def test_no_python_found(self, mock_os):
-        args = argparse.Namespace()
-        result = dev.cmd_python_list(args)
-        self.assertEqual(result, 1)
-
-
-class TestClaudeInstructionsSync(unittest.TestCase):
-    """Test Claude instructions merge and sync."""
-
-    def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
-        self.orig_config_dir = dev.CONFIG_DIR
-        dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
-        dev.CONFIG_DIR.mkdir(parents=True)
-        self.workspace = Path(self.temp_dir) / 'workspace'
-        self.workspace.mkdir()
         (self.workspace / '.claude').mkdir()
 
+        dev.save_config({'version': 1, 'repos': [], 'files': []})
+
     def tearDown(self):
         dev.CONFIG_DIR = self.orig_config_dir
+        dev.CONFIG_FILE = self.orig_config_file
+        dev.RCFILES_DIR = self.orig_rcfiles_dir
+        import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_workspace_changes_sync_to_repoconfig(self):
-        """Workspace edits propagate to repoconfig on merge."""
+    # --- Built-in copilot-instructions.md tests ---
+
+    def test_copilot_workspace_changes_sync_to_rcfiles(self):
+        initial = "# Copilot\n\nInitial rules\n"
+        rcfile = dev.RCFILES_DIR / '.github' / 'copilot-instructions.md'
+        rcfile.parent.mkdir(parents=True)
+        rcfile.write_text(initial)
+        (self.workspace / '.github' / 'copilot-instructions.md').write_text(initial)
+
+        updated = "# Copilot\n\nInitial rules\n\n## ADO PAT\nUsed for PRs.\n"
+        (self.workspace / '.github' / 'copilot-instructions.md').write_text(updated)
+
+        dev.merge_tracked_files_to_repoconfig(self.workspace)
+
+        self.assertEqual(rcfile.read_text(), updated)
+
+    def test_copilot_rcfiles_changes_sync_to_workspace(self):
+        initial = "# Copilot\n\nInitial rules\n"
+        (self.workspace / '.github' / 'copilot-instructions.md').write_text(initial)
+
+        updated = "# Copilot\n\nInitial rules\n\n## New Section\nFrom remote.\n"
+        rcfile = dev.RCFILES_DIR / '.github' / 'copilot-instructions.md'
+        rcfile.parent.mkdir(parents=True)
+        rcfile.write_text(updated)
+
+        dev.apply_tracked_files_to_workspace(self.workspace)
+
+        result = (self.workspace / '.github' / 'copilot-instructions.md').read_text()
+        self.assertIn("New Section", result)
+
+    def test_copilot_merge_skips_conflicts(self):
+        conflict = "## Section\n<<<<<<< HEAD\nA\n=======\nB\n>>>>>>> branch\n"
+        (self.workspace / '.github' / 'copilot-instructions.md').write_text(conflict)
+        rcfile = dev.RCFILES_DIR / '.github' / 'copilot-instructions.md'
+        rcfile.parent.mkdir(parents=True)
+        rcfile.write_text("original")
+
+        dev.merge_tracked_files_to_repoconfig(self.workspace)
+
+        self.assertEqual(rcfile.read_text(), "original")
+
+    def test_copilot_apply_skips_conflicts(self):
+        rcfile = dev.RCFILES_DIR / '.github' / 'copilot-instructions.md'
+        rcfile.parent.mkdir(parents=True)
+        conflict = "## Section\n<<<<<<< HEAD\nA\n=======\nB\n>>>>>>> branch\n"
+        rcfile.write_text(conflict)
+        (self.workspace / '.github' / 'copilot-instructions.md').write_text("original")
+
+        dev.apply_tracked_files_to_workspace(self.workspace)
+
+        result = (self.workspace / '.github' / 'copilot-instructions.md').read_text()
+        self.assertEqual(result, "original")
+
+    def test_copilot_apply_creates_parent_dir(self):
+        import shutil
+        shutil.rmtree(self.workspace / '.github')
+
+        rcfile = dev.RCFILES_DIR / '.github' / 'copilot-instructions.md'
+        rcfile.parent.mkdir(parents=True)
+        rcfile.write_text("# Copilot\n\nContent\n")
+
+        dev.apply_tracked_files_to_workspace(self.workspace)
+
+        workspace_file = self.workspace / '.github' / 'copilot-instructions.md'
+        self.assertTrue(workspace_file.exists())
+        self.assertEqual(workspace_file.read_text(), "# Copilot\n\nContent\n")
+
+    # --- Built-in CLAUDE.md tests ---
+
+    def test_claude_workspace_changes_sync_to_rcfiles(self):
         initial = "# Dev CLI\n\nInitial content\n"
-        (dev.CONFIG_DIR / 'CLAUDE.md').write_text(initial)
+        rcfile = dev.RCFILES_DIR / '.claude' / 'CLAUDE.md'
+        rcfile.parent.mkdir(parents=True)
+        rcfile.write_text(initial)
         (self.workspace / '.claude' / 'CLAUDE.md').write_text(initial)
 
         updated = "# Dev CLI\n\nInitial content\n\n## New Section\nNew content\n"
         (self.workspace / '.claude' / 'CLAUDE.md').write_text(updated)
 
-        dev.merge_claude_instructions_to_repoconfig(self.workspace)
+        dev.merge_tracked_files_to_repoconfig(self.workspace)
 
-        repoconfig_content = (dev.CONFIG_DIR / 'CLAUDE.md').read_text()
-        self.assertIn("New Section", repoconfig_content)
+        self.assertIn("New Section", rcfile.read_text())
 
-    def test_repoconfig_changes_sync_to_workspace(self):
-        """Remote repoconfig updates propagate to workspace on apply."""
+    def test_claude_rcfiles_changes_sync_to_workspace(self):
         initial = "# Dev CLI\n\nInitial content\n"
         (self.workspace / '.claude' / 'CLAUDE.md').write_text(initial)
 
-        updated_from_remote = "# Dev CLI\n\nInitial content\n\n## Remote Section\nFrom another machine.\n"
-        (dev.CONFIG_DIR / 'CLAUDE.md').write_text(updated_from_remote)
+        updated = "# Dev CLI\n\nInitial content\n\n## Remote Section\nFrom another machine.\n"
+        rcfile = dev.RCFILES_DIR / '.claude' / 'CLAUDE.md'
+        rcfile.parent.mkdir(parents=True)
+        rcfile.write_text(updated)
 
-        dev.apply_claude_instructions_to_workspace(self.workspace)
-
-        workspace_content = (self.workspace / '.claude' / 'CLAUDE.md').read_text()
-        self.assertIn("Remote Section", workspace_content)
-
-    def test_workspace_is_source_of_truth_during_merge(self):
-        """Workspace content replaces repoconfig on merge."""
-        repoconfig_content = "## Old Section\nOld content\n"
-        workspace_content = "## New Section\nNew content\n"
-
-        (dev.CONFIG_DIR / 'CLAUDE.md').write_text(repoconfig_content)
-        (self.workspace / '.claude' / 'CLAUDE.md').write_text(workspace_content)
-
-        dev.merge_claude_instructions_to_repoconfig(self.workspace)
-
-        result = (dev.CONFIG_DIR / 'CLAUDE.md').read_text()
-        self.assertEqual(result, workspace_content)
-        self.assertNotIn("Old Section", result)
-
-    def test_merge_skips_when_workspace_has_conflicts(self):
-        """Merge skips if workspace file has conflict markers."""
-        conflict_content = "## Section\n<<<<<<< HEAD\nVersion A\n=======\nVersion B\n>>>>>>> branch\n"
-        (self.workspace / '.claude' / 'CLAUDE.md').write_text(conflict_content)
-        (dev.CONFIG_DIR / 'CLAUDE.md').write_text("original")
-
-        dev.merge_claude_instructions_to_repoconfig(self.workspace)
-
-        result = (dev.CONFIG_DIR / 'CLAUDE.md').read_text()
-        self.assertEqual(result, "original")
-
-    def test_apply_skips_when_repoconfig_has_conflicts(self):
-        """Apply skips if repoconfig file has conflict markers."""
-        conflict_content = "## Section\n<<<<<<< HEAD\nVersion A\n=======\nVersion B\n>>>>>>> branch\n"
-        (dev.CONFIG_DIR / 'CLAUDE.md').write_text(conflict_content)
-        (self.workspace / '.claude' / 'CLAUDE.md').write_text("original")
-
-        dev.apply_claude_instructions_to_workspace(self.workspace)
+        dev.apply_tracked_files_to_workspace(self.workspace)
 
         result = (self.workspace / '.claude' / 'CLAUDE.md').read_text()
-        self.assertEqual(result, "original")
+        self.assertIn("Remote Section", result)
 
-    def test_merge_handles_empty_repoconfig(self):
-        """Merge works when repoconfig doesn't exist yet."""
-        workspace_content = "# Dev CLI\n\nNew content\n"
-        (self.workspace / '.claude' / 'CLAUDE.md').write_text(workspace_content)
+    def test_claude_merge_skips_conflicts(self):
+        conflict = "## Section\n<<<<<<< HEAD\nA\n=======\nB\n>>>>>>> branch\n"
+        (self.workspace / '.claude' / 'CLAUDE.md').write_text(conflict)
+        rcfile = dev.RCFILES_DIR / '.claude' / 'CLAUDE.md'
+        rcfile.parent.mkdir(parents=True)
+        rcfile.write_text("original")
 
-        repoconfig_file = dev.CONFIG_DIR / 'CLAUDE.md'
-        if repoconfig_file.exists():
-            repoconfig_file.unlink()
+        dev.merge_tracked_files_to_repoconfig(self.workspace)
 
-        dev.merge_claude_instructions_to_repoconfig(self.workspace)
+        self.assertEqual(rcfile.read_text(), "original")
 
-        self.assertTrue(repoconfig_file.exists())
-        self.assertEqual(repoconfig_file.read_text(), workspace_content)
+    # --- User-added file tests ---
 
-    def test_apply_creates_workspace_claude_dir(self):
-        """Apply creates .claude dir if missing."""
-        shutil.rmtree(self.workspace / '.claude')
+    def test_user_file_merge_to_rcfiles(self):
+        dev.save_config({
+            'version': 1, 'repos': [],
+            'files': [{'path': 'platform/.gclient', 'addedAt': '2026-01-01T00:00:00+00:00'}]
+        })
 
-        repoconfig_content = "# Dev CLI\n\nContent\n"
-        (dev.CONFIG_DIR / 'CLAUDE.md').write_text(repoconfig_content)
+        platform_dir = self.workspace / 'platform'
+        platform_dir.mkdir()
+        (platform_dir / '.gclient').write_text('solutions = []')
 
-        dev.apply_claude_instructions_to_workspace(self.workspace)
+        result = dev.merge_tracked_files_to_repoconfig(self.workspace)
 
-        workspace_file = self.workspace / '.claude' / 'CLAUDE.md'
+        self.assertTrue(result)
+        rcfile = dev.RCFILES_DIR / 'platform' / '.gclient'
+        self.assertTrue(rcfile.exists())
+        self.assertEqual(rcfile.read_text(), 'solutions = []')
+
+    def test_user_file_apply_to_workspace(self):
+        dev.save_config({
+            'version': 1, 'repos': [],
+            'files': [{'path': 'platform/.gclient', 'addedAt': '2026-01-01T00:00:00+00:00'}]
+        })
+
+        rcfile = dev.RCFILES_DIR / 'platform' / '.gclient'
+        rcfile.parent.mkdir(parents=True)
+        rcfile.write_text('solutions = []')
+
+        result = dev.apply_tracked_files_to_workspace(self.workspace)
+
+        self.assertTrue(result)
+        workspace_file = self.workspace / 'platform' / '.gclient'
         self.assertTrue(workspace_file.exists())
-        self.assertEqual(workspace_file.read_text(), repoconfig_content)
+        self.assertEqual(workspace_file.read_text(), 'solutions = []')
 
-    def test_no_change_when_content_identical(self):
-        """No writes when content is identical."""
-        content = "# Dev CLI\n\n## Rules\nSome rules\n"
-        workspace_file = self.workspace / '.claude' / 'CLAUDE.md'
-        repoconfig_file = dev.CONFIG_DIR / 'CLAUDE.md'
+    def test_no_change_when_identical(self):
+        content = "# Copilot\n\n## Rules\nSome rules\n"
+        (self.workspace / '.github' / 'copilot-instructions.md').write_text(content)
+        rcfile = dev.RCFILES_DIR / '.github' / 'copilot-instructions.md'
+        rcfile.parent.mkdir(parents=True)
+        rcfile.write_text(content)
 
-        workspace_file.write_text(content)
-        repoconfig_file.write_text(content)
+        self.assertFalse(dev.merge_tracked_files_to_repoconfig(self.workspace))
+        self.assertFalse(dev.apply_tracked_files_to_workspace(self.workspace))
 
-        result = dev.merge_claude_instructions_to_repoconfig(self.workspace)
+    def test_merge_skips_missing_workspace_file(self):
+        dev.save_config({
+            'version': 1, 'repos': [],
+            'files': [{'path': 'nonexistent.txt', 'addedAt': '2026-01-01T00:00:00+00:00'}]
+        })
+        result = dev.merge_tracked_files_to_repoconfig(self.workspace)
         self.assertFalse(result)
 
-        result = dev.apply_claude_instructions_to_workspace(self.workspace)
+    def test_apply_skips_missing_rcfile(self):
+        dev.save_config({
+            'version': 1, 'repos': [],
+            'files': [{'path': 'nonexistent.txt', 'addedAt': '2026-01-01T00:00:00+00:00'}]
+        })
+        result = dev.apply_tracked_files_to_workspace(self.workspace)
         self.assertFalse(result)
+
+    def test_builtin_files_always_included(self):
+        all_files = dev._get_all_tracked_files()
+        paths = [f['path'] for f in all_files]
+        self.assertIn('.github/copilot-instructions.md', paths)
+        self.assertIn('.claude/CLAUDE.md', paths)
+
+    def test_user_files_combined_with_builtins(self):
+        dev.save_config({
+            'version': 1, 'repos': [],
+            'files': [{'path': 'platform/.gclient', 'addedAt': '2026-01-01T00:00:00+00:00'}]
+        })
+        all_files = dev._get_all_tracked_files()
+        paths = [f['path'] for f in all_files]
+        self.assertIn('.github/copilot-instructions.md', paths)
+        self.assertIn('.claude/CLAUDE.md', paths)
+        self.assertIn('platform/.gclient', paths)
+
+    def test_no_conflict_check_on_non_md_files(self):
+        """Non-md files with conflict-like content should still sync"""
+        dev.save_config({
+            'version': 1, 'repos': [],
+            'files': [{'path': 'platform/.gclient', 'addedAt': '2026-01-01T00:00:00+00:00'}]
+        })
+        platform_dir = self.workspace / 'platform'
+        platform_dir.mkdir()
+        content = "<<<<<<< HEAD\nstuff\n=======\nother\n>>>>>>> branch\n"
+        (platform_dir / '.gclient').write_text(content)
+
+        rcfile = dev.RCFILES_DIR / 'platform' / '.gclient'
+        rcfile.parent.mkdir(parents=True)
+        rcfile.write_text("old")
+
+        dev.merge_tracked_files_to_repoconfig(self.workspace)
+        self.assertEqual(rcfile.read_text(), content)
+
+
+class TestMigrateLegacyRcfiles(unittest.TestCase):
+    """Test migration of legacy flat repoconfig files to rcfiles/"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.orig_config_dir = dev.CONFIG_DIR
+        self.orig_rcfiles_dir = dev.RCFILES_DIR
+        dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
+        dev.CONFIG_DIR.mkdir(parents=True)
+        dev.RCFILES_DIR = dev.CONFIG_DIR / 'rcfiles'
+
+    def tearDown(self):
+        dev.CONFIG_DIR = self.orig_config_dir
+        dev.RCFILES_DIR = self.orig_rcfiles_dir
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_migrates_copilot_instructions(self):
+        old = dev.CONFIG_DIR / 'copilot-instructions.md'
+        old.write_text("# Copilot instructions")
+
+        dev._migrate_legacy_rcfiles()
+
+        new = dev.RCFILES_DIR / '.github' / 'copilot-instructions.md'
+        self.assertTrue(new.exists())
+        self.assertEqual(new.read_text(), "# Copilot instructions")
+        self.assertFalse(old.exists())
+
+    def test_migrates_claude_md(self):
+        old = dev.CONFIG_DIR / 'CLAUDE.md'
+        old.write_text("# Claude rules")
+
+        dev._migrate_legacy_rcfiles()
+
+        new = dev.RCFILES_DIR / '.claude' / 'CLAUDE.md'
+        self.assertTrue(new.exists())
+        self.assertEqual(new.read_text(), "# Claude rules")
+        self.assertFalse(old.exists())
+
+    def test_skips_if_new_already_exists(self):
+        old = dev.CONFIG_DIR / 'copilot-instructions.md'
+        old.write_text("old content")
+
+        new = dev.RCFILES_DIR / '.github' / 'copilot-instructions.md'
+        new.parent.mkdir(parents=True)
+        new.write_text("new content")
+
+        dev._migrate_legacy_rcfiles()
+
+        self.assertEqual(new.read_text(), "new content")
+
+    def test_noop_when_no_legacy_files(self):
+        dev._migrate_legacy_rcfiles()
+        self.assertFalse((dev.RCFILES_DIR / '.github' / 'copilot-instructions.md').exists())
+        self.assertFalse((dev.RCFILES_DIR / '.claude' / 'CLAUDE.md').exists())
+
+
+class TestAddTrackedFile(unittest.TestCase):
+    """Test _add_tracked_file"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.orig_config_dir = dev.CONFIG_DIR
+        self.orig_config_file = dev.CONFIG_FILE
+        self.orig_rcfiles_dir = dev.RCFILES_DIR
+        dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
+        dev.CONFIG_DIR.mkdir(parents=True)
+        dev.CONFIG_FILE = dev.CONFIG_DIR / 'repos.json'
+        dev.RCFILES_DIR = dev.CONFIG_DIR / 'rcfiles'
+
+        self.workspace = Path(self.temp_dir) / 'workspace'
+        self.workspace.mkdir()
+
+        dev.save_config({'version': 1, 'repos': []})
+
+    def tearDown(self):
+        dev.CONFIG_DIR = self.orig_config_dir
+        dev.CONFIG_FILE = self.orig_config_file
+        dev.RCFILES_DIR = self.orig_rcfiles_dir
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    @patch.dict(os.environ, {'DEV': ''})
+    def test_add_tracked_file(self):
+        """Adding a file should store it in config and rcfiles"""
+        os.environ['DEV'] = str(self.workspace)
+
+        platform_dir = self.workspace / 'platform'
+        platform_dir.mkdir()
+        gclient = platform_dir / '.gclient'
+        gclient.write_text('solutions = [{"name": "src"}]')
+
+        result = dev._add_tracked_file(gclient)
+
+        self.assertEqual(result, 0)
+        config = dev.load_config()
+        self.assertEqual(len(config.get('files', [])), 1)
+        self.assertEqual(config['files'][0]['path'], 'platform/.gclient')
+
+        rcfile = dev.RCFILES_DIR / 'platform' / '.gclient'
+        self.assertTrue(rcfile.exists())
+
+    @patch.dict(os.environ, {'DEV': ''})
+    def test_add_file_replaces_existing(self):
+        """Adding same file again should replace the entry"""
+        os.environ['DEV'] = str(self.workspace)
+
+        platform_dir = self.workspace / 'platform'
+        platform_dir.mkdir()
+        gclient = platform_dir / '.gclient'
+        gclient.write_text('v1')
+
+        dev._add_tracked_file(gclient)
+        gclient.write_text('v2')
+        dev._add_tracked_file(gclient)
+
+        config = dev.load_config()
+        self.assertEqual(len(config.get('files', [])), 1)
+        rcfile = dev.RCFILES_DIR / 'platform' / '.gclient'
+        self.assertEqual(rcfile.read_text(), 'v2')
+
+    @patch.dict(os.environ, {'DEV': ''})
+    def test_add_file_outside_workspace_fails(self):
+        """Adding a file outside workspace should fail"""
+        os.environ['DEV'] = str(self.workspace)
+
+        outside = Path(self.temp_dir) / 'outside.txt'
+        outside.write_text('test')
+
+        result = dev._add_tracked_file(outside)
+        self.assertEqual(result, 1)
 
 
 if __name__ == '__main__':

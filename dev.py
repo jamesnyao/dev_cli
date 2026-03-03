@@ -7,12 +7,11 @@ import argparse
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
-import shutil
 
 # Colors (ANSI escape codes, disabled on Windows cmd)
 class Colors:
@@ -30,6 +29,7 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 CONFIG_DIR = SCRIPT_DIR / 'repoconfig'
 CONFIG_FILE = CONFIG_DIR / 'repos.json'
 ADO_PAT_FILE = CONFIG_DIR / 'ado_pat.txt'
+RCFILES_DIR = CONFIG_DIR / 'rcfiles'
 
 def get_os_type():
     system = platform.system().lower()
@@ -64,18 +64,6 @@ def run_git(repo_path, *args):
         return result.returncode == 0, result.stdout.strip()
     except Exception:
         return False, ''
-
-def _is_ado_url(url):
-    """Check if a URL points to Azure DevOps"""
-    return 'dev.azure.com' in url or 'visualstudio.com' in url
-
-def _embed_pat_in_url(url, pat):
-    """Embed an ADO PAT into an Azure DevOps git URL"""
-    parsed = urlparse(url)
-    netloc = f"pat:{pat}@{parsed.hostname}"
-    if parsed.port:
-        netloc += f":{parsed.port}"
-    return urlunparse(parsed._replace(netloc=netloc))
 
 def get_remote_url(repo_path):
     success, url = run_git(repo_path, 'remote', 'get-url', 'origin')
@@ -138,49 +126,93 @@ def check_stale_branch(repo_path, name):
         print(f"  {Colors.GREEN}[OK] Switched to {default}{Colors.NC}")
 
 def compute_repo_name(repo_path, base_path=None):
-    """Compute a repo name from path, using parent/name format for gclient enlistments."""
+    """
+    Compute a repo name from path, supporting nested structures like platform/src, cr/toolchain_tools.
+    If the repo is under a known enlistment structure (contains .gclient), use parent/name format.
+    """
     repo_path = Path(repo_path).resolve()
-
+    
+    # Check if parent directory looks like a gclient enlistment (has .gclient file)
     parent = repo_path.parent
     if (parent / '.gclient').exists():
+        # This is a nested repo like platform/src or cr/toolchain_tools
         return f"{parent.name}/{repo_path.name}"
-
+    
+    # Check if this is a top-level repo directly in base_path
     if base_path:
         base_path = Path(base_path).resolve()
         try:
             rel_path = repo_path.relative_to(base_path)
             parts = rel_path.parts
             if len(parts) >= 2:
+                # Check if the intermediate dir is an enlistment
                 intermediate = base_path / parts[0]
                 if (intermediate / '.gclient').exists():
                     return '/'.join(parts[:2])
         except ValueError:
             pass
-
+    
     return repo_path.name
 
 # ============ REPO COMMANDS ============
 
+def _add_tracked_file(file_path):
+    """Add a single file to tracking for cross-machine sync."""
+    base_path = Path(get_base_path()).resolve()
+
+    try:
+        rel_path = file_path.relative_to(base_path)
+    except ValueError:
+        print(f"{Colors.RED}[X]{Colors.NC} File must be under workspace root: {base_path}")
+        return 1
+
+    rel_str = str(rel_path).replace('\\', '/')
+
+    config = load_config()
+    if 'files' not in config:
+        config['files'] = []
+
+    config['files'] = [f for f in config['files'] if f['path'] != rel_str]
+
+    config['files'].append({
+        'path': rel_str,
+        'addedFrom': str(file_path),
+        'addedAt': datetime.now(timezone.utc).isoformat()
+    })
+
+    dest = RCFILES_DIR / rel_str
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(file_path), str(dest))
+
+    save_config(config)
+    print(f"{Colors.GREEN}Added file: {rel_str}{Colors.NC}")
+    print(f"  Synced to: {dest}")
+    return 0
+
+
 def cmd_repo_add(args):
-    """Add a repository to tracking"""
-    repo_path = Path(args.path).resolve()
+    """Add a repository or file to tracking"""
+    target_path = Path(args.path).resolve()
 
-    if not repo_path.exists():
-        print(f"{Colors.RED}[X]{Colors.NC} Directory does not exist: {repo_path}")
+    if not target_path.exists():
+        print(f"{Colors.RED}[X]{Colors.NC} Path does not exist: {target_path}")
         return 1
 
-    git_dir = repo_path / '.git'
+    if target_path.is_file():
+        return _add_tracked_file(target_path)
+
+    git_dir = target_path / '.git'
     if not git_dir.exists():
-        print(f"{Colors.RED}[X]{Colors.NC} Not a git repository: {repo_path}")
+        print(f"{Colors.RED}[X]{Colors.NC} Not a git repository: {target_path}")
         return 1
 
-    remote_url = get_remote_url(repo_path)
+    remote_url = get_remote_url(target_path)
     if not remote_url:
         print(f"{Colors.YELLOW}[WARN]{Colors.NC} No 'origin' remote found")
 
     config = load_config()
     base_path = get_base_path()
-    repo_name = compute_repo_name(repo_path, base_path)
+    repo_name = compute_repo_name(target_path, base_path)
 
     # Remove existing entry if present
     config['repos'] = [r for r in config['repos'] if r['name'] != repo_name]
@@ -188,95 +220,124 @@ def cmd_repo_add(args):
     config['repos'].append({
         'name': repo_name,
         'remoteUrl': remote_url,
+        'addedFrom': str(target_path),
+        'addedAt': datetime.now(timezone.utc).isoformat()
     })
 
     save_config(config)
     print(f"{Colors.GREEN}Added repository: {repo_name}{Colors.NC}")
     print(f"  Remote: {Colors.CYAN}{remote_url}{Colors.NC}")
-    print(f"  Path: {repo_path}")
+    print(f"  Path: {target_path}")
     return 0
 
 def cmd_repo_remove(args):
-    """Remove a repository from tracking"""
+    """Remove a repository or file from tracking"""
     config = load_config()
+    name = args.name
+
     original_count = len(config['repos'])
-    config['repos'] = [r for r in config['repos'] if r['name'] != args.name]
+    config['repos'] = [r for r in config['repos'] if r['name'] != name]
 
-    if len(config['repos']) == original_count:
-        print(f"{Colors.RED}[X]{Colors.NC} Repository '{args.name}' is not tracked")
-        return 1
-
-    save_config(config)
-    print(f"{Colors.GREEN}Removed repository: {args.name}{Colors.NC}")
-    return 0
-
-def cmd_repo_skip(args):
-    """Skip a repository on this machine during sync"""
-    devconfig = os.getenv('DEVCONFIG', '')
-    if not devconfig:
-        print(f"{Colors.RED}[X]{Colors.NC} DEVCONFIG environment variable is not set")
-        return 1
-
-    config = load_config()
-    repo = next((r for r in config['repos'] if r['name'] == args.name), None)
-    if not repo:
-        print(f"{Colors.RED}[X]{Colors.NC} Repository '{args.name}' is not tracked")
-        return 1
-
-    skip_list = repo.get('skipOn', [])
-    if devconfig in skip_list:
-        print(f"{Colors.YELLOW}[OK]{Colors.NC} {args.name} is already skipped on '{devconfig}'")
+    if len(config['repos']) < original_count:
+        save_config(config)
+        print(f"{Colors.GREEN}Removed repository: {name}{Colors.NC}")
         return 0
 
-    if 'skipOn' not in repo:
-        repo['skipOn'] = []
-    repo['skipOn'].append(devconfig)
-    save_config(config)
-    print(f"{Colors.GREEN}[OK]{Colors.NC} {args.name} will be skipped on '{devconfig}'")
-    return 0
+    files = config.get('files', [])
+    original_count = len(files)
+    config['files'] = [f for f in files if f['path'] != name]
 
-def cmd_repo_json(args):
-    """Print the path to repos.json"""
-    print(CONFIG_FILE)
+    if len(config.get('files', [])) < original_count:
+        rcfile = RCFILES_DIR / name
+        if rcfile.exists():
+            rcfile.unlink()
+        save_config(config)
+        print(f"{Colors.GREEN}Removed file: {name}{Colors.NC}")
+        return 0
+
+    print(f"{Colors.RED}[X]{Colors.NC} '{name}' is not tracked")
+    return 1
+
+def cmd_repo_list(args):
+    """List all tracked repositories"""
+    config = load_config()
+    print(f"{Colors.BLUE}Tracked Repositories:{Colors.NC}")
+    print("-" * 60)
+
+    if not config['repos']:
+        print(f"{Colors.YELLOW}[WARN]{Colors.NC} No repositories tracked yet.")
+        print("Use 'dev repo add <path>' to add a repository.")
+        return 0
+
+    for repo in sorted(config['repos'], key=lambda r: r['name']):
+        print(f"  {repo['name']}")
+        print(f"    Remote: {repo.get('remoteUrl', 'N/A')}")
+        print(f"    Added: {repo.get('addedAt', 'Unknown')}")
+        print()
+
+    print("-" * 60)
+    print(f"Total: {Colors.GREEN}{len(config['repos'])}{Colors.NC} repositories")
+
+    files = _get_all_tracked_files()
+    if files:
+        print(f"\n{Colors.BLUE}Tracked Files:{Colors.NC}")
+        print("-" * 60)
+        for f in sorted(files, key=lambda x: x['path']):
+            print(f"  {f['path']}")
+        print("-" * 60)
+        print(f"Total: {Colors.GREEN}{len(files)}{Colors.NC} files")
+
     return 0
 
 def sync_rcfiles():
-    """Sync rcfiles (dev_scripts config) via commit-fetch-rebase-push."""
+    """Sync rcfiles (dev_scripts config) - simple strategy to avoid conflicts.
+    
+    Strategy: Commit local changes first, then fetch remote. If behind, 
+    rebase local commits on top of remote. This preserves local changes.
+    """
     print(f"{Colors.BLUE}Syncing rcfiles (dev_scripts)...{Colors.NC}")
-
+    
+    # Add and commit any local changes first (before fetching)
     run_git(SCRIPT_DIR, 'add', '-A')
     _, status = run_git(SCRIPT_DIR, 'status', '--porcelain')
     if status:
         run_git(SCRIPT_DIR, 'commit', '-m', 'Auto-sync local changes')
-
+    
+    # Fetch latest from remote
     success, _ = run_git(SCRIPT_DIR, 'fetch', 'origin')
     if not success:
         print(f"{Colors.YELLOW}[WARN]{Colors.NC} Could not fetch from remote")
         return
-
+    
+    # Get the default branch
     default_branch = get_default_branch(SCRIPT_DIR) or 'main'
-
+    
+    # Check if we're ahead/behind
     _, ahead_behind = run_git(SCRIPT_DIR, 'rev-list', '--left-right', '--count', f'HEAD...origin/{default_branch}')
+    
     try:
         ahead, behind = ahead_behind.split()
         ahead, behind = int(ahead), int(behind)
     except:
         ahead, behind = 0, 0
-
+    
+    # If behind, rebase first
     if behind > 0:
         success, output = run_git(SCRIPT_DIR, 'rebase', f'origin/{default_branch}')
         if not success:
             run_git(SCRIPT_DIR, 'rebase', '--abort')
             print(f"{Colors.RED}[X]{Colors.NC} Rebase conflict in rcfiles. Please resolve manually.")
             return
-
+    
+    # Re-check ahead count after potential rebase
     _, ahead_behind = run_git(SCRIPT_DIR, 'rev-list', '--left-right', '--count', f'HEAD...origin/{default_branch}')
     try:
         ahead, _ = ahead_behind.split()
         ahead = int(ahead)
     except:
         ahead = 0
-
+    
+    # Push if we have local commits
     if ahead > 0:
         success, output = run_git(SCRIPT_DIR, 'push')
         if success:
@@ -291,29 +352,15 @@ def cmd_repo_sync(args):
     """Clone missing repositories and check for stale branches"""
     config = load_config()
     base_path = Path(get_base_path())
+    
+    # Migrate legacy flat files (copilot-instructions.md, CLAUDE.md) into rcfiles/
+    _migrate_legacy_rcfiles()
 
-    copilot_updated_from_workspace = merge_copilot_instructions_to_repoconfig(base_path)
-    claude_updated_from_workspace = merge_claude_instructions_to_repoconfig(base_path)
+    # Merge all tracked files from workspace to repoconfig (before push)
+    files_updated_from_workspace = merge_tracked_files_to_repoconfig(base_path)
 
+    # Now sync rcfiles (pull, commit local changes including instructions, push)
     sync_rcfiles()
-
-    copilot_updated_from_remote = apply_copilot_instructions_to_workspace(base_path)
-    claude_updated_from_remote = apply_claude_instructions_to_workspace(base_path)
-
-    if copilot_updated_from_workspace:
-        print(f"{Colors.GREEN}[OK]{Colors.NC} Copilot instructions updated from workspace")
-    elif copilot_updated_from_remote:
-        print(f"{Colors.GREEN}[OK]{Colors.NC} Copilot instructions updated from remote")
-    else:
-        print(f"{Colors.GREEN}[OK]{Colors.NC} Copilot instructions up to date")
-
-    if claude_updated_from_workspace:
-        print(f"{Colors.GREEN}[OK]{Colors.NC} Claude instructions updated from workspace")
-    elif claude_updated_from_remote:
-        print(f"{Colors.GREEN}[OK]{Colors.NC} Claude instructions updated from remote")
-    else:
-        print(f"{Colors.GREEN}[OK]{Colors.NC} Claude instructions up to date")
-
     print()
 
     print(f"{Colors.BLUE}Syncing repositories to: {base_path}{Colors.NC}")
@@ -331,6 +378,7 @@ def cmd_repo_sync(args):
     for repo in sorted(config['repos'], key=lambda r: r['name']):
         name = repo['name']
         url = repo.get('remoteUrl', '')
+        # Handle nested paths like platform/src
         target_path = base_path / name.replace('/', os.sep)
 
         if target_path.exists():
@@ -344,45 +392,38 @@ def cmd_repo_sync(args):
             failed += 1
             continue
 
+        # Check if this repo was previously declined on this machine
         devconfig = os.getenv('DEVCONFIG', '')
         skip_list = repo.get('skipOn', [])
         if devconfig and devconfig in skip_list:
-            print(f"{Colors.GREEN}[SKIP]{Colors.NC} {name}")
+            print(f"{Colors.CYAN}[SKIP]{Colors.NC} {name} (declined on {devconfig})")
             skipped += 1
             continue
 
+        # Prompt user before cloning a new repo
         try:
             response = input(f"{Colors.YELLOW}[NEW]{Colors.NC} {name} is not set up. Clone it? [y/N] ").strip().lower()
         except EOFError:
             response = 'n'
 
         if response != 'y':
+            # Remember the decision for this machine
             if devconfig:
                 if 'skipOn' not in repo:
                     repo['skipOn'] = []
                 if devconfig not in repo['skipOn']:
                     repo['skipOn'].append(devconfig)
                     config_changed = True
-            print(f"{Colors.GREEN}[SKIP]{Colors.NC} {name}")
+            print(f"{Colors.CYAN}[SKIP]{Colors.NC} {name}")
             skipped += 1
             continue
 
+        # Create parent directory if needed (for nested repos)
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         print(f"{Colors.BLUE}[DOWN] Cloning {name}...{Colors.NC}")
-        env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
-        result = subprocess.run(['git', 'clone', url, str(target_path)], env=env)
-        if result.returncode != 0 and _is_ado_url(url):
-            pat = get_ado_pat()
-            if pat:
-                print(f"{Colors.YELLOW}  Retrying with ADO PAT...{Colors.NC}")
-                if target_path.exists():
-                    shutil.rmtree(target_path)
-                auth_url = _embed_pat_in_url(url, pat)
-                result = subprocess.run(['git', 'clone', auth_url, str(target_path)], env=env)
+        result = subprocess.run(['git', 'clone', url, str(target_path)])
         if result.returncode == 0:
-            subprocess.run(['git', '-C', str(target_path), 'remote', 'set-url', 'origin', url],
-                           capture_output=True)
             print(f"{Colors.GREEN}[OK] Cloned {name}{Colors.NC}")
             synced += 1
         else:
@@ -393,138 +434,204 @@ def cmd_repo_sync(args):
         save_config(config)
 
     print("-" * 60)
+    # Only colorize non-zero counts
     synced_str = f"{Colors.GREEN}{synced}{Colors.NC}" if synced > 0 else str(synced)
     skipped_str = f"{Colors.CYAN}{skipped}{Colors.NC}" if skipped > 0 else str(skipped)
     failed_str = f"{Colors.RED}{failed}{Colors.NC}" if failed > 0 else str(failed)
     print(f"Synced: {synced_str} | Skipped: {skipped_str} | Failed: {failed_str}")
 
+    # Apply all tracked files from repoconfig to workspace (after pull)
+    files_updated_from_remote = apply_tracked_files_to_workspace(base_path)
+
+    # Show sync status
+    n_files = len(_get_all_tracked_files())
+    if files_updated_from_workspace:
+        print(f"{Colors.GREEN}[OK]{Colors.NC} Tracked files updated from workspace ({n_files} files)")
+    elif files_updated_from_remote:
+        print(f"{Colors.GREEN}[OK]{Colors.NC} Tracked files updated from remote ({n_files} files)")
+    else:
+        print(f"{Colors.GREEN}[OK]{Colors.NC} Tracked files up to date ({n_files} files)")
+
     return 0
 
 
 def has_real_conflict_markers(content):
-    """Check for real git conflict markers (not in code blocks or inline code)."""
+    """Check for real git conflict markers (at start of line, not in examples).
+    
+    Real conflicts have markers at the start of a line like:
+    <<<<<<< branch
+    =======
+    >>>>>>> branch
+    
+    This avoids false positives from example text like `<<<<<<<` in backticks.
+    """
     import re
+    # Match conflict markers at start of line (not preceded by backtick or in code block)
+    # Real markers: <<<<<<< followed by space/text, ======= alone, >>>>>>> followed by space/text
     lines = content.split('\n')
     in_code_block = False
-
+    
     for line in lines:
         stripped = line.strip()
+        # Track code blocks
         if stripped.startswith('```'):
             in_code_block = not in_code_block
             continue
-
+        
         if in_code_block:
             continue
-
+            
+        # Check for conflict markers at start of line (allowing leading whitespace)
+        # But skip if the line contains backticks (inline code examples)
         if '`' in line:
             continue
-
+            
         if re.match(r'^<{7}\s', line) or re.match(r'^={7}\s*$', line) or re.match(r'^>{7}\s', line):
             return True
-
+    
     return False
 
 
-def merge_copilot_instructions_to_repoconfig(base_path):
-    """Copy workspace copilot instructions to repoconfig (before rcfiles push)."""
-    copilot_src = CONFIG_DIR / 'copilot-instructions.md'
-    copilot_dest = base_path / '.github' / 'copilot-instructions.md'
+BUILTIN_FILES = [
+    {'path': '.github/copilot-instructions.md'},
+    {'path': '.claude/CLAUDE.md'},
+]
 
-    if not copilot_dest.exists():
+def _get_all_tracked_files():
+    """Return combined list of built-in + user-tracked file paths."""
+    config = load_config()
+    user_paths = {f['path'] for f in config.get('files', [])}
+    all_files = list(BUILTIN_FILES)
+    for f in config.get('files', []):
+        if f['path'] not in {b['path'] for b in BUILTIN_FILES}:
+            all_files.append(f)
+    return all_files
+
+
+def _migrate_legacy_rcfiles():
+    """Move legacy flat repoconfig files (copilot-instructions.md, CLAUDE.md) into rcfiles/."""
+    migrations = [
+        (CONFIG_DIR / 'copilot-instructions.md', RCFILES_DIR / '.github' / 'copilot-instructions.md'),
+        (CONFIG_DIR / 'CLAUDE.md', RCFILES_DIR / '.claude' / 'CLAUDE.md'),
+    ]
+    for old, new in migrations:
+        if old.exists() and not new.exists():
+            new.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(old), str(new))
+
+
+def merge_tracked_files_to_repoconfig(base_path):
+    """Copy tracked workspace files to repoconfig/rcfiles/ before push."""
+    all_files = _get_all_tracked_files()
+    if not all_files:
         return False
 
-    dest_content = copilot_dest.read_text(encoding='utf-8')
+    changed = False
+    base = Path(base_path)
 
-    if has_real_conflict_markers(dest_content):
-        print(f"{Colors.YELLOW}[WARN]{Colors.NC} Workspace copilot-instructions.md has conflict markers")
-        print("  Please resolve them first, then run 'dev repo sync' again")
+    for entry in all_files:
+        rel_path = entry['path']
+        workspace_file = base / rel_path.replace('/', os.sep)
+        rcfile = RCFILES_DIR / rel_path
+
+        if not workspace_file.exists():
+            continue
+
+        # Conflict marker check for markdown files
+        if rel_path.endswith('.md'):
+            content = workspace_file.read_text(encoding='utf-8')
+            if has_real_conflict_markers(content):
+                print(f"{Colors.YELLOW}[WARN]{Colors.NC} {rel_path} has conflict markers, skipping")
+                print("  Please resolve them first, then run 'dev repo sync' again")
+                continue
+
+        workspace_content = workspace_file.read_bytes()
+        rcfile_content = rcfile.read_bytes() if rcfile.exists() else b''
+
+        if workspace_content != rcfile_content:
+            rcfile.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(workspace_file), str(rcfile))
+            changed = True
+
+    return changed
+
+
+def apply_tracked_files_to_workspace(base_path):
+    """Copy tracked files from repoconfig/rcfiles/ to workspace after pull."""
+    all_files = _get_all_tracked_files()
+    if not all_files:
         return False
 
-    src_content = copilot_src.read_text(encoding='utf-8') if copilot_src.exists() else ''
+    changed = False
+    base = Path(base_path)
 
-    if src_content.replace('\r\n', '\n') == dest_content.replace('\r\n', '\n'):
-        return False
+    for entry in all_files:
+        rel_path = entry['path']
+        workspace_file = base / rel_path.replace('/', os.sep)
+        rcfile = RCFILES_DIR / rel_path
 
-    copilot_src.write_text(dest_content, encoding='utf-8')
-    return True
+        if not rcfile.exists():
+            continue
 
+        # Conflict marker check for markdown files
+        if rel_path.endswith('.md'):
+            content = rcfile.read_text(encoding='utf-8')
+            if has_real_conflict_markers(content):
+                print(f"{Colors.YELLOW}[CONFLICT]{Colors.NC} {rel_path} has merge conflicts in repoconfig")
+                print(f"  File: {rcfile}")
+                print("  Please resolve, then run 'dev repo sync' again")
+                continue
 
-def apply_copilot_instructions_to_workspace(base_path):
-    """Apply repoconfig copilot instructions to workspace (after rcfiles pull)."""
-    copilot_src = CONFIG_DIR / 'copilot-instructions.md'
-    copilot_dest = base_path / '.github' / 'copilot-instructions.md'
+        rcfile_content = rcfile.read_bytes()
+        workspace_content = workspace_file.read_bytes() if workspace_file.exists() else b''
 
-    copilot_dest.parent.mkdir(parents=True, exist_ok=True)
+        if rcfile_content != workspace_content:
+            workspace_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(rcfile), str(workspace_file))
+            changed = True
 
-    if not copilot_src.exists():
-        return False
-
-    src_content = copilot_src.read_text(encoding='utf-8')
-
-    if has_real_conflict_markers(src_content):
-        print(f"{Colors.YELLOW}[CONFLICT]{Colors.NC} Copilot instructions have merge conflicts in repoconfig")
-        print(f"  File: {copilot_src}")
-        print("  Please resolve, then run 'dev repo sync' again")
-        return False
-
-    dest_content = copilot_dest.read_text(encoding='utf-8') if copilot_dest.exists() else ''
-
-    if src_content.replace('\r\n', '\n') == dest_content.replace('\r\n', '\n'):
-        return False
-
-    copilot_dest.write_text(src_content, encoding='utf-8')
-    return True
+    return changed
 
 
-def merge_claude_instructions_to_repoconfig(base_path):
-    """Copy workspace Claude instructions to repoconfig (before rcfiles push)."""
-    claude_src = CONFIG_DIR / 'CLAUDE.md'
-    claude_dest = base_path / '.claude' / 'CLAUDE.md'
+def cmd_repo_status(args):
+    """Show which repos exist on this machine"""
+    config = load_config()
+    base_path = Path(get_base_path())
 
-    if not claude_dest.exists():
-        return False
+    print(f"{Colors.BLUE}Repository Status (base: {base_path}){Colors.NC}")
+    print("-" * 60)
 
-    dest_content = claude_dest.read_text(encoding='utf-8')
+    present = missing = 0
+    for repo in sorted(config['repos'], key=lambda r: r['name']):
+        # Handle nested paths like platform/src
+        target_path = base_path / repo['name'].replace('/', os.sep)
+        if target_path.exists():
+            print(f"{Colors.GREEN}[OK]{Colors.NC} {repo['name']}")
+            present += 1
+        else:
+            print(f"{Colors.RED}[X]{Colors.NC} {repo['name']} {Colors.YELLOW}(missing){Colors.NC}")
+            missing += 1
 
-    if has_real_conflict_markers(dest_content):
-        print(f"{Colors.YELLOW}[WARN]{Colors.NC} Workspace CLAUDE.md has conflict markers")
-        print("  Please resolve them first, then run 'dev repo sync' again")
-        return False
+    print("-" * 60)
+    print(f"Present: {Colors.GREEN}{present}{Colors.NC} | Missing: {Colors.RED}{missing}{Colors.NC}")
 
-    src_content = claude_src.read_text(encoding='utf-8') if claude_src.exists() else ''
+    files = _get_all_tracked_files()
+    if files:
+        print(f"\n{Colors.BLUE}Tracked Files:{Colors.NC}")
+        print("-" * 60)
+        f_present = f_missing = 0
+        for f in sorted(files, key=lambda x: x['path']):
+            workspace_file = base_path / f['path'].replace('/', os.sep)
+            if workspace_file.exists():
+                print(f"{Colors.GREEN}[OK]{Colors.NC} {f['path']}")
+                f_present += 1
+            else:
+                print(f"{Colors.RED}[X]{Colors.NC} {f['path']} {Colors.YELLOW}(missing){Colors.NC}")
+                f_missing += 1
+        print("-" * 60)
+        print(f"Present: {Colors.GREEN}{f_present}{Colors.NC} | Missing: {Colors.RED}{f_missing}{Colors.NC}")
 
-    if src_content.replace('\r\n', '\n') == dest_content.replace('\r\n', '\n'):
-        return False
-
-    claude_src.write_text(dest_content, encoding='utf-8')
-    return True
-
-
-def apply_claude_instructions_to_workspace(base_path):
-    """Apply repoconfig Claude instructions to workspace (after rcfiles pull)."""
-    claude_src = CONFIG_DIR / 'CLAUDE.md'
-    claude_dest = base_path / '.claude' / 'CLAUDE.md'
-
-    claude_dest.parent.mkdir(parents=True, exist_ok=True)
-
-    if not claude_src.exists():
-        return False
-
-    src_content = claude_src.read_text(encoding='utf-8')
-
-    if has_real_conflict_markers(src_content):
-        print(f"{Colors.YELLOW}[CONFLICT]{Colors.NC} Claude instructions have merge conflicts in repoconfig")
-        print(f"  File: {claude_src}")
-        print("  Please resolve, then run 'dev repo sync' again")
-        return False
-
-    dest_content = claude_dest.read_text(encoding='utf-8') if claude_dest.exists() else ''
-
-    if src_content.replace('\r\n', '\n') == dest_content.replace('\r\n', '\n'):
-        return False
-
-    claude_dest.write_text(src_content, encoding='utf-8')
-    return True
+    return 0
 
 
 # ============ PYTHON COMMANDS ============
@@ -546,64 +653,6 @@ def get_current_python_version():
     except Exception:
         return None
 
-def cmd_python_list(args):
-    """List installed Python versions"""
-    os_type = get_os_type()
-    found = []
-
-    if os_type == 'windows':
-        # Use py launcher to list versions
-        try:
-            result = subprocess.run(['py', '--list'], capture_output=True, text=True)
-            if result.returncode == 0 and result.stdout.strip():
-                print(result.stdout.strip())
-                return 0
-        except FileNotFoundError:
-            pass
-        # Fallback: check common names
-        for name in ['python3', 'python']:
-            path = shutil.which(name)
-            if path:
-                try:
-                    r = subprocess.run([path, '--version'], capture_output=True, text=True)
-                    if r.returncode == 0:
-                        found.append((r.stdout.strip(), path))
-                except Exception:
-                    pass
-    else:
-        # Find all python3* executables on PATH
-        seen = set()
-        for directory in os.environ.get('PATH', '').split(os.pathsep):
-            try:
-                entries = os.listdir(directory)
-            except OSError:
-                continue
-            for entry in sorted(entries):
-                if not (entry == 'python3' or (entry.startswith('python3.') and not entry.endswith('-config'))):
-                    continue
-                full = os.path.join(directory, entry)
-                if not os.path.isfile(full) or not os.access(full, os.X_OK):
-                    continue
-                real = os.path.realpath(full)
-                if real in seen:
-                    continue
-                seen.add(real)
-                try:
-                    r = subprocess.run([full, '--version'], capture_output=True, text=True, timeout=5)
-                    if r.returncode == 0:
-                        found.append((r.stdout.strip(), full))
-                except Exception:
-                    pass
-
-    if not found:
-        print(f"{Colors.YELLOW}No Python installations found{Colors.NC}")
-        return 1
-
-    for version, path in found:
-        print(f"  {Colors.CYAN}{version}{Colors.NC}  {path}")
-    return 0
-
-
 def cmd_python_update(args):
     """Update Python to the latest stable version"""
     os_type = get_os_type()
@@ -615,12 +664,13 @@ def cmd_python_update(args):
 
     if os_type == 'windows':
         print(f'{Colors.BLUE}Updating Python via winget...{Colors.NC}')
-        result = subprocess.run(['winget', 'upgrade', 'Python.Python.3.12'],
+        # Capture output to detect "no upgrade available"
+        result = subprocess.run(['winget', 'upgrade', 'Python.Python.3.12'], 
                                capture_output=True, text=True)
         if 'No available upgrade found' in result.stdout or 'No installed package found' in result.stdout:
             if 'No installed package found' in result.stdout:
                 print(f'{Colors.YELLOW}Not installed, installing...{Colors.NC}')
-                result = subprocess.run(['winget', 'install', 'Python.Python.3.12',
+                result = subprocess.run(['winget', 'install', 'Python.Python.3.12', 
                                         '--accept-package-agreements', '--accept-source-agreements'])
                 if result.returncode == 0:
                     print(f'{Colors.GREEN}Python installed successfully{Colors.NC}')
@@ -660,7 +710,7 @@ def cmd_test(args):
     if not test_file.exists():
         print(f"{Colors.RED}[X]{Colors.NC} test_dev.py not found")
         return 1
-
+    
     print(f"{Colors.BLUE}Running tests...{Colors.NC}")
     result = subprocess.run([sys.executable, str(test_file)], cwd=str(SCRIPT_DIR))
     return result.returncode
@@ -687,17 +737,17 @@ def cmd_ado_set_pat(args):
         except EOFError:
             print(f"{Colors.RED}[X]{Colors.NC} No PAT provided")
             return 1
-
+    
     if not pat:
         print(f"{Colors.RED}[X]{Colors.NC} PAT cannot be empty")
         return 1
-
+    
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     ADO_PAT_FILE.write_text(pat)
     # Set file permissions to owner-only on Unix
     if sys.platform != 'win32':
         os.chmod(ADO_PAT_FILE, 0o600)
-
+    
     print(f"{Colors.GREEN}[OK] ADO PAT saved to {ADO_PAT_FILE}{Colors.NC}")
     print(f"     {Colors.YELLOW}Note: Keep this file secure and do not commit it.{Colors.NC}")
     return 0
@@ -732,32 +782,32 @@ def main():
     repo_parser = subparsers.add_parser('repo', help='Manage tracked repositories')
     repo_sub = repo_parser.add_subparsers(dest='repo_command')
 
-    add_p = repo_sub.add_parser('add', help='Add a repository to tracking')
-    add_p.add_argument('path', help='Path to the repository')
+    add_p = repo_sub.add_parser('add', help='Add a repository or file to tracking')
+    add_p.add_argument('path', help='Path to a repository or file')
 
-    remove_p = repo_sub.add_parser('remove', help='Remove a repository from tracking')
-    remove_p.add_argument('name', help='Name of the repository')
+    remove_p = repo_sub.add_parser('remove', help='Remove a repository or file from tracking')
+    remove_p.add_argument('name', help='Name of the repository or file path')
 
+    repo_sub.add_parser('list', help='List all tracked repositories')
     repo_sub.add_parser('sync', help='Clone missing repositories')
+    repo_sub.add_parser('status', help='Show repo status on this machine')
 
-    skip_p = repo_sub.add_parser('skip', help='Skip a repo on this machine during sync')
-    skip_p.add_argument('name', help='Name of the repository to skip')
+    scan_p = repo_sub.add_parser('scan', help='Scan and add all git repos')
+    scan_p.add_argument('path', nargs='?', help='Path to scan')
 
-    repo_sub.add_parser('json', help='Print path to repos.json')
 
     # python subcommand
     pyenv_parser = subparsers.add_parser('python', help='Python environment management')
     pyenv_sub = pyenv_parser.add_subparsers(dest='python_command')
-    pyenv_sub.add_parser('list', help='List installed Python versions')
     pyenv_sub.add_parser('update', help='Update Python to latest stable version')
 
     # ado subcommand
     ado_parser = subparsers.add_parser('ado', help='Azure DevOps integration')
     ado_sub = ado_parser.add_subparsers(dest='ado_command')
-
+    
     set_pat_p = ado_sub.add_parser('set-pat', help='Set Azure DevOps PAT')
     set_pat_p.add_argument('pat', nargs='?', help='PAT value (will prompt if not provided)')
-
+    
     ado_sub.add_parser('show-pat', help='Show if PAT is configured')
     ado_sub.add_parser('clear-pat', help='Clear stored PAT')
 
@@ -771,8 +821,6 @@ def main():
     elif args.command == 'python':
         if args.python_command == 'update':
             return cmd_python_update(args)
-        elif args.python_command == 'list':
-            return cmd_python_list(args)
         else:
             pyenv_parser.print_help()
     elif args.command == 'ado':
@@ -789,9 +837,9 @@ def main():
         cmd_map = {
             'add': cmd_repo_add,
             'remove': cmd_repo_remove,
+            'list': cmd_repo_list,
             'sync': cmd_repo_sync,
-            'skip': cmd_repo_skip,
-            'json': cmd_repo_json,
+            'status': cmd_repo_status,
         }
         if args.repo_command in cmd_map:
             return cmd_map[args.repo_command](args)
@@ -804,3 +852,5 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+
+
