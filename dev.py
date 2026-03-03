@@ -10,6 +10,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -773,6 +774,42 @@ def cmd_ado_clear_pat(args):
         print(f"{Colors.YELLOW}No ADO PAT was configured{Colors.NC}")
     return 0
 
+def cmd_ado_git(args):
+    """Run a git command with ADO PAT authentication."""
+    pat = get_ado_pat()
+    if not pat:
+        print(f"{Colors.RED}[X]{Colors.NC} No ADO PAT configured. Run: dev ado set-pat")
+        return 1
+
+    git_args = args.git_args
+    if git_args and git_args[0] == '--':
+        git_args = git_args[1:]
+    if not git_args:
+        print(f"Usage: dev ado git <git-command> [args...]")
+        print(f"Example: dev ado git pull")
+        return 1
+
+    helper_script = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as f:
+            f.write('#!/bin/sh\n'
+                    'cat > /dev/null\n'
+                    'printf "password=%s\\n" "$ADO_PAT"\n')
+            helper_script = f.name
+        os.chmod(helper_script, 0o700)
+
+        env = {**os.environ, 'ADO_PAT': pat}
+        result = subprocess.run(
+            ['git', '-c', 'credential.helper=',
+             '-c', 'credential.helper=store',
+             '-c', f'credential.helper={helper_script}'] + git_args,
+            env=env
+        )
+        return result.returncode
+    finally:
+        if helper_script and os.path.exists(helper_script):
+            os.unlink(helper_script)
+
 
 def main():
     parser = argparse.ArgumentParser(description='Dev CLI - Development workflow tool')
@@ -811,6 +848,9 @@ def main():
     ado_sub.add_parser('show-pat', help='Show if PAT is configured')
     ado_sub.add_parser('clear-pat', help='Clear stored PAT')
 
+    git_p = ado_sub.add_parser('git', help='Run git with ADO PAT auth')
+    git_p.add_argument('git_args', nargs=argparse.REMAINDER, help='Git command and arguments')
+
     # Test command
     subparsers.add_parser('test', help='Run dev.py unit tests')
 
@@ -828,6 +868,7 @@ def main():
             'set-pat': cmd_ado_set_pat,
             'show-pat': cmd_ado_show_pat,
             'clear-pat': cmd_ado_clear_pat,
+            'git': cmd_ado_git,
         }
         if args.ado_command in cmd_map:
             return cmd_map[args.ado_command](args)

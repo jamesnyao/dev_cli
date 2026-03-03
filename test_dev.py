@@ -8,9 +8,12 @@ Or: python3 -m pytest test_dev.py -v
 
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
+import argparse
 from pathlib import Path
 from unittest.mock import patch
 
@@ -506,6 +509,86 @@ class TestAddTrackedFile(unittest.TestCase):
 
         result = dev._add_tracked_file(outside)
         self.assertEqual(result, 1)
+
+
+class TestAdoGit(unittest.TestCase):
+    """Test ado git command."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.orig_pat_file = dev.ADO_PAT_FILE
+        dev.ADO_PAT_FILE = Path(self.temp_dir) / 'ado_pat.txt'
+
+    def tearDown(self):
+        dev.ADO_PAT_FILE = self.orig_pat_file
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_no_pat_returns_error(self):
+        args = argparse.Namespace(git_args=['pull'])
+        result = dev.cmd_ado_git(args)
+        self.assertEqual(result, 1)
+
+    def test_no_git_args_returns_error(self):
+        dev.ADO_PAT_FILE.write_text('test-pat')
+        args = argparse.Namespace(git_args=[])
+        result = dev.cmd_ado_git(args)
+        self.assertEqual(result, 1)
+
+    def test_strips_leading_doubledash(self):
+        dev.ADO_PAT_FILE.write_text('test-pat')
+        args = argparse.Namespace(git_args=['--'])
+        result = dev.cmd_ado_git(args)
+        self.assertEqual(result, 1)
+
+    @patch('subprocess.run')
+    def test_runs_git_with_credential_helper(self, mock_run):
+        dev.ADO_PAT_FILE.write_text('test-pat-value')
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
+        args = argparse.Namespace(git_args=['pull'])
+        result = dev.cmd_ado_git(args)
+        self.assertEqual(result, 0)
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args[0][0]
+        self.assertEqual(call_args[0], 'git')
+        self.assertIn('credential.helper=', call_args)
+        self.assertIn('credential.helper=store', call_args)
+        self.assertIn('pull', call_args)
+        call_env = mock_run.call_args[1]['env']
+        self.assertEqual(call_env['ADO_PAT'], 'test-pat-value')
+
+    @patch('subprocess.run')
+    def test_cleans_up_temp_file(self, mock_run):
+        dev.ADO_PAT_FILE.write_text('test-pat-value')
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
+        args = argparse.Namespace(git_args=['fetch'])
+        dev.cmd_ado_git(args)
+        call_args = mock_run.call_args[0][0]
+        helper_arg = [a for a in call_args if a.startswith('credential.helper=/')]
+        self.assertEqual(len(helper_arg), 1)
+        helper_path = helper_arg[0].split('=', 1)[1]
+        self.assertFalse(os.path.exists(helper_path))
+
+    @patch('subprocess.run')
+    def test_passes_extra_git_args(self, mock_run):
+        dev.ADO_PAT_FILE.write_text('test-pat-value')
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
+        args = argparse.Namespace(git_args=['pull', '--rebase'])
+        result = dev.cmd_ado_git(args)
+        self.assertEqual(result, 0)
+        call_args = mock_run.call_args[0][0]
+        self.assertIn('pull', call_args)
+        self.assertIn('--rebase', call_args)
+
+    @patch('subprocess.run')
+    def test_clone_with_url(self, mock_run):
+        dev.ADO_PAT_FILE.write_text('test-pat-value')
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
+        args = argparse.Namespace(git_args=['clone', 'https://dev.azure.com/org/proj/_git/repo'])
+        result = dev.cmd_ado_git(args)
+        self.assertEqual(result, 0)
+        call_args = mock_run.call_args[0][0]
+        self.assertIn('clone', call_args)
+        self.assertIn('https://dev.azure.com/org/proj/_git/repo', call_args)
 
 
 if __name__ == '__main__':
