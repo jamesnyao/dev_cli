@@ -362,6 +362,20 @@ def cmd_repo_sync(args):
 
     # Now sync rcfiles (pull, commit local changes including instructions, push)
     sync_rcfiles()
+
+    # Apply all tracked files from repoconfig to workspace (after pull)
+    files_updated_from_remote = apply_tracked_files_to_workspace(base_path)
+
+    # Show per-file sync status
+    all_files = _get_all_tracked_files()
+    for entry in all_files:
+        rel_path = entry['path']
+        if files_updated_from_workspace:
+            print(f"  {Colors.GREEN}[OK]{Colors.NC} {rel_path} (updated from workspace)")
+        elif files_updated_from_remote:
+            print(f"  {Colors.GREEN}[OK]{Colors.NC} {rel_path} (updated from remote)")
+        else:
+            print(f"  {Colors.GREEN}[OK]{Colors.NC} {rel_path}")
     print()
 
     print(f"{Colors.BLUE}Syncing repositories to: {base_path}{Colors.NC}")
@@ -440,18 +454,6 @@ def cmd_repo_sync(args):
     skipped_str = f"{Colors.CYAN}{skipped}{Colors.NC}" if skipped > 0 else str(skipped)
     failed_str = f"{Colors.RED}{failed}{Colors.NC}" if failed > 0 else str(failed)
     print(f"Synced: {synced_str} | Skipped: {skipped_str} | Failed: {failed_str}")
-
-    # Apply all tracked files from repoconfig to workspace (after pull)
-    files_updated_from_remote = apply_tracked_files_to_workspace(base_path)
-
-    # Show sync status
-    n_files = len(_get_all_tracked_files())
-    if files_updated_from_workspace:
-        print(f"{Colors.GREEN}[OK]{Colors.NC} Tracked files updated from workspace ({n_files} files)")
-    elif files_updated_from_remote:
-        print(f"{Colors.GREEN}[OK]{Colors.NC} Tracked files updated from remote ({n_files} files)")
-    else:
-        print(f"{Colors.GREEN}[OK]{Colors.NC} Tracked files up to date ({n_files} files)")
 
     return 0
 
