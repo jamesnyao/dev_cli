@@ -120,11 +120,11 @@ def check_stale_branch(repo_path, name):
         return
 
     if response == 'y':
-        print(f"  {Colors.BLUE}Switching to {default}...{Colors.NC}")
+        print(f"{Colors.BLUE}Switching to {default}...{Colors.NC}")
         run_git(repo_path, 'fetch', 'origin')
         run_git(repo_path, 'checkout', '-f', default)
         run_git(repo_path, 'reset', '--hard', f'origin/{default}')
-        print(f"  {Colors.GREEN}[OK] Switched to {default}{Colors.NC}")
+        print(f"{Colors.GREEN}[OK] Switched to {default}{Colors.NC}")
 
 def compute_repo_name(repo_path, base_path=None):
     """
@@ -371,11 +371,11 @@ def cmd_repo_sync(args):
     for entry in all_files:
         rel_path = entry['path']
         if files_updated_from_workspace:
-            print(f"  {Colors.GREEN}[OK]{Colors.NC} {rel_path} (updated from workspace)")
+            print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path} (updated from workspace)")
         elif files_updated_from_remote:
-            print(f"  {Colors.GREEN}[OK]{Colors.NC} {rel_path} (updated from remote)")
+            print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path} (updated from remote)")
         else:
-            print(f"  {Colors.GREEN}[OK]{Colors.NC} {rel_path}")
+            print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path}")
     print()
 
     print(f"{Colors.BLUE}Syncing repositories to: {base_path}{Colors.NC}")
