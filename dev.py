@@ -397,7 +397,7 @@ def cmd_repo_sync(args):
         devconfig = os.getenv('DEVCONFIG', '')
         skip_list = repo.get('skipOn', [])
         if devconfig and devconfig in skip_list:
-            print(f"{Colors.CYAN}[SKIP]{Colors.NC} {name} (declined on {devconfig})")
+            print(f"{Colors.GREEN}[SKIP]{Colors.NC} {name} (declined on {devconfig})")
             skipped += 1
             continue
 
@@ -415,7 +415,7 @@ def cmd_repo_sync(args):
                 if devconfig not in repo['skipOn']:
                     repo['skipOn'].append(devconfig)
                     config_changed = True
-            print(f"{Colors.CYAN}[SKIP]{Colors.NC} {name}")
+            print(f"{Colors.GREEN}[SKIP]{Colors.NC} {name}")
             skipped += 1
             continue
 
