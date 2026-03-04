@@ -53,10 +53,9 @@ def get_base_path(config=None):
     dev_path = os.getenv('DEV')
     if dev_path:
         return dev_path
-    raise ValueError('DEV environment variable is missing. Set it to your workspace root (e.g. D:\\dev or /workspace).')
+    raise ValueError('DEV environment variable is missing.')
 
 def run_git(repo_path, *args):
-    """Run git command and return output"""
     try:
         result = subprocess.run(
             ['git', '-C', str(repo_path)] + list(args),
@@ -75,12 +74,9 @@ def get_current_branch(repo_path):
     return branch if success else None
 
 def get_default_branch(repo_path):
-    # Try to get from origin/HEAD
     success, ref = run_git(repo_path, 'symbolic-ref', 'refs/remotes/origin/HEAD')
     if success and ref:
         return ref.replace('refs/remotes/origin/', '')
-
-    # Fallback to common defaults
     for branch in ['main', 'master']:
         success, _ = run_git(repo_path, 'show-ref', '--verify', '--quiet', f'refs/remotes/origin/{branch}')
         if success:
@@ -88,19 +84,16 @@ def get_default_branch(repo_path):
     return None
 
 def get_branch_age_days(repo_path):
-    """Get age of last commit on current branch in days"""
     success, timestamp = run_git(repo_path, 'log', '-1', '--format=%ct')
     if not success or not timestamp:
         return 0
     try:
         commit_time = datetime.fromtimestamp(int(timestamp), tz=timezone.utc)
-        age = datetime.now(timezone.utc) - commit_time
-        return age.days
+        return (datetime.now(timezone.utc) - commit_time).days
     except Exception:
         return 0
 
 def check_stale_branch(repo_path, name):
-    """Check if branch is stale and offer to switch to default"""
     current = get_current_branch(repo_path)
     if not current or current == 'HEAD':
         return
@@ -120,33 +113,25 @@ def check_stale_branch(repo_path, name):
         return
 
     if response == 'y':
-        print(f"{Colors.BLUE}Switching to {default}...{Colors.NC}")
         run_git(repo_path, 'fetch', 'origin')
         run_git(repo_path, 'checkout', '-f', default)
         run_git(repo_path, 'reset', '--hard', f'origin/{default}')
         print(f"{Colors.GREEN}[OK] Switched to {default}{Colors.NC}")
 
 def compute_repo_name(repo_path, base_path=None):
-    """
-    Compute a repo name from path, supporting nested structures like platform/src, cr/toolchain_tools.
-    If the repo is under a known enlistment structure (contains .gclient), use parent/name format.
-    """
+    """Compute repo name, using parent/name format for gclient enlistments."""
     repo_path = Path(repo_path).resolve()
     
-    # Check if parent directory looks like a gclient enlistment (has .gclient file)
     parent = repo_path.parent
     if (parent / '.gclient').exists():
-        # This is a nested repo like platform/src or cr/toolchain_tools
         return f"{parent.name}/{repo_path.name}"
     
-    # Check if this is a top-level repo directly in base_path
     if base_path:
         base_path = Path(base_path).resolve()
         try:
             rel_path = repo_path.relative_to(base_path)
             parts = rel_path.parts
             if len(parts) >= 2:
-                # Check if the intermediate dir is an enlistment
                 intermediate = base_path / parts[0]
                 if (intermediate / '.gclient').exists():
                     return '/'.join(parts[:2])
@@ -168,13 +153,10 @@ def _add_tracked_file(file_path):
         return 1
 
     rel_str = str(rel_path).replace('\\', '/')
-
     config = load_config()
     if 'files' not in config:
         config['files'] = []
-
     config['files'] = [f for f in config['files'] if f['path'] != rel_str]
-
     config['files'].append({
         'path': rel_str,
         'addedFrom': str(file_path),
@@ -192,7 +174,7 @@ def _add_tracked_file(file_path):
 
 
 def cmd_repo_add(args):
-    """Add a repository or file to tracking"""
+    """Add a repository or file to tracking."""
     target_path = Path(args.path).resolve()
 
     if not target_path.exists():
@@ -214,8 +196,6 @@ def cmd_repo_add(args):
     config = load_config()
     base_path = get_base_path()
     repo_name = compute_repo_name(target_path, base_path)
-
-    # Remove existing entry if present
     config['repos'] = [r for r in config['repos'] if r['name'] != repo_name]
 
     config['repos'].append({
@@ -232,7 +212,7 @@ def cmd_repo_add(args):
     return 0
 
 def cmd_repo_remove(args):
-    """Remove a repository or file from tracking"""
+    """Remove a repository or file from tracking."""
     config = load_config()
     name = args.name
 
@@ -260,7 +240,7 @@ def cmd_repo_remove(args):
     return 1
 
 def cmd_repo_list(args):
-    """List all tracked repositories"""
+    """List all tracked repositories and files."""
     config = load_config()
     print(f"{Colors.BLUE}Tracked Repositories:{Colors.NC}")
     print("-" * 60)
@@ -291,29 +271,20 @@ def cmd_repo_list(args):
     return 0
 
 def sync_rcfiles():
-    """Sync rcfiles (dev_scripts config) - simple strategy to avoid conflicts.
-    
-    Strategy: Commit local changes first, then fetch remote. If behind, 
-    rebase local commits on top of remote. This preserves local changes.
-    """
+    """Commit local changes, fetch remote, rebase, and push."""
     print(f"{Colors.BLUE}Syncing rcfiles (dev_scripts)...{Colors.NC}")
     
-    # Add and commit any local changes first (before fetching)
     run_git(SCRIPT_DIR, 'add', '-A')
     _, status = run_git(SCRIPT_DIR, 'status', '--porcelain')
     if status:
         run_git(SCRIPT_DIR, 'commit', '-m', 'Auto-sync local changes')
     
-    # Fetch latest from remote
     success, _ = run_git(SCRIPT_DIR, 'fetch', 'origin')
     if not success:
         print(f"{Colors.YELLOW}[WARN]{Colors.NC} Could not fetch from remote")
         return
     
-    # Get the default branch
     default_branch = get_default_branch(SCRIPT_DIR) or 'main'
-    
-    # Check if we're ahead/behind
     _, ahead_behind = run_git(SCRIPT_DIR, 'rev-list', '--left-right', '--count', f'HEAD...origin/{default_branch}')
     
     try:
@@ -322,7 +293,6 @@ def sync_rcfiles():
     except:
         ahead, behind = 0, 0
     
-    # If behind, rebase first
     if behind > 0:
         success, output = run_git(SCRIPT_DIR, 'rebase', f'origin/{default_branch}')
         if not success:
@@ -330,7 +300,6 @@ def sync_rcfiles():
             print(f"{Colors.RED}[X]{Colors.NC} Rebase conflict in rcfiles. Please resolve manually.")
             return
     
-    # Re-check ahead count after potential rebase
     _, ahead_behind = run_git(SCRIPT_DIR, 'rev-list', '--left-right', '--count', f'HEAD...origin/{default_branch}')
     try:
         ahead, _ = ahead_behind.split()
@@ -338,7 +307,6 @@ def sync_rcfiles():
     except:
         ahead = 0
     
-    # Push if we have local commits
     if ahead > 0:
         success, output = run_git(SCRIPT_DIR, 'push')
         if success:
@@ -350,25 +318,16 @@ def sync_rcfiles():
 
 
 def cmd_repo_sync(args):
-    """Clone missing repositories and check for stale branches"""
+    """Clone missing repositories and sync tracked files."""
     config = load_config()
     base_path = Path(get_base_path())
     
-    # Migrate legacy flat files (copilot-instructions.md, CLAUDE.md) into rcfiles/
     _migrate_legacy_rcfiles()
-
-    # Merge all tracked files from workspace to repoconfig (before push)
     files_updated_from_workspace = merge_tracked_files_to_repoconfig(base_path)
-
-    # Now sync rcfiles (pull, commit local changes including instructions, push)
     sync_rcfiles()
-
-    # Apply all tracked files from repoconfig to workspace (after pull)
     files_updated_from_remote = apply_tracked_files_to_workspace(base_path)
 
-    # Show per-file sync status
-    all_files = _get_all_tracked_files()
-    for entry in all_files:
+    for entry in _get_all_tracked_files():
         rel_path = entry['path']
         if files_updated_from_workspace:
             print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path} (updated from workspace)")
@@ -422,7 +381,6 @@ def cmd_repo_sync(args):
             response = 'n'
 
         if response != 'y':
-            # Remember the decision for this machine
             if devconfig:
                 if 'skipOn' not in repo:
                     repo['skipOn'] = []
@@ -433,7 +391,6 @@ def cmd_repo_sync(args):
             skipped += 1
             continue
 
-        # Create parent directory if needed (for nested repos)
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         print(f"{Colors.BLUE}[DOWN] Cloning {name}...{Colors.NC}")
@@ -449,7 +406,6 @@ def cmd_repo_sync(args):
         save_config(config)
 
     print("-" * 60)
-    # Only colorize non-zero counts
     synced_str = f"{Colors.GREEN}{synced}{Colors.NC}" if synced > 0 else str(synced)
     skipped_str = f"{Colors.CYAN}{skipped}{Colors.NC}" if skipped > 0 else str(skipped)
     failed_str = f"{Colors.RED}{failed}{Colors.NC}" if failed > 0 else str(failed)
@@ -459,36 +415,18 @@ def cmd_repo_sync(args):
 
 
 def has_real_conflict_markers(content):
-    """Check for real git conflict markers (at start of line, not in examples).
-    
-    Real conflicts have markers at the start of a line like:
-    <<<<<<< branch
-    =======
-    >>>>>>> branch
-    
-    This avoids false positives from example text like `<<<<<<<` in backticks.
-    """
+    """Check for conflict markers outside code blocks and inline code."""
     import re
-    # Match conflict markers at start of line (not preceded by backtick or in code block)
-    # Real markers: <<<<<<< followed by space/text, ======= alone, >>>>>>> followed by space/text
     lines = content.split('\n')
     in_code_block = False
     
     for line in lines:
         stripped = line.strip()
-        # Track code blocks
         if stripped.startswith('```'):
             in_code_block = not in_code_block
             continue
-        
-        if in_code_block:
+        if in_code_block or '`' in line:
             continue
-            
-        # Check for conflict markers at start of line (allowing leading whitespace)
-        # But skip if the line contains backticks (inline code examples)
-        if '`' in line:
-            continue
-            
         if re.match(r'^<{7}\s', line) or re.match(r'^={7}\s*$', line) or re.match(r'^>{7}\s', line):
             return True
     
@@ -503,10 +441,10 @@ BUILTIN_FILES = [
 def _get_all_tracked_files():
     """Return combined list of built-in + user-tracked file paths."""
     config = load_config()
-    user_paths = {f['path'] for f in config.get('files', [])}
     all_files = list(BUILTIN_FILES)
+    builtin_paths = {b['path'] for b in BUILTIN_FILES}
     for f in config.get('files', []):
-        if f['path'] not in {b['path'] for b in BUILTIN_FILES}:
+        if f['path'] not in builtin_paths:
             all_files.append(f)
     return all_files
 
@@ -597,7 +535,7 @@ def apply_tracked_files_to_workspace(base_path):
 
 
 def cmd_repo_status(args):
-    """Show which repos exist on this machine"""
+    """Show which repos exist on this machine."""
     config = load_config()
     base_path = Path(get_base_path())
 
@@ -657,7 +595,7 @@ def get_current_python_version():
         return None
 
 def cmd_python_update(args):
-    """Update Python to the latest stable version"""
+    """Update Python to the latest stable version."""
     os_type = get_os_type()
 
     print(f'{Colors.BLUE}Checking Python installation...{Colors.NC}')
@@ -667,7 +605,6 @@ def cmd_python_update(args):
 
     if os_type == 'windows':
         print(f'{Colors.BLUE}Updating Python via winget...{Colors.NC}')
-        # Capture output to detect "no upgrade available"
         result = subprocess.run(['winget', 'upgrade', 'Python.Python.3.12'], 
                                capture_output=True, text=True)
         if 'No available upgrade found' in result.stdout or 'No installed package found' in result.stdout:
@@ -730,7 +667,7 @@ def get_ado_pat():
     return None
 
 def cmd_ado_set_pat(args):
-    """Set the Azure DevOps PAT"""
+    """Set the Azure DevOps PAT."""
     pat = args.pat
     if not pat:
         # Prompt for PAT if not provided
@@ -747,7 +684,6 @@ def cmd_ado_set_pat(args):
     
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     ADO_PAT_FILE.write_text(pat)
-    # Set file permissions to owner-only on Unix
     if sys.platform != 'win32':
         os.chmod(ADO_PAT_FILE, 0o600)
     
@@ -756,7 +692,7 @@ def cmd_ado_set_pat(args):
     return 0
 
 def cmd_ado_show_pat(args):
-    """Show if ADO PAT is configured (not the actual value)"""
+    """Show if ADO PAT is configured."""
     pat = get_ado_pat()
     if pat:
         masked = pat[:4] + '*' * (len(pat) - 8) + pat[-4:] if len(pat) > 8 else '****'
@@ -768,7 +704,7 @@ def cmd_ado_show_pat(args):
     return 0
 
 def cmd_ado_clear_pat(args):
-    """Clear the stored ADO PAT"""
+    """Clear the stored ADO PAT."""
     if ADO_PAT_FILE.exists():
         ADO_PAT_FILE.unlink()
         print(f"{Colors.GREEN}[OK] ADO PAT cleared{Colors.NC}")
