@@ -460,13 +460,38 @@ BUILTIN_FILES = [
     {'path': '.claude/CLAUDE.md'},
 ]
 
-def _get_all_tracked_files():
-    """Return combined list of built-in + user-tracked file paths."""
+BUILTIN_DIRS = [
+    '.github/skills',
+]
+
+def _discover_dir_files(base_path, dir_rel_path):
+    """Discover files under a directory in both workspace and rcfiles."""
+    found = set()
+    ws_dir = Path(base_path) / dir_rel_path.replace('/', os.sep)
+    if ws_dir.is_dir():
+        for f in ws_dir.rglob('*'):
+            if f.is_file():
+                found.add(str(f.relative_to(Path(base_path))).replace(os.sep, '/'))
+    rc_dir = RCFILES_DIR / dir_rel_path
+    if rc_dir.is_dir():
+        for f in rc_dir.rglob('*'):
+            if f.is_file():
+                found.add(str(f.relative_to(RCFILES_DIR)).replace(os.sep, '/'))
+    return [{'path': p} for p in sorted(found)]
+
+def _get_all_tracked_files(base_path=None):
+    """Return combined list of built-in + discovered + user-tracked file paths."""
     config = load_config()
     all_files = list(BUILTIN_FILES)
-    builtin_paths = {b['path'] for b in BUILTIN_FILES}
+    known_paths = {b['path'] for b in BUILTIN_FILES}
+    if base_path:
+        for dir_path in BUILTIN_DIRS:
+            for entry in _discover_dir_files(base_path, dir_path):
+                if entry['path'] not in known_paths:
+                    all_files.append(entry)
+                    known_paths.add(entry['path'])
     for f in config.get('files', []):
-        if f['path'] not in builtin_paths:
+        if f['path'] not in known_paths:
             all_files.append(f)
     return all_files
 
@@ -489,8 +514,8 @@ def sync_tracked_files(base_path):
     Compares workspace file mtime against the rcfile's git commit timestamp.
     The newer version wins. Returns True if any rcfiles were modified.
     """
-    all_files = _get_all_tracked_files()
     base = Path(base_path)
+    all_files = _get_all_tracked_files(base)
     rcfiles_changed = False
 
     for entry in all_files:

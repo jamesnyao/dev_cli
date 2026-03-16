@@ -477,6 +477,136 @@ class TestSyncTrackedFiles(unittest.TestCase):
         result = dev.sync_tracked_files(self.workspace)
         self.assertFalse(result)
 
+    # --- Skill directory discovery & sync tests ---
+
+    def test_discover_dir_files_from_workspace(self):
+        """Skills in workspace are discovered for sync."""
+        skill_dir = self.workspace / '.github' / 'skills' / 'my-skill'
+        skill_dir.mkdir(parents=True)
+        (skill_dir / 'SKILL.md').write_text('skill content')
+
+        files = dev._discover_dir_files(self.workspace, '.github/skills')
+        paths = [f['path'] for f in files]
+        self.assertIn('.github/skills/my-skill/SKILL.md', paths)
+
+    def test_discover_dir_files_from_rcfiles(self):
+        """Skills in rcfiles are discovered for sync."""
+        rc_skill = dev.RCFILES_DIR / '.github' / 'skills' / 'remote-skill'
+        rc_skill.mkdir(parents=True)
+        (rc_skill / 'SKILL.md').write_text('remote skill')
+
+        files = dev._discover_dir_files(self.workspace, '.github/skills')
+        paths = [f['path'] for f in files]
+        self.assertIn('.github/skills/remote-skill/SKILL.md', paths)
+
+    def test_discover_dir_files_merges_both(self):
+        """Skills from workspace and rcfiles are merged (union)."""
+        ws_skill = self.workspace / '.github' / 'skills' / 'local-skill'
+        ws_skill.mkdir(parents=True)
+        (ws_skill / 'SKILL.md').write_text('local')
+
+        rc_skill = dev.RCFILES_DIR / '.github' / 'skills' / 'remote-skill'
+        rc_skill.mkdir(parents=True)
+        (rc_skill / 'SKILL.md').write_text('remote')
+
+        files = dev._discover_dir_files(self.workspace, '.github/skills')
+        paths = [f['path'] for f in files]
+        self.assertIn('.github/skills/local-skill/SKILL.md', paths)
+        self.assertIn('.github/skills/remote-skill/SKILL.md', paths)
+
+    def test_discover_dir_files_empty_when_no_dir(self):
+        """No crash when skills directory doesn't exist."""
+        files = dev._discover_dir_files(self.workspace, '.github/skills')
+        self.assertEqual(files, [])
+
+    def test_get_all_tracked_files_includes_skills(self):
+        """Skills are included in tracked files when base_path is provided."""
+        skill_dir = self.workspace / '.github' / 'skills' / 'my-skill'
+        skill_dir.mkdir(parents=True)
+        (skill_dir / 'SKILL.md').write_text('content')
+
+        all_files = dev._get_all_tracked_files(self.workspace)
+        paths = [f['path'] for f in all_files]
+        self.assertIn('.github/skills/my-skill/SKILL.md', paths)
+        self.assertIn('.github/copilot-instructions.md', paths)
+
+    @patch('dev.get_rcfile_git_timestamp')
+    def test_skill_local_newer_syncs_to_rcfiles(self, mock_ts):
+        """Workspace skill newer than rcfile → copies to rcfiles."""
+        mock_ts.return_value = self.old_time
+        skill_dir = self.workspace / '.github' / 'skills' / 'my-skill'
+        skill_dir.mkdir(parents=True)
+        ws_file = skill_dir / 'SKILL.md'
+        ws_file.write_text('new local skill')
+        self._set_mtime(ws_file, self.new_time)
+        self._setup_rcfile('.github/skills/my-skill/SKILL.md', 'old remote skill')
+
+        result = dev.sync_tracked_files(self.workspace)
+
+        self.assertTrue(result)
+        rcfile = dev.RCFILES_DIR / '.github' / 'skills' / 'my-skill' / 'SKILL.md'
+        self.assertEqual(rcfile.read_text(), 'new local skill')
+
+    @patch('dev.get_rcfile_git_timestamp')
+    def test_skill_remote_newer_syncs_to_workspace(self, mock_ts):
+        """Rcfile skill newer than workspace → copies to workspace."""
+        mock_ts.return_value = self.new_time
+        self._setup_rcfile('.github/skills/my-skill/SKILL.md', 'new remote skill')
+        skill_dir = self.workspace / '.github' / 'skills' / 'my-skill'
+        skill_dir.mkdir(parents=True)
+        ws_file = skill_dir / 'SKILL.md'
+        ws_file.write_text('old local skill')
+        self._set_mtime(ws_file, self.old_time)
+
+        result = dev.sync_tracked_files(self.workspace)
+
+        self.assertFalse(result)
+        self.assertEqual(ws_file.read_text(), 'new remote skill')
+
+    @patch('dev.get_rcfile_git_timestamp')
+    def test_skill_only_in_rcfiles_copies_to_workspace(self, mock_ts):
+        """Skill only in rcfiles → copies to workspace."""
+        mock_ts.return_value = self.new_time
+        self._setup_rcfile('.github/skills/remote-only/SKILL.md', 'remote skill')
+
+        result = dev.sync_tracked_files(self.workspace)
+
+        self.assertFalse(result)
+        ws_file = self.workspace / '.github' / 'skills' / 'remote-only' / 'SKILL.md'
+        self.assertTrue(ws_file.exists())
+        self.assertEqual(ws_file.read_text(), 'remote skill')
+
+    @patch('dev.get_rcfile_git_timestamp')
+    def test_skill_only_in_workspace_copies_to_rcfiles(self, mock_ts):
+        """Skill only in workspace → copies to rcfiles."""
+        mock_ts.return_value = None
+        skill_dir = self.workspace / '.github' / 'skills' / 'local-only'
+        skill_dir.mkdir(parents=True)
+        (skill_dir / 'SKILL.md').write_text('local skill')
+
+        result = dev.sync_tracked_files(self.workspace)
+
+        self.assertTrue(result)
+        rcfile = dev.RCFILES_DIR / '.github' / 'skills' / 'local-only' / 'SKILL.md'
+        self.assertTrue(rcfile.exists())
+        self.assertEqual(rcfile.read_text(), 'local skill')
+
+    @patch('dev.get_rcfile_git_timestamp')
+    def test_multiple_skills_synced(self, mock_ts):
+        """Multiple skills are all discovered and synced."""
+        mock_ts.return_value = None
+        for name in ['skill-a', 'skill-b', 'skill-c']:
+            d = self.workspace / '.github' / 'skills' / name
+            d.mkdir(parents=True)
+            (d / 'SKILL.md').write_text(f'{name} content')
+
+        dev.sync_tracked_files(self.workspace)
+
+        for name in ['skill-a', 'skill-b', 'skill-c']:
+            rcfile = dev.RCFILES_DIR / '.github' / 'skills' / name / 'SKILL.md'
+            self.assertTrue(rcfile.exists())
+            self.assertEqual(rcfile.read_text(), f'{name} content')
+
 
 class TestMigrateLegacyRcfiles(unittest.TestCase):
     """Test migration of legacy flat repoconfig files to rcfiles/"""
