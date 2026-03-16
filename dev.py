@@ -118,6 +118,26 @@ def check_stale_branch(repo_path, name):
         run_git(repo_path, 'reset', '--hard', f'origin/{default}')
         print(f"{Colors.GREEN}[OK] Switched to {default}{Colors.NC}")
 
+def get_rcfile_git_timestamp(rel_path):
+    """Get the author date of the last commit that modified an rcfile."""
+    rcfile_rel = str(Path('repoconfig') / 'rcfiles' / rel_path).replace('\\', '/')
+    success, ts = run_git(SCRIPT_DIR, 'log', '-1', '--format=%aI', '--', rcfile_rel)
+    if success and ts:
+        try:
+            return datetime.fromisoformat(ts)
+        except ValueError:
+            return None
+    return None
+
+def get_file_mtime(file_path):
+    """Get the modification time of a file as a timezone-aware datetime."""
+    try:
+        mtime = file_path.stat().st_mtime
+        return datetime.fromtimestamp(mtime, tz=timezone.utc)
+    except OSError:
+        return None
+
+
 def compute_repo_name(repo_path, base_path=None):
     """Compute repo name, using parent/name format for gclient enlistments."""
     repo_path = Path(repo_path).resolve()
@@ -270,43 +290,54 @@ def cmd_repo_list(args):
 
     return 0
 
-def sync_rcfiles():
-    """Commit local changes, fetch remote, rebase, and push."""
+def sync_rcfiles_pull():
+    """Commit pending changes, fetch remote, and rebase."""
     print(f"{Colors.BLUE}Syncing rcfiles (dev_scripts)...{Colors.NC}")
-    
+
     run_git(SCRIPT_DIR, 'add', '-A')
     _, status = run_git(SCRIPT_DIR, 'status', '--porcelain')
     if status:
         run_git(SCRIPT_DIR, 'commit', '-m', 'Auto-sync local changes')
-    
+
     success, _ = run_git(SCRIPT_DIR, 'fetch', 'origin')
     if not success:
         print(f"{Colors.YELLOW}[WARN]{Colors.NC} Could not fetch from remote")
-        return
-    
+        return False
+
     default_branch = get_default_branch(SCRIPT_DIR) or 'main'
     _, ahead_behind = run_git(SCRIPT_DIR, 'rev-list', '--left-right', '--count', f'HEAD...origin/{default_branch}')
-    
+
     try:
         ahead, behind = ahead_behind.split()
-        ahead, behind = int(ahead), int(behind)
-    except:
-        ahead, behind = 0, 0
-    
+        behind = int(behind)
+    except Exception:
+        behind = 0
+
     if behind > 0:
         success, output = run_git(SCRIPT_DIR, 'rebase', f'origin/{default_branch}')
         if not success:
             run_git(SCRIPT_DIR, 'rebase', '--abort')
             print(f"{Colors.RED}[X]{Colors.NC} Rebase conflict in rcfiles. Please resolve manually.")
-            return
-    
+            return False
+
+    return True
+
+
+def sync_rcfiles_push():
+    """Commit any pending changes and push to remote."""
+    run_git(SCRIPT_DIR, 'add', '-A')
+    _, status = run_git(SCRIPT_DIR, 'status', '--porcelain')
+    if status:
+        run_git(SCRIPT_DIR, 'commit', '-m', 'Auto-sync tracked files')
+
+    default_branch = get_default_branch(SCRIPT_DIR) or 'main'
     _, ahead_behind = run_git(SCRIPT_DIR, 'rev-list', '--left-right', '--count', f'HEAD...origin/{default_branch}')
     try:
         ahead, _ = ahead_behind.split()
         ahead = int(ahead)
-    except:
+    except Exception:
         ahead = 0
-    
+
     if ahead > 0:
         success, output = run_git(SCRIPT_DIR, 'push')
         if success:
@@ -321,20 +352,11 @@ def cmd_repo_sync(args):
     """Clone missing repositories and sync tracked files."""
     config = load_config()
     base_path = Path(get_base_path())
-    
-    _migrate_legacy_rcfiles()
-    files_updated_from_workspace = merge_tracked_files_to_repoconfig(base_path)
-    sync_rcfiles()
-    files_updated_from_remote = apply_tracked_files_to_workspace(base_path)
 
-    for entry in _get_all_tracked_files():
-        rel_path = entry['path']
-        if files_updated_from_workspace:
-            print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path} (updated from workspace)")
-        elif files_updated_from_remote:
-            print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path} (updated from remote)")
-        else:
-            print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path}")
+    _migrate_legacy_rcfiles()
+    sync_rcfiles_pull()
+    sync_tracked_files(base_path)
+    sync_rcfiles_push()
     print()
 
     print(f"{Colors.BLUE}Syncing repositories to: {base_path}{Colors.NC}")
@@ -461,77 +483,79 @@ def _migrate_legacy_rcfiles():
             shutil.move(str(old), str(new))
 
 
-def merge_tracked_files_to_repoconfig(base_path):
-    """Copy tracked workspace files to repoconfig/rcfiles/ before push."""
-    all_files = _get_all_tracked_files()
-    if not all_files:
-        return False
+def sync_tracked_files(base_path):
+    """Timestamp-based bidirectional sync between workspace and rcfiles.
 
-    changed = False
+    Compares workspace file mtime against the rcfile's git commit timestamp.
+    The newer version wins. Returns True if any rcfiles were modified.
+    """
+    all_files = _get_all_tracked_files()
     base = Path(base_path)
+    rcfiles_changed = False
 
     for entry in all_files:
         rel_path = entry['path']
         workspace_file = base / rel_path.replace('/', os.sep)
         rcfile = RCFILES_DIR / rel_path
 
-        if not workspace_file.exists():
+        ws_exists = workspace_file.exists()
+        rc_exists = rcfile.exists()
+
+        if not ws_exists and not rc_exists:
             continue
 
-        # Conflict marker check for markdown files
+        ws_content = workspace_file.read_bytes() if ws_exists else None
+        rc_content = rcfile.read_bytes() if rc_exists else None
+
+        # Skip if content is identical, but align workspace mtime
+        if ws_content == rc_content:
+            if ws_exists and rc_exists:
+                remote_ts = get_rcfile_git_timestamp(rel_path)
+                if remote_ts:
+                    ts_epoch = remote_ts.timestamp()
+                    os.utime(str(workspace_file), (ts_epoch, ts_epoch))
+            print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path}")
+            continue
+
+        # Conflict marker checks for markdown files
         if rel_path.endswith('.md'):
-            content = workspace_file.read_text(encoding='utf-8')
-            if has_real_conflict_markers(content):
-                print(f"{Colors.YELLOW}[WARN]{Colors.NC} {rel_path} has conflict markers, skipping")
-                print("  Please resolve them first, then run 'dev repo sync' again")
-                continue
+            if ws_exists:
+                ws_text = workspace_file.read_text(encoding='utf-8')
+                if has_real_conflict_markers(ws_text):
+                    print(f"{Colors.YELLOW}[WARN]{Colors.NC} {rel_path} has conflict markers, skipping")
+                    continue
+            if rc_exists:
+                rc_text = rcfile.read_text(encoding='utf-8')
+                if has_real_conflict_markers(rc_text):
+                    print(f"{Colors.YELLOW}[CONFLICT]{Colors.NC} {rel_path} has merge conflicts in repoconfig")
+                    continue
 
-        workspace_content = workspace_file.read_bytes()
-        rcfile_content = rcfile.read_bytes() if rcfile.exists() else b''
+        remote_ts = get_rcfile_git_timestamp(rel_path)
+        local_ts = get_file_mtime(workspace_file) if ws_exists else None
 
-        if workspace_content != rcfile_content:
+        if ws_exists and not rc_exists:
+            direction = 'local'
+        elif rc_exists and not ws_exists:
+            direction = 'remote'
+        elif remote_ts and local_ts:
+            direction = 'local' if local_ts > remote_ts else 'remote'
+        else:
+            direction = 'local'
+
+        if direction == 'local':
             rcfile.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(str(workspace_file), str(rcfile))
-            changed = True
-
-    return changed
-
-
-def apply_tracked_files_to_workspace(base_path):
-    """Copy tracked files from repoconfig/rcfiles/ to workspace after pull."""
-    all_files = _get_all_tracked_files()
-    if not all_files:
-        return False
-
-    changed = False
-    base = Path(base_path)
-
-    for entry in all_files:
-        rel_path = entry['path']
-        workspace_file = base / rel_path.replace('/', os.sep)
-        rcfile = RCFILES_DIR / rel_path
-
-        if not rcfile.exists():
-            continue
-
-        # Conflict marker check for markdown files
-        if rel_path.endswith('.md'):
-            content = rcfile.read_text(encoding='utf-8')
-            if has_real_conflict_markers(content):
-                print(f"{Colors.YELLOW}[CONFLICT]{Colors.NC} {rel_path} has merge conflicts in repoconfig")
-                print(f"  File: {rcfile}")
-                print("  Please resolve, then run 'dev repo sync' again")
-                continue
-
-        rcfile_content = rcfile.read_bytes()
-        workspace_content = workspace_file.read_bytes() if workspace_file.exists() else b''
-
-        if rcfile_content != workspace_content:
+            rcfiles_changed = True
+            print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path} {Colors.CYAN}(local \u2192 remote){Colors.NC}")
+        else:
             workspace_file.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(str(rcfile), str(workspace_file))
-            changed = True
+            if remote_ts:
+                ts_epoch = remote_ts.timestamp()
+                os.utime(str(workspace_file), (ts_epoch, ts_epoch))
+            print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path} {Colors.CYAN}(remote \u2192 local){Colors.NC}")
 
-    return changed
+    return rcfiles_changed
 
 
 def cmd_repo_status(args):
