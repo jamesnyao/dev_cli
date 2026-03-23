@@ -65,8 +65,30 @@ def run_git(repo_path, *args):
     except Exception:
         return False, ''
 
-def get_remote_url(repo_path):
+GITHUB_SSH_HOSTS = {
+    'example-user': 'github.com-personal',
+    'acme-corp': 'github.com-work',
+}
+
+def normalize_github_url(url):
+    """Convert GitHub URLs to SSH format with correct host alias."""
+    import re
+    https_match = re.match(r'https://github\.com/([^/]+)/(.+?)(?:\.git)?$', url)
+    if https_match:
+        org, repo = https_match.groups()
+        host = GITHUB_SSH_HOSTS.get(org, 'github.com')
+        return f'git@{host}:{org}/{repo}.git'
+    ssh_match = re.match(r'git@github\.com:([^/]+)/(.+?)(?:\.git)?$', url)
+    if ssh_match:
+        org, repo = ssh_match.groups()
+        host = GITHUB_SSH_HOSTS.get(org, 'github.com')
+        return f'git@{host}:{org}/{repo}.git'
+    return url
+
+def get_remote_url(repo_path, normalize=False):
     success, url = run_git(repo_path, 'remote', 'get-url', 'origin')
+    if success and normalize:
+        return normalize_github_url(url)
     return url if success else ''
 
 def get_current_branch(repo_path):
@@ -212,7 +234,7 @@ def cmd_repo_add(args):
         print(f"{Colors.RED}[X]{Colors.NC} Not a git repository: {target_path}")
         return 1
 
-    remote_url = get_remote_url(target_path)
+    remote_url = get_remote_url(target_path, normalize=True)
     if not remote_url:
         print(f"{Colors.YELLOW}[WARN]{Colors.NC} No 'origin' remote found")
 
