@@ -98,6 +98,9 @@ def check_stale_branch(repo_path, name):
     if not current or current == 'HEAD':
         return
 
+    if current.startswith('mirror/'):
+        return
+
     age_days = get_branch_age_days(repo_path)
     if age_days < 14:
         return
