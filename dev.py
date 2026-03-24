@@ -649,6 +649,116 @@ def cmd_repo_status(args):
     return 0
 
 
+def cmd_repo_old(args):
+    """List or delete old branches with user/developer/ prefix."""
+    from datetime import timedelta
+    
+    repo_path = args.path
+    if not repo_path:
+        repo_path = os.getcwd()
+    repo_path = Path(repo_path).resolve()
+    
+    if not (repo_path / '.git').exists():
+        print(f"{Colors.RED}Error: {repo_path} is not a git repository{Colors.NC}")
+        return 1
+    
+    prefix = args.prefix or 'user/developer/'
+    days = args.days or 30
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    
+    print(f"{Colors.BLUE}Scanning for branches older than {days} days with prefix '{prefix}'...{Colors.NC}")
+    print(f"Repository: {repo_path}")
+    print(f"Cutoff date: {cutoff.strftime('%Y-%m-%d')}")
+    print("-" * 60)
+    
+    # Get all remote branches matching the prefix
+    result = subprocess.run(
+        ['git', '-C', str(repo_path), 'branch', '-r', '--list', f'*{prefix}*'],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(f"{Colors.RED}Error listing branches: {result.stderr}{Colors.NC}")
+        return 1
+    
+    branches = [b.strip() for b in result.stdout.strip().split('\n') if b.strip()]
+    if not branches:
+        print(f"{Colors.GREEN}No remote branches found with prefix '{prefix}'{Colors.NC}")
+        return 0
+    
+    old_branches = []
+    for branch in branches:
+        # Get the last commit date for each branch
+        result = subprocess.run(
+            ['git', '-C', str(repo_path), 'log', '-1', '--format=%cI', branch],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            continue
+        
+        date_str = result.stdout.strip()
+        if not date_str:
+            continue
+        
+        try:
+            commit_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+            if commit_date < cutoff:
+                age_days = (datetime.now(timezone.utc) - commit_date).days
+                old_branches.append((branch, commit_date, age_days))
+        except ValueError:
+            continue
+    
+    if not old_branches:
+        print(f"{Colors.GREEN}No branches older than {days} days found{Colors.NC}")
+        return 0
+    
+    # Sort by age (oldest first)
+    old_branches.sort(key=lambda x: x[1])
+    
+    print(f"\n{Colors.YELLOW}Found {len(old_branches)} old branches:{Colors.NC}\n")
+    for branch, commit_date, age_days in old_branches:
+        # Strip 'remotes/origin/' prefix for display
+        display_name = branch.replace('remotes/origin/', 'origin/')
+        print(f"  {display_name}")
+        print(f"    Last commit: {commit_date.strftime('%Y-%m-%d')} ({age_days} days ago)")
+    
+    if not args.delete:
+        print(f"\n{Colors.CYAN}To delete these branches, run:{Colors.NC}")
+        print(f"  dev repo old --delete")
+        return 0
+    
+    # Delete mode
+    print(f"\n{Colors.RED}WARNING: This will delete {len(old_branches)} remote branches!{Colors.NC}")
+    confirm = input("Type 'yes' to confirm deletion: ")
+    if confirm.lower() != 'yes':
+        print("Aborted.")
+        return 0
+    
+    deleted = 0
+    failed = 0
+    for branch, commit_date, age_days in old_branches:
+        # Extract branch name without remote prefix
+        remote_branch = branch.replace('remotes/origin/', '').replace('origin/', '')
+        print(f"Deleting origin/{remote_branch}...", end=' ')
+        
+        result = subprocess.run(
+            ['git', '-C', str(repo_path), 'push', 'origin', '--delete', remote_branch],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            print(f"{Colors.GREEN}OK{Colors.NC}")
+            deleted += 1
+        else:
+            print(f"{Colors.RED}FAILED{Colors.NC}")
+            if result.stderr:
+                print(f"    {result.stderr.strip()}")
+            failed += 1
+    
+    print("-" * 60)
+    print(f"Deleted: {Colors.GREEN}{deleted}{Colors.NC} | Failed: {Colors.RED}{failed}{Colors.NC}")
+    
+    return 0 if failed == 0 else 1
+
+
 # ============ PYTHON COMMANDS ============
 
 def get_python_command():
@@ -841,6 +951,12 @@ def main():
     repo_sub.add_parser('sync', help='Clone missing repositories')
     repo_sub.add_parser('status', help='Show repo status on this machine')
 
+    old_p = repo_sub.add_parser('old', help='List/delete old branches')
+    old_p.add_argument('--delete', action='store_true', help='Delete the old branches')
+    old_p.add_argument('--prefix', default='user/developer/', help='Branch prefix to filter (default: user/developer/)')
+    old_p.add_argument('--days', type=int, default=30, help='Age threshold in days (default: 30)')
+    old_p.add_argument('path', nargs='?', help='Path to git repository (default: current directory)')
+
     scan_p = repo_sub.add_parser('scan', help='Scan and add all git repos')
     scan_p.add_argument('path', nargs='?', help='Path to scan')
 
@@ -893,6 +1009,7 @@ def main():
             'list': cmd_repo_list,
             'sync': cmd_repo_sync,
             'status': cmd_repo_status,
+            'old': cmd_repo_old,
         }
         if args.repo_command in cmd_map:
             return cmd_map[args.repo_command](args)
