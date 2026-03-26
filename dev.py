@@ -315,6 +315,46 @@ def cmd_repo_list(args):
 
     return 0
 
+def _build_commit_message():
+    """Build a descriptive commit message from staged changes."""
+    _, status = run_git(SCRIPT_DIR, 'diff', '--cached', '--name-status')
+    if not status:
+        return 'Auto-sync'
+    
+    added, modified, deleted = [], [], []
+    for line in status.strip().split('\n'):
+        if not line:
+            continue
+        parts = line.split('\t', 1)
+        if len(parts) != 2:
+            continue
+        status_char, filepath = parts[0], parts[1]
+        filename = Path(filepath).name
+        if status_char.startswith('A'):
+            added.append(filename)
+        elif status_char.startswith('M'):
+            modified.append(filename)
+        elif status_char.startswith('D'):
+            deleted.append(filename)
+    
+    lines = []
+    if added:
+        lines.append(f"A: {', '.join(added)}")
+    if modified:
+        lines.append(f"M: {', '.join(modified)}")
+    if deleted:
+        lines.append(f"D: {', '.join(deleted)}")
+    
+    if not lines:
+        return 'Auto-sync'
+    
+    msg = 'Sync: ' + ' | '.join(lines)
+    if len(msg) > 200:
+        total = len(added) + len(modified) + len(deleted)
+        msg = f'Sync: {total} files ({len(added)} added, {len(modified)} modified, {len(deleted)} deleted)'
+    return msg
+
+
 def sync_rcfiles_pull():
     """Commit pending changes, fetch remote, and rebase."""
     print(f"{Colors.BLUE}Syncing rcfiles (dev_scripts)...{Colors.NC}")
@@ -322,7 +362,8 @@ def sync_rcfiles_pull():
     run_git(SCRIPT_DIR, 'add', '-A')
     _, status = run_git(SCRIPT_DIR, 'status', '--porcelain')
     if status:
-        run_git(SCRIPT_DIR, 'commit', '-m', 'Auto-sync local changes')
+        commit_msg = _build_commit_message()
+        run_git(SCRIPT_DIR, 'commit', '-m', commit_msg)
 
     success, _ = run_git(SCRIPT_DIR, 'fetch', 'origin')
     if not success:
@@ -353,7 +394,8 @@ def sync_rcfiles_push():
     run_git(SCRIPT_DIR, 'add', '-A')
     _, status = run_git(SCRIPT_DIR, 'status', '--porcelain')
     if status:
-        run_git(SCRIPT_DIR, 'commit', '-m', 'Auto-sync tracked files')
+        commit_msg = _build_commit_message()
+        run_git(SCRIPT_DIR, 'commit', '-m', commit_msg)
 
     default_branch = get_default_branch(SCRIPT_DIR) or 'main'
     _, ahead_behind = run_git(SCRIPT_DIR, 'rev-list', '--left-right', '--count', f'HEAD...origin/{default_branch}')

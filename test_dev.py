@@ -185,6 +185,79 @@ class TestRunGit(unittest.TestCase):
         self.assertFalse(success)
 
 
+class TestBuildCommitMessage(unittest.TestCase):
+    """Test commit message building from staged changes"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.orig_script_dir = dev.SCRIPT_DIR
+        dev.SCRIPT_DIR = Path(self.temp_dir)
+        subprocess.run(['git', 'init'], cwd=self.temp_dir, capture_output=True)
+        subprocess.run(['git', 'config', 'user.email', 'test@test.com'], cwd=self.temp_dir, capture_output=True)
+        subprocess.run(['git', 'config', 'user.name', 'Test'], cwd=self.temp_dir, capture_output=True)
+
+    def tearDown(self):
+        dev.SCRIPT_DIR = self.orig_script_dir
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_no_staged_changes(self):
+        """No staged changes should return Auto-sync"""
+        msg = dev._build_commit_message()
+        self.assertEqual(msg, 'Auto-sync')
+
+    def test_added_files(self):
+        """Added files should show A: prefix"""
+        Path(self.temp_dir, 'new.txt').write_text('content')
+        subprocess.run(['git', 'add', 'new.txt'], cwd=self.temp_dir, capture_output=True)
+        msg = dev._build_commit_message()
+        self.assertEqual(msg, 'Sync: A: new.txt')
+
+    def test_modified_files(self):
+        """Modified files should show M: prefix"""
+        Path(self.temp_dir, 'file.txt').write_text('v1')
+        subprocess.run(['git', 'add', 'file.txt'], cwd=self.temp_dir, capture_output=True)
+        subprocess.run(['git', 'commit', '-m', 'init'], cwd=self.temp_dir, capture_output=True)
+        Path(self.temp_dir, 'file.txt').write_text('v2')
+        subprocess.run(['git', 'add', 'file.txt'], cwd=self.temp_dir, capture_output=True)
+        msg = dev._build_commit_message()
+        self.assertEqual(msg, 'Sync: M: file.txt')
+
+    def test_deleted_files(self):
+        """Deleted files should show D: prefix"""
+        Path(self.temp_dir, 'file.txt').write_text('content')
+        subprocess.run(['git', 'add', 'file.txt'], cwd=self.temp_dir, capture_output=True)
+        subprocess.run(['git', 'commit', '-m', 'init'], cwd=self.temp_dir, capture_output=True)
+        os.remove(Path(self.temp_dir, 'file.txt'))
+        subprocess.run(['git', 'add', 'file.txt'], cwd=self.temp_dir, capture_output=True)
+        msg = dev._build_commit_message()
+        self.assertEqual(msg, 'Sync: D: file.txt')
+
+    def test_mixed_changes(self):
+        """Mixed changes should show all types"""
+        Path(self.temp_dir, 'existing.txt').write_text('v1')
+        Path(self.temp_dir, 'to_delete.txt').write_text('bye')
+        subprocess.run(['git', 'add', '.'], cwd=self.temp_dir, capture_output=True)
+        subprocess.run(['git', 'commit', '-m', 'init'], cwd=self.temp_dir, capture_output=True)
+        Path(self.temp_dir, 'new.txt').write_text('new')
+        Path(self.temp_dir, 'existing.txt').write_text('v2')
+        os.remove(Path(self.temp_dir, 'to_delete.txt'))
+        subprocess.run(['git', 'add', '.'], cwd=self.temp_dir, capture_output=True)
+        msg = dev._build_commit_message()
+        self.assertIn('A: new.txt', msg)
+        self.assertIn('M: existing.txt', msg)
+        self.assertIn('D: to_delete.txt', msg)
+
+    def test_long_message_truncated(self):
+        """Long messages should fall back to summary"""
+        for i in range(30):
+            Path(self.temp_dir, f'file_{i:02d}_with_long_name.txt').write_text(f'content{i}')
+        subprocess.run(['git', 'add', '.'], cwd=self.temp_dir, capture_output=True)
+        msg = dev._build_commit_message()
+        self.assertIn('30 files', msg)
+        self.assertIn('30 added', msg)
+        self.assertLessEqual(len(msg), 200)
+
+
 class TestSyncTrackedFiles(unittest.TestCase):
     """Test timestamp-based bidirectional file sync"""
 
