@@ -281,6 +281,25 @@ def cmd_repo_remove(args):
         print(f"{Colors.GREEN}Removed file: {name}{Colors.NC}")
         return 0
 
+    for dir_path in BUILTIN_DIRS:
+        if name.startswith(dir_path + '/'):
+            base_path = Path(get_base_path())
+            ws_file = base_path / name.replace('/', os.sep)
+            rc_file = RCFILES_DIR / name
+            removed = False
+            for f in [ws_file, rc_file]:
+                if f.exists():
+                    f.unlink()
+                    removed = True
+                    try:
+                        f.parent.rmdir()
+                    except OSError:
+                        pass
+            if removed:
+                print(f"{Colors.GREEN}Removed file: {name}{Colors.NC}")
+                return 0
+            break
+
     print(f"{Colors.RED}[X]{Colors.NC} '{name}' is not tracked")
     return 1
 
