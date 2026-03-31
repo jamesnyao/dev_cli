@@ -267,20 +267,14 @@ class TestSyncTrackedFiles(unittest.TestCase):
         self.orig_config_file = dev.CONFIG_FILE
         self.orig_rcfiles_dir = dev.RCFILES_DIR
         self.orig_home_dir = dev.HOME_DIR
-        self.orig_copilot_home_dir = dev.COPILOT_HOME_DIR
         dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
         dev.CONFIG_DIR.mkdir(parents=True)
         dev.CONFIG_FILE = dev.CONFIG_DIR / 'repos.json'
         dev.RCFILES_DIR = dev.CONFIG_DIR / 'rcfiles'
 
-        self.workspace = Path(self.temp_dir) / 'workspace'
-        self.workspace.mkdir()
-        (self.workspace / '.claude').mkdir()
-
         self.home = Path(self.temp_dir) / 'home'
         self.home.mkdir()
         dev.HOME_DIR = self.home
-        dev.COPILOT_HOME_DIR = self.home / '.copilot'
 
         dev.save_config({'version': 1, 'repos': [], 'files': []})
 
@@ -292,7 +286,6 @@ class TestSyncTrackedFiles(unittest.TestCase):
         dev.CONFIG_FILE = self.orig_config_file
         dev.RCFILES_DIR = self.orig_rcfiles_dir
         dev.HOME_DIR = self.orig_home_dir
-        dev.COPILOT_HOME_DIR = self.orig_copilot_home_dir
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _set_mtime(self, path, dt):
@@ -304,14 +297,6 @@ class TestSyncTrackedFiles(unittest.TestCase):
         rcfile.parent.mkdir(parents=True, exist_ok=True)
         rcfile.write_text(content)
         return rcfile
-
-    def _setup_ws_file(self, rel_path, content, mtime=None):
-        ws_file = self.workspace / rel_path.replace('/', os.sep)
-        ws_file.parent.mkdir(parents=True, exist_ok=True)
-        ws_file.write_text(content)
-        if mtime:
-            self._set_mtime(ws_file, mtime)
-        return ws_file
 
     def _setup_home_file(self, rel_path, content, mtime=None):
         home_file = self.home / rel_path.replace('/', os.sep)
@@ -325,12 +310,12 @@ class TestSyncTrackedFiles(unittest.TestCase):
 
     @patch('dev.get_rcfile_git_timestamp')
     def test_local_newer_overwrites_remote(self, mock_ts):
-        """When workspace mtime > rcfile git timestamp, local wins."""
+        """When home file mtime > rcfile git timestamp, local wins."""
         mock_ts.return_value = self.old_time
         self._setup_rcfile('.claude/CLAUDE.md', 'old remote')
-        self._setup_ws_file('.claude/CLAUDE.md', 'new local', self.new_time)
+        self._setup_home_file('.claude/CLAUDE.md', 'new local', self.new_time)
 
-        result = dev.sync_tracked_files(self.workspace)
+        result = dev.sync_tracked_files(self.home)
 
         self.assertTrue(result)
         rcfile = dev.RCFILES_DIR / '.claude' / 'CLAUDE.md'
@@ -338,16 +323,16 @@ class TestSyncTrackedFiles(unittest.TestCase):
 
     @patch('dev.get_rcfile_git_timestamp')
     def test_remote_newer_overwrites_local(self, mock_ts):
-        """When rcfile git timestamp > workspace mtime, remote wins."""
+        """When rcfile git timestamp > home file mtime, remote wins."""
         mock_ts.return_value = self.new_time
         self._setup_rcfile('.claude/CLAUDE.md', 'new remote')
-        self._setup_ws_file('.claude/CLAUDE.md', 'old local', self.old_time)
+        self._setup_home_file('.claude/CLAUDE.md', 'old local', self.old_time)
 
-        result = dev.sync_tracked_files(self.workspace)
+        result = dev.sync_tracked_files(self.home)
 
         self.assertFalse(result)
-        ws_file = self.workspace / '.claude' / 'CLAUDE.md'
-        self.assertEqual(ws_file.read_text(), 'new remote')
+        home_file = self.home / '.claude' / 'CLAUDE.md'
+        self.assertEqual(home_file.read_text(), 'new remote')
 
     @patch('dev.get_rcfile_git_timestamp')
     def test_identical_content_skipped(self, mock_ts):
@@ -355,19 +340,19 @@ class TestSyncTrackedFiles(unittest.TestCase):
         mock_ts.return_value = self.old_time
         content = '# Same content'
         self._setup_rcfile('.claude/CLAUDE.md', content)
-        self._setup_ws_file('.claude/CLAUDE.md', content)
+        self._setup_home_file('.claude/CLAUDE.md', content)
 
-        result = dev.sync_tracked_files(self.workspace)
+        result = dev.sync_tracked_files(self.home)
 
         self.assertFalse(result)
 
     @patch('dev.get_rcfile_git_timestamp')
-    def test_only_workspace_copies_to_rcfiles(self, mock_ts):
-        """File only in workspace should be copied to rcfiles."""
+    def test_only_home_copies_to_rcfiles(self, mock_ts):
+        """File only in home should be copied to rcfiles."""
         mock_ts.return_value = None
-        self._setup_ws_file('.claude/CLAUDE.md', 'local only', self.new_time)
+        self._setup_home_file('.claude/CLAUDE.md', 'local only', self.new_time)
 
-        result = dev.sync_tracked_files(self.workspace)
+        result = dev.sync_tracked_files(self.home)
 
         self.assertTrue(result)
         rcfile = dev.RCFILES_DIR / '.claude' / 'CLAUDE.md'
@@ -375,74 +360,74 @@ class TestSyncTrackedFiles(unittest.TestCase):
         self.assertEqual(rcfile.read_text(), 'local only')
 
     @patch('dev.get_rcfile_git_timestamp')
-    def test_only_rcfiles_copies_to_workspace(self, mock_ts):
-        """File only in rcfiles should be copied to workspace."""
+    def test_only_rcfiles_copies_to_home(self, mock_ts):
+        """File only in rcfiles should be copied to home."""
         mock_ts.return_value = self.new_time
         self._setup_rcfile('.claude/CLAUDE.md', 'remote only')
 
-        result = dev.sync_tracked_files(self.workspace)
+        result = dev.sync_tracked_files(self.home)
 
         self.assertFalse(result)
-        ws_file = self.workspace / '.claude' / 'CLAUDE.md'
-        self.assertTrue(ws_file.exists())
-        self.assertEqual(ws_file.read_text(), 'remote only')
+        home_file = self.home / '.claude' / 'CLAUDE.md'
+        self.assertTrue(home_file.exists())
+        self.assertEqual(home_file.read_text(), 'remote only')
 
     @patch('dev.get_rcfile_git_timestamp')
     def test_no_git_timestamp_local_wins(self, mock_ts):
         """No git timestamp (never committed) should default to local wins."""
         mock_ts.return_value = None
         self._setup_rcfile('.claude/CLAUDE.md', 'remote')
-        self._setup_ws_file('.claude/CLAUDE.md', 'local', self.new_time)
+        self._setup_home_file('.claude/CLAUDE.md', 'local', self.new_time)
 
-        result = dev.sync_tracked_files(self.workspace)
+        result = dev.sync_tracked_files(self.home)
 
         self.assertTrue(result)
         rcfile = dev.RCFILES_DIR / '.claude' / 'CLAUDE.md'
         self.assertEqual(rcfile.read_text(), 'local')
 
-    # --- Workspace mtime alignment tests ---
+    # --- Home mtime alignment tests ---
 
     @patch('dev.get_rcfile_git_timestamp')
-    def test_workspace_mtime_aligned_after_remote_wins(self, mock_ts):
-        """After remote wins, workspace mtime should match remote timestamp."""
+    def test_home_mtime_aligned_after_remote_wins(self, mock_ts):
+        """After remote wins, home file mtime should match remote timestamp."""
         mock_ts.return_value = self.new_time
         self._setup_rcfile('.claude/CLAUDE.md', 'new remote')
-        self._setup_ws_file('.claude/CLAUDE.md', 'old local', self.old_time)
+        self._setup_home_file('.claude/CLAUDE.md', 'old local', self.old_time)
 
-        dev.sync_tracked_files(self.workspace)
+        dev.sync_tracked_files(self.home)
 
-        ws_file = self.workspace / '.claude' / 'CLAUDE.md'
-        ws_mtime = datetime.fromtimestamp(ws_file.stat().st_mtime, tz=timezone.utc)
-        self.assertAlmostEqual(ws_mtime.timestamp(), self.new_time.timestamp(), delta=2)
+        home_file = self.home / '.claude' / 'CLAUDE.md'
+        home_mtime = datetime.fromtimestamp(home_file.stat().st_mtime, tz=timezone.utc)
+        self.assertAlmostEqual(home_mtime.timestamp(), self.new_time.timestamp(), delta=2)
 
     @patch('dev.get_rcfile_git_timestamp')
-    def test_workspace_mtime_aligned_when_identical(self, mock_ts):
-        """When content is identical, workspace mtime should align to remote timestamp."""
+    def test_home_mtime_aligned_when_identical(self, mock_ts):
+        """When content is identical, home file mtime should align to remote timestamp."""
         mock_ts.return_value = self.new_time
         content = '# Same content'
         self._setup_rcfile('.claude/CLAUDE.md', content)
-        self._setup_ws_file('.claude/CLAUDE.md', content, self.old_time)
+        self._setup_home_file('.claude/CLAUDE.md', content, self.old_time)
 
-        dev.sync_tracked_files(self.workspace)
+        dev.sync_tracked_files(self.home)
 
-        ws_file = self.workspace / '.claude' / 'CLAUDE.md'
-        ws_mtime = datetime.fromtimestamp(ws_file.stat().st_mtime, tz=timezone.utc)
-        self.assertAlmostEqual(ws_mtime.timestamp(), self.new_time.timestamp(), delta=2)
+        home_file = self.home / '.claude' / 'CLAUDE.md'
+        home_mtime = datetime.fromtimestamp(home_file.stat().st_mtime, tz=timezone.utc)
+        self.assertAlmostEqual(home_mtime.timestamp(), self.new_time.timestamp(), delta=2)
 
     # --- Conflict marker tests ---
 
     @patch('dev.get_rcfile_git_timestamp')
-    def test_workspace_md_conflict_markers_skipped(self, mock_ts):
-        """Workspace .md with conflict markers should be skipped."""
+    def test_home_md_conflict_markers_skipped(self, mock_ts):
+        """Home .md with conflict markers should be skipped."""
         mock_ts.return_value = self.old_time
         conflict = "## Section\n<<<<<<< HEAD\nA\n=======\nB\n>>>>>>> branch\n"
-        self._setup_rcfile('.github/copilot-instructions.md', 'original')
-        self._setup_ws_file('.github/copilot-instructions.md', conflict, self.new_time)
+        self._setup_rcfile('.copilot/copilot-instructions.md', 'original')
+        self._setup_home_file('.copilot/copilot-instructions.md', conflict, self.new_time)
 
-        result = dev.sync_tracked_files(self.workspace)
+        result = dev.sync_tracked_files(self.home)
 
         self.assertFalse(result)
-        rcfile = dev.RCFILES_DIR / '.github' / 'copilot-instructions.md'
+        rcfile = dev.RCFILES_DIR / '.copilot' / 'copilot-instructions.md'
         self.assertEqual(rcfile.read_text(), 'original')
 
     @patch('dev.get_rcfile_git_timestamp')
@@ -450,14 +435,14 @@ class TestSyncTrackedFiles(unittest.TestCase):
         """Rcfile .md with conflict markers should be skipped."""
         mock_ts.return_value = self.new_time
         conflict = "## Section\n<<<<<<< HEAD\nA\n=======\nB\n>>>>>>> branch\n"
-        self._setup_rcfile('.github/copilot-instructions.md', conflict)
-        self._setup_ws_file('.github/copilot-instructions.md', 'original', self.old_time)
+        self._setup_rcfile('.copilot/copilot-instructions.md', conflict)
+        self._setup_home_file('.copilot/copilot-instructions.md', 'original', self.old_time)
 
-        result = dev.sync_tracked_files(self.workspace)
+        result = dev.sync_tracked_files(self.home)
 
         self.assertFalse(result)
-        ws_file = self.workspace / '.github' / 'copilot-instructions.md'
-        self.assertEqual(ws_file.read_text(), 'original')
+        home_file = self.home / '.copilot' / 'copilot-instructions.md'
+        self.assertEqual(home_file.read_text(), 'original')
 
     @patch('dev.get_rcfile_git_timestamp')
     def test_non_md_files_skip_conflict_check(self, mock_ts):
@@ -469,13 +454,13 @@ class TestSyncTrackedFiles(unittest.TestCase):
         })
         conflict = "<<<<<<< HEAD\nstuff\n=======\nother\n>>>>>>> branch\n"
         self._setup_rcfile('platform/.gclient', 'old')
-        platform_dir = self.workspace / 'platform'
+        platform_dir = self.home / 'platform'
         platform_dir.mkdir(exist_ok=True)
-        ws_file = platform_dir / '.gclient'
-        ws_file.write_text(conflict)
-        self._set_mtime(ws_file, self.new_time)
+        home_file = platform_dir / '.gclient'
+        home_file.write_text(conflict)
+        self._set_mtime(home_file, self.new_time)
 
-        result = dev.sync_tracked_files(self.workspace)
+        result = dev.sync_tracked_files(self.home)
 
         self.assertTrue(result)
         rcfile = dev.RCFILES_DIR / 'platform' / '.gclient'
@@ -484,28 +469,27 @@ class TestSyncTrackedFiles(unittest.TestCase):
     # --- Parent directory creation tests ---
 
     @patch('dev.get_rcfile_git_timestamp')
-    def test_creates_parent_dirs_for_workspace(self, mock_ts):
-        """Remote → workspace should create parent directories."""
+    def test_creates_parent_dirs_for_home(self, mock_ts):
+        """Remote → home should create parent directories."""
         mock_ts.return_value = self.new_time
-        shutil.rmtree(self.workspace / '.github')
-        self._setup_rcfile('.github/copilot-instructions.md', 'remote content')
+        self._setup_rcfile('.copilot/copilot-instructions.md', 'remote content')
 
-        dev.sync_tracked_files(self.workspace)
+        dev.sync_tracked_files(self.home)
 
-        ws_file = self.workspace / '.github' / 'copilot-instructions.md'
-        self.assertTrue(ws_file.exists())
-        self.assertEqual(ws_file.read_text(), 'remote content')
+        home_file = self.home / '.copilot' / 'copilot-instructions.md'
+        self.assertTrue(home_file.exists())
+        self.assertEqual(home_file.read_text(), 'remote content')
 
     @patch('dev.get_rcfile_git_timestamp')
     def test_creates_parent_dirs_for_rcfiles(self, mock_ts):
-        """Workspace → rcfiles should create parent directories."""
+        """Home → rcfiles should create parent directories."""
         mock_ts.return_value = None
-        self._setup_ws_file('.github/copilot-instructions.md', 'local content', self.new_time)
+        self._setup_home_file('.copilot/copilot-instructions.md', 'local content', self.new_time)
 
-        result = dev.sync_tracked_files(self.workspace)
+        result = dev.sync_tracked_files(self.home)
 
         self.assertTrue(result)
-        rcfile = dev.RCFILES_DIR / '.github' / 'copilot-instructions.md'
+        rcfile = dev.RCFILES_DIR / '.copilot' / 'copilot-instructions.md'
         self.assertTrue(rcfile.exists())
 
     # --- Built-in and user file tests ---
@@ -513,7 +497,7 @@ class TestSyncTrackedFiles(unittest.TestCase):
     def test_builtin_files_always_included(self):
         all_files = dev._get_all_tracked_files()
         paths = [f['path'] for f in all_files]
-        self.assertIn('.github/copilot-instructions.md', paths)
+        self.assertIn('.copilot/copilot-instructions.md', paths)
         self.assertIn('.claude/CLAUDE.md', paths)
 
     def test_user_files_combined_with_builtins(self):
@@ -523,7 +507,7 @@ class TestSyncTrackedFiles(unittest.TestCase):
         })
         all_files = dev._get_all_tracked_files()
         paths = [f['path'] for f in all_files]
-        self.assertIn('.github/copilot-instructions.md', paths)
+        self.assertIn('.copilot/copilot-instructions.md', paths)
         self.assertIn('.claude/CLAUDE.md', paths)
         self.assertIn('platform/.gclient', paths)
 
@@ -532,9 +516,9 @@ class TestSyncTrackedFiles(unittest.TestCase):
         """CLAUDE.md should follow the same timestamp logic."""
         mock_ts.return_value = self.old_time
         self._setup_rcfile('.claude/CLAUDE.md', 'old remote')
-        self._setup_ws_file('.claude/CLAUDE.md', 'new local', self.new_time)
+        self._setup_home_file('.claude/CLAUDE.md', 'new local', self.new_time)
 
-        result = dev.sync_tracked_files(self.workspace)
+        result = dev.sync_tracked_files(self.home)
 
         self.assertTrue(result)
         rcfile = dev.RCFILES_DIR / '.claude' / 'CLAUDE.md'
@@ -545,13 +529,13 @@ class TestSyncTrackedFiles(unittest.TestCase):
         """CLAUDE.md should follow the same timestamp logic."""
         mock_ts.return_value = self.new_time
         self._setup_rcfile('.claude/CLAUDE.md', 'new remote')
-        self._setup_ws_file('.claude/CLAUDE.md', 'old local', self.old_time)
+        self._setup_home_file('.claude/CLAUDE.md', 'old local', self.old_time)
 
-        result = dev.sync_tracked_files(self.workspace)
+        result = dev.sync_tracked_files(self.home)
 
         self.assertFalse(result)
-        ws_file = self.workspace / '.claude' / 'CLAUDE.md'
-        self.assertEqual(ws_file.read_text(), 'new remote')
+        home_file = self.home / '.claude' / 'CLAUDE.md'
+        self.assertEqual(home_file.read_text(), 'new remote')
 
     @patch('dev.get_rcfile_git_timestamp')
     def test_user_file_local_newer(self, mock_ts):
@@ -562,13 +546,13 @@ class TestSyncTrackedFiles(unittest.TestCase):
             'files': [{'path': 'platform/.gclient', 'addedAt': '2026-01-01T00:00:00+00:00'}]
         })
         self._setup_rcfile('platform/.gclient', 'old remote')
-        platform_dir = self.workspace / 'platform'
+        platform_dir = self.home / 'platform'
         platform_dir.mkdir(exist_ok=True)
-        ws_file = platform_dir / '.gclient'
-        ws_file.write_text('new local')
-        self._set_mtime(ws_file, self.new_time)
+        home_file = platform_dir / '.gclient'
+        home_file.write_text('new local')
+        self._set_mtime(home_file, self.new_time)
 
-        result = dev.sync_tracked_files(self.workspace)
+        result = dev.sync_tracked_files(self.home)
 
         self.assertTrue(result)
         rcfile = dev.RCFILES_DIR / 'platform' / '.gclient'
@@ -583,157 +567,27 @@ class TestSyncTrackedFiles(unittest.TestCase):
             'files': [{'path': 'platform/.gclient', 'addedAt': '2026-01-01T00:00:00+00:00'}]
         })
         self._setup_rcfile('platform/.gclient', 'new remote')
-        platform_dir = self.workspace / 'platform'
+        platform_dir = self.home / 'platform'
         platform_dir.mkdir(exist_ok=True)
-        ws_file = platform_dir / '.gclient'
-        ws_file.write_text('old local')
-        self._set_mtime(ws_file, self.old_time)
+        home_file = platform_dir / '.gclient'
+        home_file.write_text('old local')
+        self._set_mtime(home_file, self.old_time)
 
-        result = dev.sync_tracked_files(self.workspace)
+        result = dev.sync_tracked_files(self.home)
 
         self.assertFalse(result)
-        self.assertEqual(ws_file.read_text(), 'new remote')
+        self.assertEqual(home_file.read_text(), 'new remote')
 
     @patch('dev.get_rcfile_git_timestamp')
-    def test_missing_workspace_file_skipped(self, mock_ts):
-        """Non-existent workspace file with no rcfile should be skipped."""
+    def test_missing_file_skipped(self, mock_ts):
+        """Non-existent file with no rcfile should be skipped."""
         mock_ts.return_value = None
         dev.save_config({
             'version': 1, 'repos': [],
             'files': [{'path': 'nonexistent.txt', 'addedAt': '2026-01-01T00:00:00+00:00'}]
         })
-        result = dev.sync_tracked_files(self.workspace)
+        result = dev.sync_tracked_files(self.home)
         self.assertFalse(result)
-
-    # --- Skill directory discovery & sync tests ---
-
-    def test_discover_dir_files_from_workspace(self):
-        """Skills in workspace are discovered for sync."""
-        skill_dir = self.workspace / '.github' / 'skills' / 'my-skill'
-        skill_dir.mkdir(parents=True)
-        (skill_dir / 'SKILL.md').write_text('skill content')
-
-        files = dev._discover_dir_files(self.workspace, '.github/skills')
-        paths = [f['path'] for f in files]
-        self.assertIn('.github/skills/my-skill/SKILL.md', paths)
-
-    def test_discover_dir_files_from_rcfiles(self):
-        """Skills in rcfiles are discovered for sync."""
-        rc_skill = dev.RCFILES_DIR / '.github' / 'skills' / 'remote-skill'
-        rc_skill.mkdir(parents=True)
-        (rc_skill / 'SKILL.md').write_text('remote skill')
-
-        files = dev._discover_dir_files(self.workspace, '.github/skills')
-        paths = [f['path'] for f in files]
-        self.assertIn('.github/skills/remote-skill/SKILL.md', paths)
-
-    def test_discover_dir_files_merges_both(self):
-        """Skills from workspace and rcfiles are merged (union)."""
-        ws_skill = self.workspace / '.github' / 'skills' / 'local-skill'
-        ws_skill.mkdir(parents=True)
-        (ws_skill / 'SKILL.md').write_text('local')
-
-        rc_skill = dev.RCFILES_DIR / '.github' / 'skills' / 'remote-skill'
-        rc_skill.mkdir(parents=True)
-        (rc_skill / 'SKILL.md').write_text('remote')
-
-        files = dev._discover_dir_files(self.workspace, '.github/skills')
-        paths = [f['path'] for f in files]
-        self.assertIn('.github/skills/local-skill/SKILL.md', paths)
-        self.assertIn('.github/skills/remote-skill/SKILL.md', paths)
-
-    def test_discover_dir_files_empty_when_no_dir(self):
-        """No crash when skills directory doesn't exist."""
-        files = dev._discover_dir_files(self.workspace, '.github/skills')
-        self.assertEqual(files, [])
-
-    def test_get_all_tracked_files_includes_skills(self):
-        """Skills are included in tracked files when base_path is provided."""
-        skill_dir = self.workspace / '.github' / 'skills' / 'my-skill'
-        skill_dir.mkdir(parents=True)
-        (skill_dir / 'SKILL.md').write_text('content')
-
-        all_files = dev._get_all_tracked_files(self.workspace)
-        paths = [f['path'] for f in all_files]
-        self.assertIn('.github/skills/my-skill/SKILL.md', paths)
-        self.assertIn('.github/copilot-instructions.md', paths)
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_skill_local_newer_syncs_to_rcfiles(self, mock_ts):
-        """Workspace skill newer than rcfile → copies to rcfiles."""
-        mock_ts.return_value = self.old_time
-        skill_dir = self.workspace / '.github' / 'skills' / 'my-skill'
-        skill_dir.mkdir(parents=True)
-        ws_file = skill_dir / 'SKILL.md'
-        ws_file.write_text('new local skill')
-        self._set_mtime(ws_file, self.new_time)
-        self._setup_rcfile('.github/skills/my-skill/SKILL.md', 'old remote skill')
-
-        result = dev.sync_tracked_files(self.workspace)
-
-        self.assertTrue(result)
-        rcfile = dev.RCFILES_DIR / '.github' / 'skills' / 'my-skill' / 'SKILL.md'
-        self.assertEqual(rcfile.read_text(), 'new local skill')
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_skill_remote_newer_syncs_to_workspace(self, mock_ts):
-        """Rcfile skill newer than workspace → copies to workspace."""
-        mock_ts.return_value = self.new_time
-        self._setup_rcfile('.github/skills/my-skill/SKILL.md', 'new remote skill')
-        skill_dir = self.workspace / '.github' / 'skills' / 'my-skill'
-        skill_dir.mkdir(parents=True)
-        ws_file = skill_dir / 'SKILL.md'
-        ws_file.write_text('old local skill')
-        self._set_mtime(ws_file, self.old_time)
-
-        result = dev.sync_tracked_files(self.workspace)
-
-        self.assertFalse(result)
-        self.assertEqual(ws_file.read_text(), 'new remote skill')
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_skill_only_in_rcfiles_copies_to_workspace(self, mock_ts):
-        """Skill only in rcfiles → copies to workspace."""
-        mock_ts.return_value = self.new_time
-        self._setup_rcfile('.github/skills/remote-only/SKILL.md', 'remote skill')
-
-        result = dev.sync_tracked_files(self.workspace)
-
-        self.assertFalse(result)
-        ws_file = self.workspace / '.github' / 'skills' / 'remote-only' / 'SKILL.md'
-        self.assertTrue(ws_file.exists())
-        self.assertEqual(ws_file.read_text(), 'remote skill')
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_skill_only_in_workspace_copies_to_rcfiles(self, mock_ts):
-        """Skill only in workspace → copies to rcfiles."""
-        mock_ts.return_value = None
-        skill_dir = self.workspace / '.github' / 'skills' / 'local-only'
-        skill_dir.mkdir(parents=True)
-        (skill_dir / 'SKILL.md').write_text('local skill')
-
-        result = dev.sync_tracked_files(self.workspace)
-
-        self.assertTrue(result)
-        rcfile = dev.RCFILES_DIR / '.github' / 'skills' / 'local-only' / 'SKILL.md'
-        self.assertTrue(rcfile.exists())
-        self.assertEqual(rcfile.read_text(), 'local skill')
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_multiple_skills_synced(self, mock_ts):
-        """Multiple skills are all discovered and synced."""
-        mock_ts.return_value = None
-        for name in ['skill-a', 'skill-b', 'skill-c']:
-            d = self.workspace / '.github' / 'skills' / name
-            d.mkdir(parents=True)
-            (d / 'SKILL.md').write_text(f'{name} content')
-
-        dev.sync_tracked_files(self.workspace)
-
-        for name in ['skill-a', 'skill-b', 'skill-c']:
-            rcfile = dev.RCFILES_DIR / '.github' / 'skills' / name / 'SKILL.md'
-            self.assertTrue(rcfile.exists())
-            self.assertEqual(rcfile.read_text(), f'{name} content')
 
 
 class TestMigrateLegacyRcfiles(unittest.TestCase):
@@ -759,7 +613,7 @@ class TestMigrateLegacyRcfiles(unittest.TestCase):
 
         dev._migrate_legacy_rcfiles()
 
-        new = dev.RCFILES_DIR / '.github' / 'copilot-instructions.md'
+        new = dev.RCFILES_DIR / '.copilot' / 'copilot-instructions.md'
         self.assertTrue(new.exists())
         self.assertEqual(new.read_text(), "# Copilot instructions")
         self.assertFalse(old.exists())
@@ -779,7 +633,7 @@ class TestMigrateLegacyRcfiles(unittest.TestCase):
         old = dev.CONFIG_DIR / 'copilot-instructions.md'
         old.write_text("old content")
 
-        new = dev.RCFILES_DIR / '.github' / 'copilot-instructions.md'
+        new = dev.RCFILES_DIR / '.copilot' / 'copilot-instructions.md'
         new.parent.mkdir(parents=True)
         new.write_text("new content")
 
@@ -789,7 +643,7 @@ class TestMigrateLegacyRcfiles(unittest.TestCase):
 
     def test_noop_when_no_legacy_files(self):
         dev._migrate_legacy_rcfiles()
-        self.assertFalse((dev.RCFILES_DIR / '.github' / 'copilot-instructions.md').exists())
+        self.assertFalse((dev.RCFILES_DIR / '.copilot' / 'copilot-instructions.md').exists())
         self.assertFalse((dev.RCFILES_DIR / '.claude' / 'CLAUDE.md').exists())
 
 

@@ -546,38 +546,13 @@ BUILTIN_FILES = [
     {'path': '.copilot/copilot-instructions.md'},
 ]
 
-BUILTIN_DIRS = [
-    '.copilot/skills',
-]
-
 HOME_DIR = Path.home()
 
-def _discover_dir_files(base_path, dir_rel_path):
-    """Discover files under a directory in both a target path and rcfiles."""
-    found = set()
-    target_dir = Path(base_path) / dir_rel_path.replace('/', os.sep)
-    if target_dir.is_dir():
-        for f in target_dir.rglob('*'):
-            if f.is_file():
-                found.add(str(f.relative_to(Path(base_path))).replace(os.sep, '/'))
-    rc_dir = RCFILES_DIR / dir_rel_path
-    if rc_dir.is_dir():
-        for f in rc_dir.rglob('*'):
-            if f.is_file():
-                found.add(str(f.relative_to(RCFILES_DIR)).replace(os.sep, '/'))
-    return [{'path': p} for p in sorted(found)]
-
 def _get_all_tracked_files(base_path=None):
-    """Return combined list of built-in + discovered + user-tracked file paths."""
+    """Return combined list of built-in + user-tracked file paths."""
     config = load_config()
     all_files = list(BUILTIN_FILES)
     known_paths = {b['path'] for b in BUILTIN_FILES}
-    if base_path:
-        for dir_path in BUILTIN_DIRS:
-            for entry in _discover_dir_files(base_path, dir_path):
-                if entry['path'] not in known_paths:
-                    all_files.append(entry)
-                    known_paths.add(entry['path'])
     for f in config.get('files', []):
         if f['path'] not in known_paths:
             all_files.append(f)
@@ -668,14 +643,14 @@ def sync_tracked_files(base_path):
             rcfile.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(str(target_file), str(rcfile))
             rcfiles_changed = True
-            print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path} {Colors.CYAN}(local \u2192 remote){Colors.NC}")
+            print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path} {Colors.CYAN}(local -> remote){Colors.NC}")
         else:
             target_file.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(str(rcfile), str(target_file))
             if remote_ts:
                 ts_epoch = remote_ts.timestamp()
                 os.utime(str(target_file), (ts_epoch, ts_epoch))
-            print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path} {Colors.CYAN}(remote \u2192 local){Colors.NC}")
+            print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path} {Colors.CYAN}(remote -> local){Colors.NC}")
 
     return rcfiles_changed
 
