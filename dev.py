@@ -439,7 +439,6 @@ def cmd_repo_sync(args):
     config = load_config()
     base_path = Path(get_base_path())
 
-    _migrate_legacy_rcfiles()
     sync_rcfiles_pull()
     sync_tracked_files(base_path)
     sync_rcfiles_push()
@@ -541,45 +540,12 @@ def has_real_conflict_markers(content):
     return False
 
 
-BUILTIN_FILES = [
-    {'path': '.claude/CLAUDE.md'},
-]
-
 HOME_DIR = Path.home()
 
-def _get_all_tracked_files(base_path=None):
-    """Return combined list of built-in + user-tracked file paths."""
+def _get_all_tracked_files():
+    """Return user-tracked file paths from config."""
     config = load_config()
-    all_files = list(BUILTIN_FILES)
-    known_paths = {b['path'] for b in BUILTIN_FILES}
-    for f in config.get('files', []):
-        if f['path'] not in known_paths:
-            all_files.append(f)
-    return all_files
-
-
-def _migrate_legacy_rcfiles():
-    """Move legacy flat repoconfig files into rcfiles/."""
-    migrations = [
-        (CONFIG_DIR / 'copilot-instructions.md', RCFILES_DIR / '.copilot' / 'copilot-instructions.md'),
-        (CONFIG_DIR / 'CLAUDE.md', RCFILES_DIR / '.claude' / 'CLAUDE.md'),
-    ]
-    # Migrate .github → .copilot within rcfiles
-    old_gh_instructions = RCFILES_DIR / '.github' / 'copilot-instructions.md'
-    new_copilot_instructions = RCFILES_DIR / '.copilot' / 'copilot-instructions.md'
-    if old_gh_instructions.exists() and not new_copilot_instructions.exists():
-        new_copilot_instructions.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(old_gh_instructions), str(new_copilot_instructions))
-    old_gh_skills = RCFILES_DIR / '.github' / 'skills'
-    new_copilot_skills = RCFILES_DIR / '.copilot' / 'skills'
-    if old_gh_skills.is_dir() and not new_copilot_skills.is_dir():
-        new_copilot_skills.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(str(old_gh_skills), str(new_copilot_skills))
-
-    for old, new in migrations:
-        if old.exists() and not new.exists():
-            new.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(old), str(new))
+    return config.get('files', [])
 
 
 def sync_tracked_files(base_path):
@@ -588,7 +554,7 @@ def sync_tracked_files(base_path):
     All tracked files sync to home (~/).
     The newer version wins. Returns True if any rcfiles were modified.
     """
-    all_files = _get_all_tracked_files(HOME_DIR)
+    all_files = _get_all_tracked_files()
     rcfiles_changed = False
 
     for entry in all_files:
