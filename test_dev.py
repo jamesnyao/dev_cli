@@ -421,13 +421,13 @@ class TestSyncTrackedFiles(unittest.TestCase):
         """Home .md with conflict markers should be skipped."""
         mock_ts.return_value = self.old_time
         conflict = "## Section\n<<<<<<< HEAD\nA\n=======\nB\n>>>>>>> branch\n"
-        self._setup_rcfile('.copilot/copilot-instructions.md', 'original')
-        self._setup_home_file('.copilot/copilot-instructions.md', conflict, self.new_time)
+        self._setup_rcfile('.claude/CLAUDE.md', 'original')
+        self._setup_home_file('.claude/CLAUDE.md', conflict, self.new_time)
 
         result = dev.sync_tracked_files(self.home)
 
         self.assertFalse(result)
-        rcfile = dev.RCFILES_DIR / '.copilot' / 'copilot-instructions.md'
+        rcfile = dev.RCFILES_DIR / '.claude' / 'CLAUDE.md'
         self.assertEqual(rcfile.read_text(), 'original')
 
     @patch('dev.get_rcfile_git_timestamp')
@@ -435,13 +435,13 @@ class TestSyncTrackedFiles(unittest.TestCase):
         """Rcfile .md with conflict markers should be skipped."""
         mock_ts.return_value = self.new_time
         conflict = "## Section\n<<<<<<< HEAD\nA\n=======\nB\n>>>>>>> branch\n"
-        self._setup_rcfile('.copilot/copilot-instructions.md', conflict)
-        self._setup_home_file('.copilot/copilot-instructions.md', 'original', self.old_time)
+        self._setup_rcfile('.claude/CLAUDE.md', conflict)
+        self._setup_home_file('.claude/CLAUDE.md', 'original', self.old_time)
 
         result = dev.sync_tracked_files(self.home)
 
         self.assertFalse(result)
-        home_file = self.home / '.copilot' / 'copilot-instructions.md'
+        home_file = self.home / '.claude' / 'CLAUDE.md'
         self.assertEqual(home_file.read_text(), 'original')
 
     @patch('dev.get_rcfile_git_timestamp')
@@ -470,26 +470,26 @@ class TestSyncTrackedFiles(unittest.TestCase):
 
     @patch('dev.get_rcfile_git_timestamp')
     def test_creates_parent_dirs_for_home(self, mock_ts):
-        """Remote → home should create parent directories."""
+        """Remote -> home should create parent directories."""
         mock_ts.return_value = self.new_time
-        self._setup_rcfile('.copilot/copilot-instructions.md', 'remote content')
+        self._setup_rcfile('.claude/CLAUDE.md', 'remote content')
 
         dev.sync_tracked_files(self.home)
 
-        home_file = self.home / '.copilot' / 'copilot-instructions.md'
+        home_file = self.home / '.claude' / 'CLAUDE.md'
         self.assertTrue(home_file.exists())
         self.assertEqual(home_file.read_text(), 'remote content')
 
     @patch('dev.get_rcfile_git_timestamp')
     def test_creates_parent_dirs_for_rcfiles(self, mock_ts):
-        """Home → rcfiles should create parent directories."""
+        """Home -> rcfiles should create parent directories."""
         mock_ts.return_value = None
-        self._setup_home_file('.copilot/copilot-instructions.md', 'local content', self.new_time)
+        self._setup_home_file('.claude/CLAUDE.md', 'local content', self.new_time)
 
         result = dev.sync_tracked_files(self.home)
 
         self.assertTrue(result)
-        rcfile = dev.RCFILES_DIR / '.copilot' / 'copilot-instructions.md'
+        rcfile = dev.RCFILES_DIR / '.claude' / 'CLAUDE.md'
         self.assertTrue(rcfile.exists())
 
     # --- Built-in and user file tests ---
@@ -497,7 +497,6 @@ class TestSyncTrackedFiles(unittest.TestCase):
     def test_builtin_files_always_included(self):
         all_files = dev._get_all_tracked_files()
         paths = [f['path'] for f in all_files]
-        self.assertIn('.copilot/copilot-instructions.md', paths)
         self.assertIn('.claude/CLAUDE.md', paths)
 
     def test_user_files_combined_with_builtins(self):
@@ -507,7 +506,6 @@ class TestSyncTrackedFiles(unittest.TestCase):
         })
         all_files = dev._get_all_tracked_files()
         paths = [f['path'] for f in all_files]
-        self.assertIn('.copilot/copilot-instructions.md', paths)
         self.assertIn('.claude/CLAUDE.md', paths)
         self.assertIn('platform/.gclient', paths)
 

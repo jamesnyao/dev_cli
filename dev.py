@@ -543,7 +543,6 @@ def has_real_conflict_markers(content):
 
 BUILTIN_FILES = [
     {'path': '.claude/CLAUDE.md'},
-    {'path': '.copilot/copilot-instructions.md'},
 ]
 
 HOME_DIR = Path.home()
