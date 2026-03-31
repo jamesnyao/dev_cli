@@ -266,6 +266,8 @@ class TestSyncTrackedFiles(unittest.TestCase):
         self.orig_config_dir = dev.CONFIG_DIR
         self.orig_config_file = dev.CONFIG_FILE
         self.orig_rcfiles_dir = dev.RCFILES_DIR
+        self.orig_home_dir = dev.HOME_DIR
+        self.orig_copilot_home_dir = dev.COPILOT_HOME_DIR
         dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
         dev.CONFIG_DIR.mkdir(parents=True)
         dev.CONFIG_FILE = dev.CONFIG_DIR / 'repos.json'
@@ -273,8 +275,12 @@ class TestSyncTrackedFiles(unittest.TestCase):
 
         self.workspace = Path(self.temp_dir) / 'workspace'
         self.workspace.mkdir()
-        (self.workspace / '.github').mkdir()
         (self.workspace / '.claude').mkdir()
+
+        self.home = Path(self.temp_dir) / 'home'
+        self.home.mkdir()
+        dev.HOME_DIR = self.home
+        dev.COPILOT_HOME_DIR = self.home / '.copilot'
 
         dev.save_config({'version': 1, 'repos': [], 'files': []})
 
@@ -285,6 +291,8 @@ class TestSyncTrackedFiles(unittest.TestCase):
         dev.CONFIG_DIR = self.orig_config_dir
         dev.CONFIG_FILE = self.orig_config_file
         dev.RCFILES_DIR = self.orig_rcfiles_dir
+        dev.HOME_DIR = self.orig_home_dir
+        dev.COPILOT_HOME_DIR = self.orig_copilot_home_dir
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _set_mtime(self, path, dt):
@@ -305,32 +313,40 @@ class TestSyncTrackedFiles(unittest.TestCase):
             self._set_mtime(ws_file, mtime)
         return ws_file
 
+    def _setup_home_file(self, rel_path, content, mtime=None):
+        home_file = self.home / rel_path.replace('/', os.sep)
+        home_file.parent.mkdir(parents=True, exist_ok=True)
+        home_file.write_text(content)
+        if mtime:
+            self._set_mtime(home_file, mtime)
+        return home_file
+
     # --- Timestamp-based direction tests ---
 
     @patch('dev.get_rcfile_git_timestamp')
     def test_local_newer_overwrites_remote(self, mock_ts):
         """When workspace mtime > rcfile git timestamp, local wins."""
         mock_ts.return_value = self.old_time
-        self._setup_rcfile('.github/copilot-instructions.md', 'old remote')
-        self._setup_ws_file('.github/copilot-instructions.md', 'new local', self.new_time)
+        self._setup_rcfile('.claude/CLAUDE.md', 'old remote')
+        self._setup_ws_file('.claude/CLAUDE.md', 'new local', self.new_time)
 
         result = dev.sync_tracked_files(self.workspace)
 
         self.assertTrue(result)
-        rcfile = dev.RCFILES_DIR / '.github' / 'copilot-instructions.md'
+        rcfile = dev.RCFILES_DIR / '.claude' / 'CLAUDE.md'
         self.assertEqual(rcfile.read_text(), 'new local')
 
     @patch('dev.get_rcfile_git_timestamp')
     def test_remote_newer_overwrites_local(self, mock_ts):
         """When rcfile git timestamp > workspace mtime, remote wins."""
         mock_ts.return_value = self.new_time
-        self._setup_rcfile('.github/copilot-instructions.md', 'new remote')
-        self._setup_ws_file('.github/copilot-instructions.md', 'old local', self.old_time)
+        self._setup_rcfile('.claude/CLAUDE.md', 'new remote')
+        self._setup_ws_file('.claude/CLAUDE.md', 'old local', self.old_time)
 
         result = dev.sync_tracked_files(self.workspace)
 
         self.assertFalse(result)
-        ws_file = self.workspace / '.github' / 'copilot-instructions.md'
+        ws_file = self.workspace / '.claude' / 'CLAUDE.md'
         self.assertEqual(ws_file.read_text(), 'new remote')
 
     @patch('dev.get_rcfile_git_timestamp')
@@ -338,8 +354,8 @@ class TestSyncTrackedFiles(unittest.TestCase):
         """Same content should not trigger any copy."""
         mock_ts.return_value = self.old_time
         content = '# Same content'
-        self._setup_rcfile('.github/copilot-instructions.md', content)
-        self._setup_ws_file('.github/copilot-instructions.md', content)
+        self._setup_rcfile('.claude/CLAUDE.md', content)
+        self._setup_ws_file('.claude/CLAUDE.md', content)
 
         result = dev.sync_tracked_files(self.workspace)
 
@@ -349,12 +365,12 @@ class TestSyncTrackedFiles(unittest.TestCase):
     def test_only_workspace_copies_to_rcfiles(self, mock_ts):
         """File only in workspace should be copied to rcfiles."""
         mock_ts.return_value = None
-        self._setup_ws_file('.github/copilot-instructions.md', 'local only', self.new_time)
+        self._setup_ws_file('.claude/CLAUDE.md', 'local only', self.new_time)
 
         result = dev.sync_tracked_files(self.workspace)
 
         self.assertTrue(result)
-        rcfile = dev.RCFILES_DIR / '.github' / 'copilot-instructions.md'
+        rcfile = dev.RCFILES_DIR / '.claude' / 'CLAUDE.md'
         self.assertTrue(rcfile.exists())
         self.assertEqual(rcfile.read_text(), 'local only')
 
@@ -362,12 +378,12 @@ class TestSyncTrackedFiles(unittest.TestCase):
     def test_only_rcfiles_copies_to_workspace(self, mock_ts):
         """File only in rcfiles should be copied to workspace."""
         mock_ts.return_value = self.new_time
-        self._setup_rcfile('.github/copilot-instructions.md', 'remote only')
+        self._setup_rcfile('.claude/CLAUDE.md', 'remote only')
 
         result = dev.sync_tracked_files(self.workspace)
 
         self.assertFalse(result)
-        ws_file = self.workspace / '.github' / 'copilot-instructions.md'
+        ws_file = self.workspace / '.claude' / 'CLAUDE.md'
         self.assertTrue(ws_file.exists())
         self.assertEqual(ws_file.read_text(), 'remote only')
 
@@ -375,13 +391,13 @@ class TestSyncTrackedFiles(unittest.TestCase):
     def test_no_git_timestamp_local_wins(self, mock_ts):
         """No git timestamp (never committed) should default to local wins."""
         mock_ts.return_value = None
-        self._setup_rcfile('.github/copilot-instructions.md', 'remote')
-        self._setup_ws_file('.github/copilot-instructions.md', 'local', self.new_time)
+        self._setup_rcfile('.claude/CLAUDE.md', 'remote')
+        self._setup_ws_file('.claude/CLAUDE.md', 'local', self.new_time)
 
         result = dev.sync_tracked_files(self.workspace)
 
         self.assertTrue(result)
-        rcfile = dev.RCFILES_DIR / '.github' / 'copilot-instructions.md'
+        rcfile = dev.RCFILES_DIR / '.claude' / 'CLAUDE.md'
         self.assertEqual(rcfile.read_text(), 'local')
 
     # --- Workspace mtime alignment tests ---
@@ -390,12 +406,12 @@ class TestSyncTrackedFiles(unittest.TestCase):
     def test_workspace_mtime_aligned_after_remote_wins(self, mock_ts):
         """After remote wins, workspace mtime should match remote timestamp."""
         mock_ts.return_value = self.new_time
-        self._setup_rcfile('.github/copilot-instructions.md', 'new remote')
-        self._setup_ws_file('.github/copilot-instructions.md', 'old local', self.old_time)
+        self._setup_rcfile('.claude/CLAUDE.md', 'new remote')
+        self._setup_ws_file('.claude/CLAUDE.md', 'old local', self.old_time)
 
         dev.sync_tracked_files(self.workspace)
 
-        ws_file = self.workspace / '.github' / 'copilot-instructions.md'
+        ws_file = self.workspace / '.claude' / 'CLAUDE.md'
         ws_mtime = datetime.fromtimestamp(ws_file.stat().st_mtime, tz=timezone.utc)
         self.assertAlmostEqual(ws_mtime.timestamp(), self.new_time.timestamp(), delta=2)
 
@@ -404,12 +420,12 @@ class TestSyncTrackedFiles(unittest.TestCase):
         """When content is identical, workspace mtime should align to remote timestamp."""
         mock_ts.return_value = self.new_time
         content = '# Same content'
-        self._setup_rcfile('.github/copilot-instructions.md', content)
-        self._setup_ws_file('.github/copilot-instructions.md', content, self.old_time)
+        self._setup_rcfile('.claude/CLAUDE.md', content)
+        self._setup_ws_file('.claude/CLAUDE.md', content, self.old_time)
 
         dev.sync_tracked_files(self.workspace)
 
-        ws_file = self.workspace / '.github' / 'copilot-instructions.md'
+        ws_file = self.workspace / '.claude' / 'CLAUDE.md'
         ws_mtime = datetime.fromtimestamp(ws_file.stat().st_mtime, tz=timezone.utc)
         self.assertAlmostEqual(ws_mtime.timestamp(), self.new_time.timestamp(), delta=2)
 

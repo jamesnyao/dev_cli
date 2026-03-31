@@ -542,20 +542,22 @@ def has_real_conflict_markers(content):
 
 
 BUILTIN_FILES = [
-    {'path': '.github/copilot-instructions.md'},
     {'path': '.claude/CLAUDE.md'},
+    {'path': '.copilot/copilot-instructions.md'},
 ]
 
 BUILTIN_DIRS = [
-    '.github/skills',
+    '.copilot/skills',
 ]
 
+HOME_DIR = Path.home()
+
 def _discover_dir_files(base_path, dir_rel_path):
-    """Discover files under a directory in both workspace and rcfiles."""
+    """Discover files under a directory in both a target path and rcfiles."""
     found = set()
-    ws_dir = Path(base_path) / dir_rel_path.replace('/', os.sep)
-    if ws_dir.is_dir():
-        for f in ws_dir.rglob('*'):
+    target_dir = Path(base_path) / dir_rel_path.replace('/', os.sep)
+    if target_dir.is_dir():
+        for f in target_dir.rglob('*'):
             if f.is_file():
                 found.add(str(f.relative_to(Path(base_path))).replace(os.sep, '/'))
     rc_dir = RCFILES_DIR / dir_rel_path
@@ -583,11 +585,23 @@ def _get_all_tracked_files(base_path=None):
 
 
 def _migrate_legacy_rcfiles():
-    """Move legacy flat repoconfig files (copilot-instructions.md, CLAUDE.md) into rcfiles/."""
+    """Move legacy flat repoconfig files into rcfiles/."""
     migrations = [
-        (CONFIG_DIR / 'copilot-instructions.md', RCFILES_DIR / '.github' / 'copilot-instructions.md'),
+        (CONFIG_DIR / 'copilot-instructions.md', RCFILES_DIR / '.copilot' / 'copilot-instructions.md'),
         (CONFIG_DIR / 'CLAUDE.md', RCFILES_DIR / '.claude' / 'CLAUDE.md'),
     ]
+    # Migrate .github → .copilot within rcfiles
+    old_gh_instructions = RCFILES_DIR / '.github' / 'copilot-instructions.md'
+    new_copilot_instructions = RCFILES_DIR / '.copilot' / 'copilot-instructions.md'
+    if old_gh_instructions.exists() and not new_copilot_instructions.exists():
+        new_copilot_instructions.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(old_gh_instructions), str(new_copilot_instructions))
+    old_gh_skills = RCFILES_DIR / '.github' / 'skills'
+    new_copilot_skills = RCFILES_DIR / '.copilot' / 'skills'
+    if old_gh_skills.is_dir() and not new_copilot_skills.is_dir():
+        new_copilot_skills.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(str(old_gh_skills), str(new_copilot_skills))
+
     for old, new in migrations:
         if old.exists() and not new.exists():
             new.parent.mkdir(parents=True, exist_ok=True)
@@ -595,44 +609,41 @@ def _migrate_legacy_rcfiles():
 
 
 def sync_tracked_files(base_path):
-    """Timestamp-based bidirectional sync between workspace and rcfiles.
+    """Timestamp-based bidirectional sync between home and rcfiles.
 
-    Compares workspace file mtime against the rcfile's git commit timestamp.
+    All tracked files sync to home (~/).
     The newer version wins. Returns True if any rcfiles were modified.
     """
-    base = Path(base_path)
-    all_files = _get_all_tracked_files(base)
+    all_files = _get_all_tracked_files(HOME_DIR)
     rcfiles_changed = False
 
     for entry in all_files:
         rel_path = entry['path']
-        workspace_file = base / rel_path.replace('/', os.sep)
+        target_file = HOME_DIR / rel_path.replace('/', os.sep)
         rcfile = RCFILES_DIR / rel_path
 
-        ws_exists = workspace_file.exists()
+        tgt_exists = target_file.exists()
         rc_exists = rcfile.exists()
 
-        if not ws_exists and not rc_exists:
+        if not tgt_exists and not rc_exists:
             continue
 
-        ws_content = workspace_file.read_bytes() if ws_exists else None
+        tgt_content = target_file.read_bytes() if tgt_exists else None
         rc_content = rcfile.read_bytes() if rc_exists else None
 
-        # Skip if content is identical, but align workspace mtime
-        if ws_content == rc_content:
-            if ws_exists and rc_exists:
+        if tgt_content == rc_content:
+            if tgt_exists and rc_exists:
                 remote_ts = get_rcfile_git_timestamp(rel_path)
                 if remote_ts:
                     ts_epoch = remote_ts.timestamp()
-                    os.utime(str(workspace_file), (ts_epoch, ts_epoch))
+                    os.utime(str(target_file), (ts_epoch, ts_epoch))
             print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path}")
             continue
 
-        # Conflict marker checks for markdown files
         if rel_path.endswith('.md'):
-            if ws_exists:
-                ws_text = workspace_file.read_text(encoding='utf-8')
-                if has_real_conflict_markers(ws_text):
+            if tgt_exists:
+                tgt_text = target_file.read_text(encoding='utf-8')
+                if has_real_conflict_markers(tgt_text):
                     print(f"{Colors.YELLOW}[WARN]{Colors.NC} {rel_path} has conflict markers, skipping")
                     continue
             if rc_exists:
@@ -642,11 +653,11 @@ def sync_tracked_files(base_path):
                     continue
 
         remote_ts = get_rcfile_git_timestamp(rel_path)
-        local_ts = get_file_mtime(workspace_file) if ws_exists else None
+        local_ts = get_file_mtime(target_file) if tgt_exists else None
 
-        if ws_exists and not rc_exists:
+        if tgt_exists and not rc_exists:
             direction = 'local'
-        elif rc_exists and not ws_exists:
+        elif rc_exists and not tgt_exists:
             direction = 'remote'
         elif remote_ts and local_ts:
             direction = 'local' if local_ts > remote_ts else 'remote'
@@ -655,15 +666,15 @@ def sync_tracked_files(base_path):
 
         if direction == 'local':
             rcfile.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(workspace_file), str(rcfile))
+            shutil.copy2(str(target_file), str(rcfile))
             rcfiles_changed = True
             print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path} {Colors.CYAN}(local \u2192 remote){Colors.NC}")
         else:
-            workspace_file.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(rcfile), str(workspace_file))
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(rcfile), str(target_file))
             if remote_ts:
                 ts_epoch = remote_ts.timestamp()
-                os.utime(str(workspace_file), (ts_epoch, ts_epoch))
+                os.utime(str(target_file), (ts_epoch, ts_epoch))
             print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path} {Colors.CYAN}(remote \u2192 local){Colors.NC}")
 
     return rcfiles_changed
