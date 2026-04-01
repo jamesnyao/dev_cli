@@ -165,14 +165,14 @@ def get_file_mtime(file_path):
 
 def compute_repo_name(repo_path, base_path=None):
     """Compute repo name, using parent/name format for gclient enlistments."""
-    repo_path = Path(repo_path).resolve()
+    repo_path = Path(os.path.abspath(str(repo_path)))
     
     parent = repo_path.parent
     if (parent / '.gclient').exists():
         return f"{parent.name}/{repo_path.name}"
     
     if base_path:
-        base_path = Path(base_path).resolve()
+        base_path = Path(os.path.abspath(str(base_path)))
         try:
             rel_path = repo_path.relative_to(base_path)
             parts = rel_path.parts
@@ -221,6 +221,7 @@ def _add_tracked_file(file_path):
 def cmd_repo_add(args):
     """Add a repository or file to tracking."""
     target_path = Path(args.path).resolve()
+    display_path = Path(os.path.abspath(args.path))
 
     if not target_path.exists():
         print(f"{Colors.RED}[X]{Colors.NC} Path does not exist: {target_path}")
@@ -240,7 +241,7 @@ def cmd_repo_add(args):
 
     config = load_config()
     base_path = get_base_path()
-    repo_name = compute_repo_name(target_path, base_path)
+    repo_name = compute_repo_name(display_path, base_path)
     config['repos'] = [r for r in config['repos'] if r['name'] != repo_name]
 
     config['repos'].append({
@@ -253,7 +254,7 @@ def cmd_repo_add(args):
     save_config(config)
     print(f"{Colors.GREEN}Added repository: {repo_name}{Colors.NC}")
     print(f"  Remote: {Colors.CYAN}{remote_url}{Colors.NC}")
-    print(f"  Path: {target_path}")
+    print(f"  Path: {display_path}")
     return 0
 
 def cmd_repo_remove(args):
