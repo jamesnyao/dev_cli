@@ -30,6 +30,8 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 CONFIG_DIR = SCRIPT_DIR / 'repoconfig'
 CONFIG_FILE = CONFIG_DIR / 'repos.json'
 ADO_PAT_FILE = CONFIG_DIR / 'ado_pat.txt'
+ADO_TOKEN_CACHE_FILE = CONFIG_DIR / 'ado_token_cache.json'
+ADO_TOKEN_CACHE_SECONDS = 2400  # 40 minutes (tokens last ~60 min)
 RCFILES_DIR = CONFIG_DIR / 'rcfiles'
 
 def get_os_type():
@@ -946,6 +948,61 @@ def cmd_ado_git(args):
             os.unlink(helper_script)
 
 
+def _get_cached_ado_token():
+    """Return cached token if still valid, else None."""
+    if not ADO_TOKEN_CACHE_FILE.exists():
+        return None
+    try:
+        cache = json.loads(ADO_TOKEN_CACHE_FILE.read_text())
+        expires = cache.get('expires', 0)
+        if datetime.now(timezone.utc).timestamp() < expires:
+            return cache.get('token')
+    except (json.JSONDecodeError, KeyError):
+        pass
+    return None
+
+
+def _cache_ado_token(token):
+    """Cache a token with expiry."""
+    cache = {
+        'token': token,
+        'expires': datetime.now(timezone.utc).timestamp() + ADO_TOKEN_CACHE_SECONDS,
+    }
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    ADO_TOKEN_CACHE_FILE.write_text(json.dumps(cache))
+
+
+def get_ado_token():
+    """Get an ADO access token, using cache if available."""
+    cached = _get_cached_ado_token()
+    if cached:
+        return cached
+
+    az_cmd = shutil.which('az') or 'az'
+    result = subprocess.run(
+        [az_cmd, 'account', 'get-access-token',
+         '--resource', '499b84ac-1321-427f-aa17-267ca6975798',
+         '--query', 'accessToken', '-o', 'tsv'],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        return None
+    token = result.stdout.strip()
+    if token:
+        _cache_ado_token(token)
+    return token
+
+
+def cmd_ado_token(args):
+    """Get an ADO access token (cached)."""
+    token = get_ado_token()
+    if not token:
+        print(f"{Colors.RED}[X]{Colors.NC} Failed to get ADO token. Run: az login", file=sys.stderr)
+        return 1
+    print(token)
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description='Dev CLI - Development workflow tool')
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
@@ -992,6 +1049,8 @@ def main():
     git_p = ado_sub.add_parser('git', help='Run git with ADO PAT auth')
     git_p.add_argument('git_args', nargs=argparse.REMAINDER, help='Git command and arguments')
 
+    ado_sub.add_parser('token', help='Get ADO access token (cached)')
+
     # Test command
     subparsers.add_parser('test', help='Run dev.py unit tests')
 
@@ -1010,6 +1069,7 @@ def main():
             'show-pat': cmd_ado_show_pat,
             'clear-pat': cmd_ado_clear_pat,
             'git': cmd_ado_git,
+            'token': cmd_ado_token,
         }
         if args.ado_command in cmd_map:
             return cmd_map[args.ado_command](args)
