@@ -351,13 +351,27 @@ def _build_commit_message():
         if len(parts) != 2:
             continue
         status_char, filepath = parts[0], parts[1]
-        filename = Path(filepath).name
+        p = Path(filepath)
+        # Show parent_dir/filename for disambiguation
+        if len(p.parts) >= 2:
+            short = f"{p.parts[-2]}/{p.name}"
+        else:
+            short = p.name
+        # Remap rcfiles paths to ~/
+        rcfiles_prefix = 'repoconfig/rcfiles/'
+        if filepath.startswith(rcfiles_prefix):
+            rel = filepath[len(rcfiles_prefix):]
+            rel_p = Path(rel)
+            if len(rel_p.parts) >= 2:
+                short = f"~/{rel_p.parts[-2]}/{rel_p.name}"
+            else:
+                short = f"~/{rel_p.name}"
         if status_char.startswith('A'):
-            added.append(filename)
+            added.append(short)
         elif status_char.startswith('M'):
-            modified.append(filename)
+            modified.append(short)
         elif status_char.startswith('D'):
-            deleted.append(filename)
+            deleted.append(short)
     
     lines = []
     if added:
@@ -370,10 +384,10 @@ def _build_commit_message():
     if not lines:
         return 'Auto-sync'
     
-    msg = 'Sync: ' + ' | '.join(lines)
+    msg = ' | '.join(lines)
     if len(msg) > 200:
         total = len(added) + len(modified) + len(deleted)
-        msg = f'Sync: {total} files ({len(added)} added, {len(modified)} modified, {len(deleted)} deleted)'
+        msg = f'{total} files ({len(added)} added, {len(modified)} modified, {len(deleted)} deleted)'
     return msg
 
 

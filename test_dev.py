@@ -210,7 +210,7 @@ class TestBuildCommitMessage(unittest.TestCase):
         Path(self.temp_dir, 'new.txt').write_text('content')
         subprocess.run(['git', 'add', 'new.txt'], cwd=self.temp_dir, capture_output=True)
         msg = dev._build_commit_message()
-        self.assertEqual(msg, 'Sync: A: new.txt')
+        self.assertEqual(msg, 'A: new.txt')
 
     def test_modified_files(self):
         """Modified files should show M: prefix"""
@@ -220,7 +220,7 @@ class TestBuildCommitMessage(unittest.TestCase):
         Path(self.temp_dir, 'file.txt').write_text('v2')
         subprocess.run(['git', 'add', 'file.txt'], cwd=self.temp_dir, capture_output=True)
         msg = dev._build_commit_message()
-        self.assertEqual(msg, 'Sync: M: file.txt')
+        self.assertEqual(msg, 'M: file.txt')
 
     def test_deleted_files(self):
         """Deleted files should show D: prefix"""
@@ -230,7 +230,7 @@ class TestBuildCommitMessage(unittest.TestCase):
         os.remove(Path(self.temp_dir, 'file.txt'))
         subprocess.run(['git', 'add', 'file.txt'], cwd=self.temp_dir, capture_output=True)
         msg = dev._build_commit_message()
-        self.assertEqual(msg, 'Sync: D: file.txt')
+        self.assertEqual(msg, 'D: file.txt')
 
     def test_mixed_changes(self):
         """Mixed changes should show all types"""
