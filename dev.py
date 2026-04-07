@@ -315,28 +315,29 @@ def cmd_repo_list(args):
     """List all tracked repositories and files."""
     config = load_config()
     print(f"{Colors.BLUE}Tracked Repositories:{Colors.NC}")
-    print("-" * 60)
 
     if not config['repos']:
         print(f"{Colors.YELLOW}[WARN]{Colors.NC} No repositories tracked yet.")
         print("Use 'dev repo add <path>' to add a repository.")
         return 0
 
+    base_path = Path(get_base_path())
     for repo in sorted(config['repos'], key=lambda r: r['path']):
-        print(f"  {repo['path']}")
-        print(f"    Remote: {repo.get('remoteUrl', 'N/A')}")
-        print()
+        repo_path = base_path / repo['path'].replace('/', os.sep)
+        link_to = repo.get('pathLinksTo')
+        if link_to:
+            repo_path = Path(os.path.expandvars(os.path.expanduser(link_to)))
+        _, url = run_git(repo_path, 'remote', 'get-url', 'origin')
+        url = url or repo.get('remoteUrl', 'N/A')
+        print(f"  {repo['path']}  {Colors.CYAN}{url}{Colors.NC}")
 
-    print("-" * 60)
     print(f"Total: {Colors.GREEN}{len(config['repos'])}{Colors.NC} repositories")
 
     files = _get_all_tracked_files()
     if files:
         print(f"\n{Colors.BLUE}Tracked Files:{Colors.NC}")
-        print("-" * 60)
         for f in sorted(files, key=lambda x: x['path']):
             print(f"  {f['path']}")
-        print("-" * 60)
         print(f"Total: {Colors.GREEN}{len(files)}{Colors.NC} files")
 
     return 0
@@ -836,74 +837,6 @@ def cmd_repo_old(args):
     return 0 if failed == 0 else 1
 
 
-# ============ PYTHON COMMANDS ============
-
-def get_python_command():
-    """Get the Python command for this platform"""
-    if get_os_type() == 'windows':
-        return ['py', '-3']
-    return ['python3']
-
-def get_current_python_version():
-    """Get the currently installed Python version"""
-    try:
-        cmd = get_python_command() + ['--version']
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            return result.stdout.strip()
-        return None
-    except Exception:
-        return None
-
-def cmd_python_update(args):
-    """Update Python to the latest stable version."""
-    os_type = get_os_type()
-
-    print(f'{Colors.BLUE}Checking Python installation...{Colors.NC}')
-    current = get_current_python_version()
-    if current:
-        print(f'  Current: {Colors.CYAN}{current}{Colors.NC}')
-
-    if os_type == 'windows':
-        print(f'{Colors.BLUE}Updating Python via winget...{Colors.NC}')
-        result = subprocess.run(['winget', 'upgrade', 'Python.Python.3.12'], 
-                               capture_output=True, text=True)
-        if 'No available upgrade found' in result.stdout or 'No installed package found' in result.stdout:
-            if 'No installed package found' in result.stdout:
-                print(f'{Colors.YELLOW}Not installed, installing...{Colors.NC}')
-                result = subprocess.run(['winget', 'install', 'Python.Python.3.12', 
-                                        '--accept-package-agreements', '--accept-source-agreements'])
-                if result.returncode == 0:
-                    print(f'{Colors.GREEN}Python installed successfully{Colors.NC}')
-                    print(f'{Colors.YELLOW}Note: Restart your terminal for changes to take effect{Colors.NC}')
-                    return 0
-            else:
-                print(f'{Colors.GREEN}Python is already up to date{Colors.NC}')
-                return 0
-        elif result.returncode == 0:
-            print(f'{Colors.GREEN}Python updated successfully{Colors.NC}')
-            print(f'{Colors.YELLOW}Note: Restart your terminal for changes to take effect{Colors.NC}')
-            return 0
-        print(f'{Colors.RED}[X]{Colors.NC} Failed to update Python')
-        return 1
-
-    elif os_type == 'darwin':
-        print(f'{Colors.BLUE}Updating Python via Homebrew...{Colors.NC}')
-        result = subprocess.run(['brew', 'upgrade', 'python@3.12'])
-        if result.returncode != 0:
-            result = subprocess.run(['brew', 'install', 'python@3.12'])
-        return 0 if result.returncode == 0 else 1
-
-    else:
-        print(f'{Colors.BLUE}Updating Python...{Colors.NC}')
-        result = subprocess.run(['which', 'apt'], capture_output=True)
-        if result.returncode == 0:
-            subprocess.run(['sudo', 'apt', 'update'])
-            result = subprocess.run(['sudo', 'apt', 'install', '-y', 'python3.12'])
-        else:
-            result = subprocess.run(['sudo', 'dnf', 'install', '-y', 'python3.12'])
-        return 0 if result.returncode == 0 else 1
-
 
 # =============================================================================
 # Init Command
@@ -1163,15 +1096,6 @@ def main():
     old_p.add_argument('--days', type=int, default=30, help='Age threshold in days (default: 30)')
     old_p.add_argument('path', nargs='?', help='Path to git repository (default: current directory)')
 
-    scan_p = repo_sub.add_parser('scan', help='Scan and add all git repos')
-    scan_p.add_argument('path', nargs='?', help='Path to scan')
-
-
-    # python subcommand
-    pyenv_parser = subparsers.add_parser('python', help='Python environment management')
-    pyenv_sub = pyenv_parser.add_subparsers(dest='python_command')
-    pyenv_sub.add_parser('update', help='Update Python to latest stable version')
-
     # ado subcommand
     ado_parser = subparsers.add_parser('ado', help='Azure DevOps integration')
     ado_sub = ado_parser.add_subparsers(dest='ado_command')
@@ -1199,11 +1123,6 @@ def main():
         return cmd_init(args)
     elif args.command == 'test':
         return cmd_test(args)
-    elif args.command == 'python':
-        if args.python_command == 'update':
-            return cmd_python_update(args)
-        else:
-            pyenv_parser.print_help()
     elif args.command == 'ado':
         cmd_map = {
             'set-pat': cmd_ado_set_pat,

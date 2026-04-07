@@ -925,5 +925,4 @@ class TestEnsureLink(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    # Run with verbosity
-    unittest.main(verbosity=2)
+    unittest.main(verbosity=2, buffer=True)
