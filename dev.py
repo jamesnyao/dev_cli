@@ -504,7 +504,6 @@ def _self_update():
     _, new_hash = run_git(SCRIPT_DIR, 'rev-parse', 'HEAD')
 
     if old_hash != new_hash:
-        print(f"{Colors.BLUE}dev_scripts updated — re-executing...{Colors.NC}")
         result = subprocess.run(
             [sys.executable, str(SCRIPT_DIR / 'dev.py')] + sys.argv[1:])
         sys.exit(result.returncode)
