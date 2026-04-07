@@ -52,16 +52,13 @@ def save_config(config):
         json.dump(config, f, indent=2)
 
 def get_base_path(config=None):
-    dev_path = os.getenv('DEV')
-    if dev_path:
-        return dev_path
     if config is None:
         config = load_config()
     devconfig = os.getenv('DEVCONFIG', '')
     roots = config.get('workspaceRoots', {})
     if devconfig and devconfig in roots:
         return os.path.expandvars(roots[devconfig])
-    raise ValueError('DEV environment variable is missing and no workspaceRoot found for DEVCONFIG.')
+    raise ValueError(f'No workspaceRoot found for DEVCONFIG={devconfig!r}. Check repos.json workspaceRoots.')
 
 def run_git(repo_path, *args):
     try:
@@ -198,6 +195,7 @@ def compute_repo_name(repo_path, base_path=None):
 def _add_tracked_file(file_path):
     """Add a single file to tracking for cross-machine sync."""
     base_path = Path(get_base_path()).resolve()
+    file_path = file_path.resolve()
 
     try:
         rel_path = file_path.relative_to(base_path)

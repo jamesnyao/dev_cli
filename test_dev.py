@@ -125,18 +125,26 @@ class TestHasRealConflictMarkers(unittest.TestCase):
 class TestGetBasePath(unittest.TestCase):
     """Test base path resolution"""
     
-    @patch.dict(os.environ, {'DEV': '/workspace'})
-    def test_uses_dev_env(self):
-        self.assertEqual(dev.get_base_path(), '/workspace')
-    
-    @patch.dict(os.environ, {'DEV': 'C:\\dev'})
-    def test_windows_path(self):
-        self.assertEqual(dev.get_base_path(), 'C:\\dev')
-    
     @patch.dict(os.environ, {}, clear=True)
-    def test_missing_dev_raises(self):
+    def test_missing_devconfig_raises(self):
         with self.assertRaises(ValueError):
-            dev.get_base_path()
+            dev.get_base_path(config={})
+
+    @patch.dict(os.environ, {'DEVCONFIG': 'unknown-machine'}, clear=True)
+    def test_unknown_devconfig_raises(self):
+        config = {'workspaceRoots': {'mac-devbox': '/Users/test'}}
+        with self.assertRaises(ValueError):
+            dev.get_base_path(config=config)
+
+    @patch.dict(os.environ, {'DEVCONFIG': 'mac-devbox'}, clear=True)
+    def test_uses_workspace_root_from_config(self):
+        config = {'workspaceRoots': {'mac-devbox': '/Users/test'}}
+        self.assertEqual(dev.get_base_path(config=config), '/Users/test')
+
+    @patch.dict(os.environ, {'DEVCONFIG': 'mac-devbox', 'DEV': '/fallback'}, clear=True)
+    def test_config_takes_priority_over_dev_env(self):
+        config = {'workspaceRoots': {'mac-devbox': '/from-config'}}
+        self.assertEqual(dev.get_base_path(config=config), '/from-config')
 
 
 class TestNormalizeGithubUrl(unittest.TestCase):
@@ -589,7 +597,8 @@ class TestAddTrackedFile(unittest.TestCase):
         self.workspace = Path(self.temp_dir) / 'workspace'
         self.workspace.mkdir()
 
-        dev.save_config({'version': 1, 'repos': []})
+        dev.save_config({'version': 1, 'repos': [],
+                         'workspaceRoots': {'test': str(self.workspace)}})
 
     def tearDown(self):
         dev.CONFIG_DIR = self.orig_config_dir
@@ -598,10 +607,9 @@ class TestAddTrackedFile(unittest.TestCase):
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    @patch.dict(os.environ, {'DEV': ''})
+    @patch.dict(os.environ, {'DEVCONFIG': 'test'})
     def test_add_tracked_file(self):
         """Adding a file should store it in config and rcfiles"""
-        os.environ['DEV'] = str(self.workspace)
 
         platform_dir = self.workspace / 'platform'
         platform_dir.mkdir()
@@ -618,10 +626,9 @@ class TestAddTrackedFile(unittest.TestCase):
         rcfile = dev.RCFILES_DIR / 'platform' / '.gclient'
         self.assertTrue(rcfile.exists())
 
-    @patch.dict(os.environ, {'DEV': ''})
+    @patch.dict(os.environ, {'DEVCONFIG': 'test'})
     def test_add_file_replaces_existing(self):
         """Adding same file again should replace the entry"""
-        os.environ['DEV'] = str(self.workspace)
 
         platform_dir = self.workspace / 'platform'
         platform_dir.mkdir()
@@ -637,10 +644,9 @@ class TestAddTrackedFile(unittest.TestCase):
         rcfile = dev.RCFILES_DIR / 'platform' / '.gclient'
         self.assertEqual(rcfile.read_text(), 'v2')
 
-    @patch.dict(os.environ, {'DEV': ''})
+    @patch.dict(os.environ, {'DEVCONFIG': 'test'})
     def test_add_file_outside_workspace_fails(self):
         """Adding a file outside workspace should fail"""
-        os.environ['DEV'] = str(self.workspace)
 
         outside = Path(self.temp_dir) / 'outside.txt'
         outside.write_text('test')
