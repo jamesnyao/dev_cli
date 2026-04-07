@@ -737,6 +737,90 @@ class TestAdoGit(unittest.TestCase):
         self.assertIn('https://dev.azure.com/org/proj/_git/repo', call_args)
 
 
+class TestCmdInit(unittest.TestCase):
+    """Test dev init bootstrapping"""
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+        self.home = self.tmpdir / 'home'
+        self.home.mkdir()
+        self.omz_dir = self.home / '.oh-my-zsh'
+        self.autosuggestions_dir = self.omz_dir / 'custom' / 'plugins' / 'zsh-autosuggestions'
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    @patch('dev.OMZ_DIR')
+    def test_omz_already_installed(self, mock_dir):
+        omz = self.home / '.oh-my-zsh'
+        omz.mkdir()
+        mock_dir.__class__ = type(omz)
+        with patch('dev.OMZ_DIR', omz):
+            result = dev._install_omz()
+        self.assertTrue(result)
+
+    @patch('subprocess.run')
+    @patch('dev.OMZ_DIR')
+    def test_omz_install_failure(self, mock_dir, mock_run):
+        omz = self.home / '.oh-my-zsh'
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout='', stderr='fail')
+        with patch('dev.OMZ_DIR', omz):
+            result = dev._install_omz()
+        self.assertFalse(result)
+
+    @patch('dev.OMZ_AUTOSUGGESTIONS_DIR')
+    def test_autosuggestions_already_installed(self, mock_dir):
+        d = self.autosuggestions_dir
+        d.mkdir(parents=True)
+        with patch('dev.OMZ_AUTOSUGGESTIONS_DIR', d):
+            result = dev._install_omz_autosuggestions()
+        self.assertTrue(result)
+
+    @patch('subprocess.run')
+    def test_autosuggestions_install(self, mock_run):
+        d = self.home / 'plugins' / 'zsh-autosuggestions'
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr='')
+        with patch('dev.OMZ_AUTOSUGGESTIONS_DIR', d):
+            result = dev._install_omz_autosuggestions()
+        self.assertTrue(result)
+        call_args = mock_run.call_args[0][0]
+        self.assertIn('git', call_args[0])
+        self.assertIn('clone', call_args[1])
+
+    @patch('dev.get_os_type', return_value='darwin')
+    def test_bashrc_skipped_on_mac(self, mock_os):
+        result = dev._ensure_bashrc_sources_zshrc()
+        self.assertTrue(result)
+
+    @patch('dev.get_os_type', return_value='linux')
+    def test_bashrc_created_when_missing(self, mock_os):
+        bashrc = self.home / '.bashrc'
+        with patch('dev.Path.home', return_value=self.home):
+            result = dev._ensure_bashrc_sources_zshrc()
+        self.assertTrue(result)
+        self.assertIn('exec zsh', bashrc.read_text())
+
+    @patch('dev.get_os_type', return_value='linux')
+    def test_bashrc_appended_when_exists(self, mock_os):
+        bashrc = self.home / '.bashrc'
+        bashrc.write_text('# existing config\n')
+        with patch('dev.Path.home', return_value=self.home):
+            result = dev._ensure_bashrc_sources_zshrc()
+        self.assertTrue(result)
+        content = bashrc.read_text()
+        self.assertIn('# existing config', content)
+        self.assertIn('exec zsh', content)
+
+    @patch('dev.get_os_type', return_value='linux')
+    def test_bashrc_not_duplicated(self, mock_os):
+        bashrc = self.home / '.bashrc'
+        bashrc.write_text(f'# config\n{dev.BASHRC_SOURCE_LINE}\n')
+        with patch('dev.Path.home', return_value=self.home):
+            result = dev._ensure_bashrc_sources_zshrc()
+        self.assertTrue(result)
+        self.assertEqual(bashrc.read_text().count('exec zsh'), 1)
+
+
 if __name__ == '__main__':
     # Run with verbosity
     unittest.main(verbosity=2)

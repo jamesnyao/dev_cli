@@ -869,6 +869,108 @@ def cmd_python_update(args):
         return 0 if result.returncode == 0 else 1
 
 
+# =============================================================================
+# Init Command
+# =============================================================================
+
+OMZ_DIR = Path.home() / '.oh-my-zsh'
+OMZ_AUTOSUGGESTIONS_DIR = OMZ_DIR / 'custom' / 'plugins' / 'zsh-autosuggestions'
+OMZ_INSTALL_URL = 'https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh'
+OMZ_AUTOSUGGESTIONS_URL = 'https://github.com/zsh-users/zsh-autosuggestions'
+BASHRC_SOURCE_LINE = '[ -f ~/.zshrc ] && exec zsh'
+
+
+def _install_omz():
+    """Install Oh My Zsh if not present."""
+    if OMZ_DIR.exists():
+        print(f"{Colors.GREEN}[OK]{Colors.NC} oh-my-zsh already installed")
+        return True
+
+    print(f"{Colors.BLUE}Installing oh-my-zsh...{Colors.NC}")
+    installer = Path(tempfile.mktemp(suffix='.sh'))
+    try:
+        result = subprocess.run(
+            ['curl', '-fsSL', OMZ_INSTALL_URL, '-o', str(installer)],
+            capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"{Colors.RED}[X]{Colors.NC} Failed to download oh-my-zsh installer")
+            return False
+
+        env = os.environ.copy()
+        env['KEEP_ZSHRC'] = 'yes'
+        result = subprocess.run(
+            ['sh', str(installer), '--unattended'],
+            env=env, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"{Colors.RED}[X]{Colors.NC} oh-my-zsh install failed: {result.stderr}")
+            return False
+    finally:
+        installer.unlink(missing_ok=True)
+
+    print(f"{Colors.GREEN}[OK]{Colors.NC} oh-my-zsh installed")
+    return True
+
+
+def _install_omz_autosuggestions():
+    """Install zsh-autosuggestions plugin if not present."""
+    if OMZ_AUTOSUGGESTIONS_DIR.exists():
+        print(f"{Colors.GREEN}[OK]{Colors.NC} zsh-autosuggestions already installed")
+        return True
+
+    print(f"{Colors.BLUE}Installing zsh-autosuggestions...{Colors.NC}")
+    result = subprocess.run(
+        ['git', 'clone', OMZ_AUTOSUGGESTIONS_URL, str(OMZ_AUTOSUGGESTIONS_DIR)],
+        capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"{Colors.RED}[X]{Colors.NC} Failed to install zsh-autosuggestions: {result.stderr}")
+        return False
+
+    print(f"{Colors.GREEN}[OK]{Colors.NC} zsh-autosuggestions installed")
+    return True
+
+
+def _ensure_bashrc_sources_zshrc():
+    """On Linux, ensure .bashrc execs into zsh so .zshrc is loaded."""
+    if get_os_type() != 'linux':
+        return True
+
+    bashrc = Path.home() / '.bashrc'
+    if not bashrc.exists():
+        print(f"{Colors.YELLOW}[WARN]{Colors.NC} No .bashrc found, creating one")
+        bashrc.write_text(f"{BASHRC_SOURCE_LINE}\n")
+        print(f"{Colors.GREEN}[OK]{Colors.NC} Created .bashrc with zsh exec")
+        return True
+
+    content = bashrc.read_text()
+    if BASHRC_SOURCE_LINE in content:
+        print(f"{Colors.GREEN}[OK]{Colors.NC} .bashrc already execs into zsh")
+        return True
+
+    with open(bashrc, 'a') as f:
+        f.write(f"\n{BASHRC_SOURCE_LINE}\n")
+    print(f"{Colors.GREEN}[OK]{Colors.NC} Added zsh exec to .bashrc")
+    return True
+
+
+def cmd_init(args):
+    """Bootstrap shell environment on a fresh machine."""
+    print(f"{Colors.BLUE}Initializing shell environment...{Colors.NC}")
+    print("-" * 60)
+
+    ok = True
+    ok = _install_omz() and ok
+    ok = _install_omz_autosuggestions() and ok
+    ok = _ensure_bashrc_sources_zshrc() and ok
+
+    print("-" * 60)
+    if ok:
+        print(f"{Colors.GREEN}[OK]{Colors.NC} Shell environment ready. Open a new terminal to apply.")
+    else:
+        print(f"{Colors.YELLOW}[WARN]{Colors.NC} Some steps failed. See above for details.")
+
+    return 0 if ok else 1
+
+
 def cmd_test(args):
     """Run dev.py unit tests"""
     test_file = SCRIPT_DIR / 'test_dev.py'
@@ -1078,12 +1180,17 @@ def main():
 
     ado_sub.add_parser('token', help='Get ADO access token (cached)')
 
+    # init subcommand
+    subparsers.add_parser('init', help='Bootstrap shell environment (oh-my-zsh, plugins, bashrc)')
+
     # Test command
     subparsers.add_parser('test', help='Run dev.py unit tests')
 
     args = parser.parse_args()
 
-    if args.command == 'test':
+    if args.command == 'init':
+        return cmd_init(args)
+    elif args.command == 'test':
         return cmd_test(args)
     elif args.command == 'python':
         if args.python_command == 'update':
