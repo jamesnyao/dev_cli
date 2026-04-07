@@ -505,7 +505,9 @@ def _self_update():
 
     if old_hash != new_hash:
         print(f"{Colors.BLUE}dev_scripts updated — re-executing...{Colors.NC}")
-        os.execv(sys.executable, [sys.executable, str(SCRIPT_DIR / 'dev.py')] + sys.argv[1:])
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_DIR / 'dev.py')] + sys.argv[1:])
+        sys.exit(result.returncode)
 
 
 def cmd_repo_sync(args):
