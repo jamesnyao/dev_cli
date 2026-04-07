@@ -901,102 +901,73 @@ def cmd_python_update(args):
 # Init Command
 # =============================================================================
 
-OMZ_DIR = Path.home() / '.oh-my-zsh'
-OMZ_AUTOSUGGESTIONS_DIR = OMZ_DIR / 'custom' / 'plugins' / 'zsh-autosuggestions'
-OMZ_INSTALL_URL = 'https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh'
-OMZ_AUTOSUGGESTIONS_URL = 'https://github.com/zsh-users/zsh-autosuggestions'
 BASHRC_SOURCE_LINE = '[ -f ~/.zshrc ] && exec zsh'
+PSRC_CONTENT = '$profile = "$HOME\\.psrc.ps1"\n. $profile\n'
 
 
-def _install_omz():
-    """Install Oh My Zsh if not present."""
-    if OMZ_DIR.exists():
-        print(f"{Colors.GREEN}[OK]{Colors.NC} oh-my-zsh already installed")
-        return True
-
-    print(f"{Colors.BLUE}Installing oh-my-zsh...{Colors.NC}")
-    installer = Path(tempfile.mktemp(suffix='.sh'))
-    try:
-        result = subprocess.run(
-            ['curl', '-fsSL', OMZ_INSTALL_URL, '-o', str(installer)],
-            capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"{Colors.RED}[X]{Colors.NC} Failed to download oh-my-zsh installer")
-            return False
-
-        env = os.environ.copy()
-        env['KEEP_ZSHRC'] = 'yes'
-        result = subprocess.run(
-            ['sh', str(installer), '--unattended'],
-            env=env, capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"{Colors.RED}[X]{Colors.NC} oh-my-zsh install failed: {result.stderr}")
-            return False
-    finally:
-        installer.unlink(missing_ok=True)
-
-    print(f"{Colors.GREEN}[OK]{Colors.NC} oh-my-zsh installed")
-    return True
-
-
-def _install_omz_autosuggestions():
-    """Install zsh-autosuggestions plugin if not present."""
-    if OMZ_AUTOSUGGESTIONS_DIR.exists():
-        print(f"{Colors.GREEN}[OK]{Colors.NC} zsh-autosuggestions already installed")
-        return True
-
-    print(f"{Colors.BLUE}Installing zsh-autosuggestions...{Colors.NC}")
+def _init_windows():
+    """Ensure $PROFILE sources .psrc.ps1."""
     result = subprocess.run(
-        ['git', 'clone', OMZ_AUTOSUGGESTIONS_URL, str(OMZ_AUTOSUGGESTIONS_DIR)],
+        ['powershell', '-NoProfile', '-Command', '$PROFILE'],
         capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"{Colors.RED}[X]{Colors.NC} Failed to install zsh-autosuggestions: {result.stderr}")
-        return False
+        print(f"{Colors.RED}[X]{Colors.NC} Could not determine $PROFILE path")
+        return 1
 
-    print(f"{Colors.GREEN}[OK]{Colors.NC} zsh-autosuggestions installed")
-    return True
+    profile_path = Path(result.stdout.strip())
+
+    if profile_path.exists():
+        content = profile_path.read_text()
+        if '.psrc.ps1' in content:
+            print(f"{Colors.GREEN}[OK]{Colors.NC} $PROFILE already sources .psrc.ps1")
+            return 0
+
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(PSRC_CONTENT)
+    print(f"{Colors.GREEN}[OK]{Colors.NC} Wrote $PROFILE -> .psrc.ps1 ({profile_path})")
+    return 0
 
 
-def _ensure_bashrc_sources_zshrc():
-    """On Linux, ensure .bashrc execs into zsh so .zshrc is loaded."""
-    if get_os_type() != 'linux':
-        return True
+def _init_unix():
+    """Ensure zsh is the running shell, or .bashrc execs into it."""
+    shell = os.environ.get('SHELL', '')
+
+    if 'zsh' in shell:
+        print(f"{Colors.GREEN}[OK]{Colors.NC} zsh is the default shell")
+        return 0
+
+    if get_os_type() == 'linux' and not shutil.which('zsh'):
+        print(f"{Colors.BLUE}Installing zsh...{Colors.NC}")
+        result = subprocess.run(
+            ['sudo', 'apt-get', 'install', '-y', 'zsh'],
+            capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"{Colors.RED}[X]{Colors.NC} Failed to install zsh: {result.stderr}")
+            return 1
+        print(f"{Colors.GREEN}[OK]{Colors.NC} zsh installed")
 
     bashrc = Path.home() / '.bashrc'
     if not bashrc.exists():
-        print(f"{Colors.YELLOW}[WARN]{Colors.NC} No .bashrc found, creating one")
         bashrc.write_text(f"{BASHRC_SOURCE_LINE}\n")
         print(f"{Colors.GREEN}[OK]{Colors.NC} Created .bashrc with zsh exec")
-        return True
+        return 0
 
     content = bashrc.read_text()
     if BASHRC_SOURCE_LINE in content:
         print(f"{Colors.GREEN}[OK]{Colors.NC} .bashrc already execs into zsh")
-        return True
+        return 0
 
     with open(bashrc, 'a') as f:
         f.write(f"\n{BASHRC_SOURCE_LINE}\n")
     print(f"{Colors.GREEN}[OK]{Colors.NC} Added zsh exec to .bashrc")
-    return True
+    return 0
 
 
 def cmd_init(args):
-    """Bootstrap shell environment on a fresh machine."""
-    print(f"{Colors.BLUE}Initializing shell environment...{Colors.NC}")
-    print("-" * 60)
-
-    ok = True
-    ok = _install_omz() and ok
-    ok = _install_omz_autosuggestions() and ok
-    ok = _ensure_bashrc_sources_zshrc() and ok
-
-    print("-" * 60)
-    if ok:
-        print(f"{Colors.GREEN}[OK]{Colors.NC} Shell environment ready. Open a new terminal to apply.")
-    else:
-        print(f"{Colors.YELLOW}[WARN]{Colors.NC} Some steps failed. See above for details.")
-
-    return 0 if ok else 1
+    """Bootstrap shell profile on a fresh machine."""
+    if get_os_type() == 'windows':
+        return _init_windows()
+    return _init_unix()
 
 
 def cmd_test(args):
@@ -1208,8 +1179,8 @@ def main():
 
     ado_sub.add_parser('token', help='Get ADO access token (cached)')
 
-    # init subcommand
-    subparsers.add_parser('init', help='Bootstrap shell environment (oh-my-zsh, plugins, bashrc)')
+    # Init command
+    subparsers.add_parser('init', help='Bootstrap shell profile ($PROFILE on Windows, .bashrc→zsh on Linux)')
 
     # Test command
     subparsers.add_parser('test', help='Run dev.py unit tests')

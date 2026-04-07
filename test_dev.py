@@ -737,87 +737,85 @@ class TestAdoGit(unittest.TestCase):
 
 
 class TestCmdInit(unittest.TestCase):
-    """Test dev init bootstrapping"""
+    """Test dev init shell bootstrap"""
 
     def setUp(self):
         self.tmpdir = Path(tempfile.mkdtemp())
         self.home = self.tmpdir / 'home'
         self.home.mkdir()
-        self.omz_dir = self.home / '.oh-my-zsh'
-        self.autosuggestions_dir = self.omz_dir / 'custom' / 'plugins' / 'zsh-autosuggestions'
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
 
-    @patch('dev.OMZ_DIR')
-    def test_omz_already_installed(self, mock_dir):
-        omz = self.home / '.oh-my-zsh'
-        omz.mkdir()
-        mock_dir.__class__ = type(omz)
-        with patch('dev.OMZ_DIR', omz):
-            result = dev._install_omz()
-        self.assertTrue(result)
-
-    @patch('subprocess.run')
-    @patch('dev.OMZ_DIR')
-    def test_omz_install_failure(self, mock_dir, mock_run):
-        omz = self.home / '.oh-my-zsh'
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout='', stderr='fail')
-        with patch('dev.OMZ_DIR', omz):
-            result = dev._install_omz()
-        self.assertFalse(result)
-
-    @patch('dev.OMZ_AUTOSUGGESTIONS_DIR')
-    def test_autosuggestions_already_installed(self, mock_dir):
-        d = self.autosuggestions_dir
-        d.mkdir(parents=True)
-        with patch('dev.OMZ_AUTOSUGGESTIONS_DIR', d):
-            result = dev._install_omz_autosuggestions()
-        self.assertTrue(result)
-
-    @patch('subprocess.run')
-    def test_autosuggestions_install(self, mock_run):
-        d = self.home / 'plugins' / 'zsh-autosuggestions'
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr='')
-        with patch('dev.OMZ_AUTOSUGGESTIONS_DIR', d):
-            result = dev._install_omz_autosuggestions()
-        self.assertTrue(result)
-        call_args = mock_run.call_args[0][0]
-        self.assertIn('git', call_args[0])
-        self.assertIn('clone', call_args[1])
-
-    @patch('dev.get_os_type', return_value='darwin')
-    def test_bashrc_skipped_on_mac(self, mock_os):
-        result = dev._ensure_bashrc_sources_zshrc()
-        self.assertTrue(result)
-
+    # -- Unix: zsh already default --
+    @patch.dict(os.environ, {'SHELL': '/bin/zsh'})
     @patch('dev.get_os_type', return_value='linux')
-    def test_bashrc_created_when_missing(self, mock_os):
+    def test_unix_zsh_already_default(self, mock_os):
+        self.assertEqual(dev._init_unix(), 0)
+
+    # -- Unix: bash running, bashrc missing --
+    @patch.dict(os.environ, {'SHELL': '/bin/bash'})
+    @patch('dev.get_os_type', return_value='linux')
+    @patch('shutil.which', return_value='/usr/bin/zsh')
+    def test_unix_creates_bashrc(self, mock_which, mock_os):
         bashrc = self.home / '.bashrc'
         with patch('dev.Path.home', return_value=self.home):
-            result = dev._ensure_bashrc_sources_zshrc()
-        self.assertTrue(result)
+            self.assertEqual(dev._init_unix(), 0)
         self.assertIn('exec zsh', bashrc.read_text())
 
+    # -- Unix: bashrc exists, no exec zsh --
+    @patch.dict(os.environ, {'SHELL': '/bin/bash'})
     @patch('dev.get_os_type', return_value='linux')
-    def test_bashrc_appended_when_exists(self, mock_os):
+    @patch('shutil.which', return_value='/usr/bin/zsh')
+    def test_unix_appends_to_bashrc(self, mock_which, mock_os):
         bashrc = self.home / '.bashrc'
-        bashrc.write_text('# existing config\n')
+        bashrc.write_text('# existing\n')
         with patch('dev.Path.home', return_value=self.home):
-            result = dev._ensure_bashrc_sources_zshrc()
-        self.assertTrue(result)
+            self.assertEqual(dev._init_unix(), 0)
         content = bashrc.read_text()
-        self.assertIn('# existing config', content)
+        self.assertIn('# existing', content)
         self.assertIn('exec zsh', content)
 
+    # -- Unix: bashrc already has exec zsh --
+    @patch.dict(os.environ, {'SHELL': '/bin/bash'})
     @patch('dev.get_os_type', return_value='linux')
-    def test_bashrc_not_duplicated(self, mock_os):
+    @patch('shutil.which', return_value='/usr/bin/zsh')
+    def test_unix_bashrc_idempotent(self, mock_which, mock_os):
         bashrc = self.home / '.bashrc'
-        bashrc.write_text(f'# config\n{dev.BASHRC_SOURCE_LINE}\n')
+        bashrc.write_text(f'{dev.BASHRC_SOURCE_LINE}\n')
         with patch('dev.Path.home', return_value=self.home):
-            result = dev._ensure_bashrc_sources_zshrc()
-        self.assertTrue(result)
+            self.assertEqual(dev._init_unix(), 0)
         self.assertEqual(bashrc.read_text().count('exec zsh'), 1)
+
+    # -- Unix: zsh not installed, apt installs it --
+    @patch.dict(os.environ, {'SHELL': '/bin/bash'})
+    @patch('subprocess.run')
+    @patch('dev.get_os_type', return_value='linux')
+    @patch('shutil.which', return_value=None)
+    def test_unix_installs_zsh(self, mock_which, mock_os, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr='')
+        with patch('dev.Path.home', return_value=self.home):
+            self.assertEqual(dev._init_unix(), 0)
+        self.assertIn('zsh', mock_run.call_args[0][0])
+
+    # -- Windows: profile already sources psrc --
+    @patch('subprocess.run')
+    def test_windows_profile_already_set(self, mock_run):
+        profile = self.tmpdir / 'profile.ps1'
+        profile.write_text('$profile = "$HOME\\.psrc.ps1"\n. $profile\n')
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=str(profile) + '\n', stderr='')
+        self.assertEqual(dev._init_windows(), 0)
+
+    # -- Windows: profile missing, creates it --
+    @patch('subprocess.run')
+    def test_windows_creates_profile(self, mock_run):
+        profile = self.tmpdir / 'Documents' / 'PowerShell' / 'Microsoft.PowerShell_profile.ps1'
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=str(profile) + '\n', stderr='')
+        self.assertEqual(dev._init_windows(), 0)
+        self.assertTrue(profile.exists())
+        self.assertIn('.psrc.ps1', profile.read_text())
 
 
 class TestEnsureLink(unittest.TestCase):
