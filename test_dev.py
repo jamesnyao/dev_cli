@@ -65,7 +65,6 @@ class TestConfig(unittest.TestCase):
     def test_save_and_load_config(self):
         """Config should round-trip correctly"""
         config = {
-            'version': 1,
             'repos': [{'path': 'test-repo', 'remoteUrl': 'https://example.com/test.git'}]
         }
         dev.save_config(config)
@@ -284,7 +283,7 @@ class TestSyncTrackedFiles(unittest.TestCase):
         self.home.mkdir()
         dev.HOME_DIR = self.home
 
-        dev.save_config({'version': 1, 'repos': [], 'files': []})
+        dev.save_config({'repos': [], 'files': []})
 
         self.old_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
         self.new_time = datetime(2026, 3, 1, tzinfo=timezone.utc)
@@ -553,7 +552,7 @@ class TestSyncTrackedFiles(unittest.TestCase):
         """User-added files should follow the same timestamp logic."""
         mock_ts.return_value = self.new_time
         dev.save_config({
-            'version': 1, 'repos': [],
+            'repos': [],
             'files': [{'path': 'platform/.gclient'}]
         })
         self._setup_rcfile('platform/.gclient', 'new remote')
@@ -573,7 +572,7 @@ class TestSyncTrackedFiles(unittest.TestCase):
         """Non-existent file with no rcfile should be skipped."""
         mock_ts.return_value = None
         dev.save_config({
-            'version': 1, 'repos': [],
+            'repos': [],
             'files': [{'path': 'nonexistent.txt'}]
         })
         result = dev.sync_tracked_files(self.home)
@@ -597,7 +596,7 @@ class TestAddTrackedFile(unittest.TestCase):
         self.workspace = Path(self.temp_dir) / 'workspace'
         self.workspace.mkdir()
 
-        dev.save_config({'version': 1, 'repos': [],
+        dev.save_config({'repos': [],
                          'workspaceRoots': {'test': str(self.workspace)}})
 
     def tearDown(self):
@@ -832,7 +831,7 @@ class TestEnsureLink(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_creates_symlink(self):
-        """linkTo repo should get a symlink from workspace path"""
+        """pathLinksTo repo should get a symlink from workspace path"""
         repo_path = self.base / 'actual_repo'
         repo_path.mkdir()
         (repo_path / '.git').mkdir()

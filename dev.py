@@ -44,11 +44,7 @@ def get_os_type():
 
 def load_config():
     with open(CONFIG_FILE, 'r') as f:
-        config = json.load(f)
-    for repo in config.get('repos', []):
-        if 'name' in repo and 'path' not in repo:
-            repo['path'] = repo.pop('name')
-    return config
+        return json.load(f)
 
 def save_config(config):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -58,7 +54,7 @@ def save_config(config):
     config['repos'] = sorted(config.get('repos', []), key=lambda r: r.get('path', r.get('name', '')))
     config['files'] = sorted(config.get('files', []), key=lambda f: f.get('path', ''))
     with open(CONFIG_FILE, 'w') as f:
-        json.dump(config, f, indent=2)
+        json.dump(config, f, indent=2, sort_keys=True)
 
 def get_base_path(config=None):
     if config is None:
@@ -500,7 +496,7 @@ def cmd_repo_sync(args):
     for repo in sorted(config['repos'], key=lambda r: r['path']):
         name = repo['path']
         url = repo.get('remoteUrl', '')
-        link_to = repo.get('linkTo')
+        link_to = repo.get('pathLinksTo')
         # Handle nested paths like platform/src
         link_path = base_path / name.replace('/', os.sep)
 
@@ -605,7 +601,11 @@ def sync_tracked_files(base_path):
 
     for entry in all_files:
         rel_path = entry['path']
-        target_file = HOME_DIR / rel_path.replace('/', os.sep)
+        link_to = entry.get('pathLinksTo')
+        if link_to:
+            target_file = Path(os.path.expandvars(os.path.expanduser(link_to)))
+        else:
+            target_file = HOME_DIR / rel_path.replace('/', os.sep)
         rcfile = RCFILES_DIR / rel_path
 
         tgt_exists = target_file.exists()
