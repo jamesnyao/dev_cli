@@ -66,11 +66,11 @@ class TestConfig(unittest.TestCase):
         """Config should round-trip correctly"""
         config = {
             'version': 1,
-            'repos': [{'name': 'test-repo', 'remoteUrl': 'https://example.com/test.git'}]
+            'repos': [{'path': 'test-repo', 'remoteUrl': 'https://example.com/test.git'}]
         }
         dev.save_config(config)
         loaded = dev.load_config()
-        self.assertEqual(loaded['repos'][0]['name'], 'test-repo')
+        self.assertEqual(loaded['repos'][0]['path'], 'test-repo')
 
 
 class TestComputeRepoName(unittest.TestCase):
@@ -321,7 +321,7 @@ class TestSyncTrackedFiles(unittest.TestCase):
         config = dev.load_config()
         files = config.get('files', [])
         if not any(f['path'] == path for f in files):
-            files.append({'path': path, 'addedAt': '2026-01-01T00:00:00+00:00'})
+            files.append({'path': path})
         config['files'] = files
         dev.save_config(config)
 
@@ -554,7 +554,7 @@ class TestSyncTrackedFiles(unittest.TestCase):
         mock_ts.return_value = self.new_time
         dev.save_config({
             'version': 1, 'repos': [],
-            'files': [{'path': 'platform/.gclient', 'addedAt': '2026-01-01T00:00:00+00:00'}]
+            'files': [{'path': 'platform/.gclient'}]
         })
         self._setup_rcfile('platform/.gclient', 'new remote')
         platform_dir = self.home / 'platform'
@@ -574,7 +574,7 @@ class TestSyncTrackedFiles(unittest.TestCase):
         mock_ts.return_value = None
         dev.save_config({
             'version': 1, 'repos': [],
-            'files': [{'path': 'nonexistent.txt', 'addedAt': '2026-01-01T00:00:00+00:00'}]
+            'files': [{'path': 'nonexistent.txt'}]
         })
         result = dev.sync_tracked_files(self.home)
         self.assertFalse(result)

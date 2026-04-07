@@ -210,7 +210,6 @@ def _add_tracked_file(file_path):
     config['files'] = [f for f in config['files'] if f['path'] != rel_str]
     config['files'].append({
         'path': rel_str,
-        'addedAt': datetime.now(timezone.utc).isoformat()
     })
 
     dest = RCFILES_DIR / rel_str
@@ -247,12 +246,11 @@ def cmd_repo_add(args):
     config = load_config()
     base_path = get_base_path()
     repo_name = compute_repo_name(display_path, base_path)
-    config['repos'] = [r for r in config['repos'] if r['name'] != repo_name]
+    config['repos'] = [r for r in config['repos'] if r['path'] != repo_name]
 
     config['repos'].append({
-        'name': repo_name,
+        'path': repo_name,
         'remoteUrl': remote_url,
-        'addedAt': datetime.now(timezone.utc).isoformat()
     })
 
     save_config(config)
@@ -267,7 +265,7 @@ def cmd_repo_remove(args):
     name = args.name
 
     original_count = len(config['repos'])
-    config['repos'] = [r for r in config['repos'] if r['name'] != name]
+    config['repos'] = [r for r in config['repos'] if r['path'] != name]
 
     if len(config['repos']) < original_count:
         save_config(config)
@@ -319,10 +317,9 @@ def cmd_repo_list(args):
         print("Use 'dev repo add <path>' to add a repository.")
         return 0
 
-    for repo in sorted(config['repos'], key=lambda r: r['name']):
-        print(f"  {repo['name']}")
+    for repo in sorted(config['repos'], key=lambda r: r['path']):
+        print(f"  {repo['path']}")
         print(f"    Remote: {repo.get('remoteUrl', 'N/A')}")
-        print(f"    Added: {repo.get('addedAt', 'Unknown')}")
         print()
 
     print("-" * 60)
@@ -489,8 +486,8 @@ def cmd_repo_sync(args):
     synced = skipped = failed = 0
     config_changed = False
 
-    for repo in sorted(config['repos'], key=lambda r: r['name']):
-        name = repo['name']
+    for repo in sorted(config['repos'], key=lambda r: r['path']):
+        name = repo['path']
         url = repo.get('remoteUrl', '')
         link_to = repo.get('linkTo')
         # Handle nested paths like platform/src
@@ -670,14 +667,14 @@ def cmd_repo_status(args):
     print("-" * 60)
 
     present = missing = 0
-    for repo in sorted(config['repos'], key=lambda r: r['name']):
+    for repo in sorted(config['repos'], key=lambda r: r['path']):
         # Handle nested paths like platform/src
-        target_path = base_path / repo['name'].replace('/', os.sep)
+        target_path = base_path / repo['path'].replace('/', os.sep)
         if target_path.exists():
-            print(f"{Colors.GREEN}[OK]{Colors.NC} {repo['name']}")
+            print(f"{Colors.GREEN}[OK]{Colors.NC} {repo['path']}")
             present += 1
         else:
-            print(f"{Colors.RED}[X]{Colors.NC} {repo['name']} {Colors.YELLOW}(missing){Colors.NC}")
+            print(f"{Colors.RED}[X]{Colors.NC} {repo['path']} {Colors.YELLOW}(missing){Colors.NC}")
             missing += 1
 
     print("-" * 60)
