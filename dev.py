@@ -10,7 +10,6 @@ import platform
 import shutil
 import subprocess
 import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -43,7 +42,7 @@ def get_os_type():
     return 'linux'
 
 def load_config():
-    with open(CONFIG_FILE, 'r') as f:
+    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
         return json.load(f)
 
 def save_config(config):
@@ -53,7 +52,7 @@ def save_config(config):
             repo['skipOn'] = sorted(repo['skipOn'])
     config['repos'] = sorted(config.get('repos', []), key=lambda r: r.get('path', r.get('name', '')))
     config['files'] = sorted(config.get('files', []), key=lambda f: f.get('path', ''))
-    with open(CONFIG_FILE, 'w') as f:
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=2, sort_keys=True)
 
 def get_base_path(config=None):
@@ -176,11 +175,11 @@ def get_file_mtime(file_path):
 def compute_repo_name(repo_path, base_path=None):
     """Compute repo name, using parent/name format for gclient enlistments."""
     repo_path = Path(os.path.abspath(str(repo_path)))
-    
+
     parent = repo_path.parent
     if (parent / '.gclient').exists():
         return f"{parent.name}/{repo_path.name}"
-    
+
     if base_path:
         base_path = Path(os.path.abspath(str(base_path)))
         try:
@@ -192,7 +191,7 @@ def compute_repo_name(repo_path, base_path=None):
                     return '/'.join(parts[:2])
         except ValueError:
             pass
-    
+
     return repo_path.name
 
 # ============ REPO COMMANDS ============
@@ -289,25 +288,6 @@ def cmd_repo_remove(args):
         print(f"{Colors.GREEN}Removed file: {name}{Colors.NC}")
         return 0
 
-    for dir_path in BUILTIN_DIRS:
-        if name.startswith(dir_path + '/'):
-            base_path = Path(get_base_path())
-            ws_file = base_path / name.replace('/', os.sep)
-            rc_file = RCFILES_DIR / name
-            removed = False
-            for f in [ws_file, rc_file]:
-                if f.exists():
-                    f.unlink()
-                    removed = True
-                    try:
-                        f.parent.rmdir()
-                    except OSError:
-                        pass
-            if removed:
-                print(f"{Colors.GREEN}Removed file: {name}{Colors.NC}")
-                return 0
-            break
-
     print(f"{Colors.RED}[X]{Colors.NC} '{name}' is not tracked")
     return 1
 
@@ -347,7 +327,7 @@ def _build_commit_message():
     _, status = run_git(SCRIPT_DIR, 'diff', '--cached', '--name-status')
     if not status:
         return 'Auto-sync'
-    
+
     added, modified, deleted = [], [], []
     for line in status.strip().split('\n'):
         if not line:
@@ -377,7 +357,7 @@ def _build_commit_message():
             modified.append(short)
         elif status_char.startswith('D'):
             deleted.append(short)
-    
+
     lines = []
     if added:
         lines.append(f"A: {', '.join(added)}")
@@ -385,10 +365,10 @@ def _build_commit_message():
         lines.append(f"M: {', '.join(modified)}")
     if deleted:
         lines.append(f"D: {', '.join(deleted)}")
-    
+
     if not lines:
         return 'Auto-sync'
-    
+
     msg = ' | '.join(lines)
     if len(msg) > 200:
         total = len(added) + len(modified) + len(deleted)
@@ -415,7 +395,8 @@ def sync_rcfiles_push():
     if ahead > 0:
         success, output = run_git(SCRIPT_DIR, 'push')
         if success:
-            _, log = run_git(SCRIPT_DIR, 'log', f'origin/{default_branch}~{ahead}..origin/{default_branch}', '--oneline')
+            log_range = f'origin/{default_branch}~{ahead}..origin/{default_branch}'
+            _, log = run_git(SCRIPT_DIR, 'log', log_range, '--oneline')
             print(f"{Colors.GREEN}[OK]{Colors.NC} rcfiles pushed ({ahead} commits)")
             for line in log.strip().splitlines():
                 print(f"     {line}")
@@ -580,7 +561,7 @@ def has_real_conflict_markers(content):
     import re
     lines = content.split('\n')
     in_code_block = False
-    
+
     for line in lines:
         stripped = line.strip()
         if stripped.startswith('```'):
@@ -590,7 +571,7 @@ def has_real_conflict_markers(content):
             continue
         if re.match(r'^<{7}\s', line) or re.match(r'^={7}\s*$', line) or re.match(r'^>{7}\s', line):
             return True
-    
+
     return False
 
 
@@ -730,25 +711,25 @@ def cmd_repo_root(args):
 def cmd_repo_old(args):
     """List or delete old branches with user/developer/ prefix."""
     from datetime import timedelta
-    
+
     repo_path = args.path
     if not repo_path:
         repo_path = os.getcwd()
     repo_path = Path(repo_path).resolve()
-    
+
     if not (repo_path / '.git').exists():
         print(f"{Colors.RED}Error: {repo_path} is not a git repository{Colors.NC}")
         return 1
-    
+
     prefix = args.prefix or 'user/developer/'
     days = args.days or 30
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    
+
     print(f"{Colors.BLUE}Scanning for branches older than {days} days with prefix '{prefix}'...{Colors.NC}")
     print(f"Repository: {repo_path}")
     print(f"Cutoff date: {cutoff.strftime('%Y-%m-%d')}")
     print("-" * 60)
-    
+
     # Get all remote branches matching the prefix
     result = subprocess.run(
         ['git', '-C', str(repo_path), 'branch', '-r', '--list', f'*{prefix}*'],
@@ -757,12 +738,12 @@ def cmd_repo_old(args):
     if result.returncode != 0:
         print(f"{Colors.RED}Error listing branches: {result.stderr}{Colors.NC}")
         return 1
-    
+
     branches = [b.strip() for b in result.stdout.strip().split('\n') if b.strip()]
     if not branches:
         print(f"{Colors.GREEN}No remote branches found with prefix '{prefix}'{Colors.NC}")
         return 0
-    
+
     old_branches = []
     for branch in branches:
         # Get the last commit date for each branch
@@ -772,11 +753,11 @@ def cmd_repo_old(args):
         )
         if result.returncode != 0:
             continue
-        
+
         date_str = result.stdout.strip()
         if not date_str:
             continue
-        
+
         try:
             commit_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
             if commit_date < cutoff:
@@ -784,40 +765,40 @@ def cmd_repo_old(args):
                 old_branches.append((branch, commit_date, age_days))
         except ValueError:
             continue
-    
+
     if not old_branches:
         print(f"{Colors.GREEN}No branches older than {days} days found{Colors.NC}")
         return 0
-    
+
     # Sort by age (oldest first)
     old_branches.sort(key=lambda x: x[1])
-    
+
     print(f"\n{Colors.YELLOW}Found {len(old_branches)} old branches:{Colors.NC}\n")
     for branch, commit_date, age_days in old_branches:
         # Strip 'remotes/origin/' prefix for display
         display_name = branch.replace('remotes/origin/', 'origin/')
         print(f"  {display_name}")
         print(f"    Last commit: {commit_date.strftime('%Y-%m-%d')} ({age_days} days ago)")
-    
+
     if not args.delete:
         print(f"\n{Colors.CYAN}To delete these branches, run:{Colors.NC}")
-        print(f"  dev repo old --delete")
+        print("  dev repo old --delete")
         return 0
-    
+
     # Delete mode
     print(f"\n{Colors.RED}WARNING: This will delete {len(old_branches)} remote branches!{Colors.NC}")
     confirm = input("Type 'yes' to confirm deletion: ")
     if confirm.lower() != 'yes':
         print("Aborted.")
         return 0
-    
+
     deleted = 0
     failed = 0
     for branch, commit_date, age_days in old_branches:
         # Extract branch name without remote prefix
         remote_branch = branch.replace('remotes/origin/', '').replace('origin/', '')
         print(f"Deleting origin/{remote_branch}...", end=' ')
-        
+
         result = subprocess.run(
             ['git', '-C', str(repo_path), 'push', 'origin', '--delete', remote_branch],
             capture_output=True, text=True
@@ -830,10 +811,10 @@ def cmd_repo_old(args):
             if result.stderr:
                 print(f"    {result.stderr.strip()}")
             failed += 1
-    
+
     print("-" * 60)
     print(f"Deleted: {Colors.GREEN}{deleted}{Colors.NC} | Failed: {Colors.RED}{failed}{Colors.NC}")
-    
+
     return 0 if failed == 0 else 1
 
 
@@ -858,13 +839,13 @@ def _init_windows():
     profile_path = Path(result.stdout.strip())
 
     if profile_path.exists():
-        content = profile_path.read_text()
+        content = profile_path.read_text(encoding='utf-8')
         if '.psrc.ps1' in content:
             print(f"{Colors.GREEN}[OK]{Colors.NC} $PROFILE already sources .psrc.ps1")
             return 0
 
     profile_path.parent.mkdir(parents=True, exist_ok=True)
-    profile_path.write_text(PSRC_CONTENT)
+    profile_path.write_text(PSRC_CONTENT, encoding='utf-8')
     print(f"{Colors.GREEN}[OK]{Colors.NC} Wrote $PROFILE -> .psrc.ps1 ({profile_path})")
     return 0
 
@@ -889,16 +870,16 @@ def _init_unix():
 
     bashrc = Path.home() / '.bashrc'
     if not bashrc.exists():
-        bashrc.write_text(f"{BASHRC_SOURCE_LINE}\n")
+        bashrc.write_text(f"{BASHRC_SOURCE_LINE}\n", encoding='utf-8')
         print(f"{Colors.GREEN}[OK]{Colors.NC} Created .bashrc with zsh exec")
         return 0
 
-    content = bashrc.read_text()
+    content = bashrc.read_text(encoding='utf-8')
     if BASHRC_SOURCE_LINE in content:
         print(f"{Colors.GREEN}[OK]{Colors.NC} .bashrc already execs into zsh")
         return 0
 
-    with open(bashrc, 'a') as f:
+    with open(bashrc, 'a', encoding='utf-8') as f:
         f.write(f"\n{BASHRC_SOURCE_LINE}\n")
     print(f"{Colors.GREEN}[OK]{Colors.NC} Added zsh exec to .bashrc")
     return 0
@@ -917,10 +898,19 @@ def cmd_test(args):
     if not test_file.exists():
         print(f"{Colors.RED}[X]{Colors.NC} test_dev.py not found")
         return 1
-    
-    print(f"{Colors.BLUE}Running tests...{Colors.NC}")
-    result = subprocess.run([sys.executable, str(test_file)], cwd=str(SCRIPT_DIR))
-    return result.returncode
+
+    print(f"{Colors.BLUE}Running tests...{Colors.NC}", flush=True)
+    result = subprocess.run(
+        [sys.executable, '-u', '-m', 'unittest', 'test_dev', '-b'],
+        cwd=str(SCRIPT_DIR))
+    if result.returncode != 0:
+        return result.returncode
+
+    print(f"\n{Colors.BLUE}Running pylint...{Colors.NC}", flush=True)
+    lint = subprocess.run(
+        [sys.executable, '-u', '-m', 'pylint', 'dev.py'],
+        cwd=str(SCRIPT_DIR))
+    return lint.returncode
 
 
 # =============================================================================
@@ -944,16 +934,16 @@ def cmd_ado_set_pat(args):
         except EOFError:
             print(f"{Colors.RED}[X]{Colors.NC} No PAT provided")
             return 1
-    
+
     if not pat:
         print(f"{Colors.RED}[X]{Colors.NC} PAT cannot be empty")
         return 1
-    
+
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     ADO_PAT_FILE.write_text(pat)
     if sys.platform != 'win32':
         os.chmod(ADO_PAT_FILE, 0o600)
-    
+
     print(f"{Colors.GREEN}[OK] ADO PAT saved to {ADO_PAT_FILE}{Colors.NC}")
     print(f"     {Colors.YELLOW}Note: Keep this file secure and do not commit it.{Colors.NC}")
     return 0
@@ -967,7 +957,7 @@ def cmd_ado_show_pat(args):
         print(f"     Stored at: {ADO_PAT_FILE}")
     else:
         print(f"{Colors.YELLOW}ADO PAT is not configured{Colors.NC}")
-        print(f"     Run: dev ado set-pat")
+        print("     Run: dev ado set-pat")
     return 0
 
 def cmd_ado_clear_pat(args):
@@ -985,8 +975,8 @@ def cmd_ado_git(args):
     if git_args and git_args[0] == '--':
         git_args = git_args[1:]
     if not git_args:
-        print(f"Usage: dev ado git <git-command> [args...]")
-        print(f"Example: dev ado git pull")
+        print("Usage: dev ado git <git-command> [args...]")
+        print("Example: dev ado git pull")
         return 1
 
     token = get_ado_token()
@@ -1082,10 +1072,10 @@ def main():
     # ado subcommand
     ado_parser = subparsers.add_parser('ado', help='Azure DevOps integration')
     ado_sub = ado_parser.add_subparsers(dest='ado_command')
-    
+
     set_pat_p = ado_sub.add_parser('set-pat', help='Set Azure DevOps PAT')
     set_pat_p.add_argument('pat', nargs='?', help='PAT value (will prompt if not provided)')
-    
+
     ado_sub.add_parser('show-pat', help='Show if PAT is configured')
     ado_sub.add_parser('clear-pat', help='Clear stored PAT')
 
@@ -1139,5 +1129,3 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
-
-
