@@ -472,16 +472,60 @@ def _ensure_link(link_path, repo_path):
     link_path.symlink_to(repo_path, target_is_directory=True)
 
 
+def _self_update():
+    """Pull latest dev_scripts and re-exec if code changed."""
+    _, old_hash = run_git(SCRIPT_DIR, 'rev-parse', 'HEAD')
+
+    run_git(SCRIPT_DIR, 'add', '-A')
+    _, status = run_git(SCRIPT_DIR, 'status', '--porcelain')
+    if status:
+        commit_msg = _build_commit_message()
+        run_git(SCRIPT_DIR, 'commit', '-m', commit_msg)
+
+    success, _ = run_git(SCRIPT_DIR, 'fetch', 'origin')
+    if not success:
+        return
+
+    default_branch = get_default_branch(SCRIPT_DIR) or 'main'
+    _, ahead_behind = run_git(SCRIPT_DIR, 'rev-list', '--left-right', '--count', f'HEAD...origin/{default_branch}')
+    try:
+        _, behind = ahead_behind.split()
+        behind = int(behind)
+    except Exception:
+        behind = 0
+
+    if behind > 0:
+        success, _ = run_git(SCRIPT_DIR, 'rebase', f'origin/{default_branch}')
+        if not success:
+            run_git(SCRIPT_DIR, 'rebase', '--abort')
+            print(f"{Colors.RED}[X]{Colors.NC} Rebase conflict in dev_scripts. Please resolve manually.")
+            return
+
+    _, new_hash = run_git(SCRIPT_DIR, 'rev-parse', 'HEAD')
+
+    if old_hash != new_hash:
+        print(f"{Colors.BLUE}dev_scripts updated — re-executing...{Colors.NC}")
+        os.execv(sys.executable, [sys.executable, str(SCRIPT_DIR / 'dev.py')] + sys.argv[1:])
+
+
 def cmd_repo_sync(args):
     """Clone missing repositories and sync tracked files."""
+    _self_update()
+
     config = load_config()
     base_path = Path(get_base_path())
 
-    sync_rcfiles_pull()
-    sync_tracked_files(base_path)
+    # 1. rcfiles
+    print(f"{Colors.BLUE}Syncing rcfiles...{Colors.NC}")
     sync_rcfiles_push()
     print()
 
+    # 2. tracked files
+    print(f"{Colors.BLUE}Syncing tracked files...{Colors.NC}")
+    sync_tracked_files(base_path)
+    print()
+
+    # 3. repos
     config = load_config()
 
     print(f"{Colors.BLUE}Syncing repositories to: {base_path}{Colors.NC}")
