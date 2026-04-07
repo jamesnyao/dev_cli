@@ -821,6 +821,79 @@ class TestCmdInit(unittest.TestCase):
         self.assertEqual(bashrc.read_text().count('exec zsh'), 1)
 
 
+class TestEnsureLink(unittest.TestCase):
+    """Test _ensure_link symlink creation"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.base = Path(self.temp_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_creates_symlink(self):
+        """linkTo repo should get a symlink from workspace path"""
+        repo_path = self.base / 'actual_repo'
+        repo_path.mkdir()
+        (repo_path / '.git').mkdir()
+
+        link_path = self.base / 'workspace' / 'test'
+
+        dev._ensure_link(link_path, repo_path)
+
+        self.assertTrue(link_path.is_symlink())
+        self.assertEqual(link_path.resolve(), repo_path.resolve())
+
+    def test_no_symlink_when_same_path(self):
+        """No symlink when link_path == repo_path"""
+        repo_path = self.base / 'repo'
+        repo_path.mkdir()
+
+        dev._ensure_link(repo_path, repo_path)
+
+        self.assertFalse(repo_path.is_symlink())
+
+    def test_replaces_stale_symlink(self):
+        """Stale symlink should be replaced"""
+        old_target = self.base / 'old'
+        old_target.mkdir()
+        new_target = self.base / 'new'
+        new_target.mkdir()
+
+        link_path = self.base / 'link'
+        link_path.symlink_to(old_target, target_is_directory=True)
+
+        dev._ensure_link(link_path, new_target)
+
+        self.assertTrue(link_path.is_symlink())
+        self.assertEqual(link_path.resolve(), new_target.resolve())
+
+    def test_skips_when_real_dir_exists(self):
+        """Should not replace a real directory with a symlink"""
+        repo_path = self.base / 'actual'
+        repo_path.mkdir()
+        link_path = self.base / 'existing_dir'
+        link_path.mkdir()
+        (link_path / 'file.txt').write_text('data')
+
+        dev._ensure_link(link_path, repo_path)
+
+        self.assertFalse(link_path.is_symlink())
+        self.assertTrue((link_path / 'file.txt').exists())
+
+    def test_idempotent_when_correct(self):
+        """Calling again with correct symlink should be a no-op"""
+        repo_path = self.base / 'repo'
+        repo_path.mkdir()
+        link_path = self.base / 'link'
+        link_path.symlink_to(repo_path, target_is_directory=True)
+
+        dev._ensure_link(link_path, repo_path)
+
+        self.assertTrue(link_path.is_symlink())
+        self.assertEqual(link_path.resolve(), repo_path.resolve())
+
+
 if __name__ == '__main__':
     # Run with verbosity
     unittest.main(verbosity=2)
