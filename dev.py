@@ -980,12 +980,7 @@ def cmd_ado_clear_pat(args):
     return 0
 
 def cmd_ado_git(args):
-    """Run a git command with ADO PAT authentication."""
-    pat = get_ado_pat()
-    if not pat:
-        print(f"{Colors.RED}[X]{Colors.NC} No ADO PAT configured. Run: dev ado set-pat")
-        return 1
-
+    """Run a git command with ADO bearer token authentication."""
     git_args = args.git_args
     if git_args and git_args[0] == '--':
         git_args = git_args[1:]
@@ -994,26 +989,14 @@ def cmd_ado_git(args):
         print(f"Example: dev ado git pull")
         return 1
 
-    helper_script = None
-    try:
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as f:
-            f.write('#!/bin/sh\n'
-                    'cat > /dev/null\n'
-                    'printf "password=%s\\n" "$ADO_PAT"\n')
-            helper_script = f.name
-        os.chmod(helper_script, 0o700)
+    token = get_ado_token()
+    if not token:
+        print(f"{Colors.RED}[X]{Colors.NC} Failed to get ADO token. Run: az login")
+        return 1
 
-        env = {**os.environ, 'ADO_PAT': pat}
-        result = subprocess.run(
-            ['git', '-c', 'credential.helper=',
-             '-c', 'credential.helper=store',
-             '-c', f'credential.helper={helper_script}'] + git_args,
-            env=env
-        )
-        return result.returncode
-    finally:
-        if helper_script and os.path.exists(helper_script):
-            os.unlink(helper_script)
+    result = subprocess.run(
+        ['git', '-c', f'http.extraheader=Authorization: Bearer {token}'] + git_args)
+    return result.returncode
 
 
 def _get_cached_ado_token():

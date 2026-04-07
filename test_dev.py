@@ -655,67 +655,42 @@ class TestAddTrackedFile(unittest.TestCase):
 
 
 class TestAdoGit(unittest.TestCase):
-    """Test ado git command."""
 
-    def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
-        self.orig_pat_file = dev.ADO_PAT_FILE
-        dev.ADO_PAT_FILE = Path(self.temp_dir) / 'ado_pat.txt'
-
-    def tearDown(self):
-        dev.ADO_PAT_FILE = self.orig_pat_file
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-
-    def test_no_pat_returns_error(self):
+    @patch('dev.get_ado_token', return_value=None)
+    def test_no_token_returns_error(self, mock_token):
         args = argparse.Namespace(git_args=['pull'])
         result = dev.cmd_ado_git(args)
         self.assertEqual(result, 1)
 
-    def test_no_git_args_returns_error(self):
-        dev.ADO_PAT_FILE.write_text('test-pat')
+    @patch('dev.get_ado_token', return_value='test-token')
+    def test_no_git_args_returns_error(self, mock_token):
         args = argparse.Namespace(git_args=[])
         result = dev.cmd_ado_git(args)
         self.assertEqual(result, 1)
 
-    def test_strips_leading_doubledash(self):
-        dev.ADO_PAT_FILE.write_text('test-pat')
+    @patch('dev.get_ado_token', return_value='test-token')
+    def test_strips_leading_doubledash(self, mock_token):
         args = argparse.Namespace(git_args=['--'])
         result = dev.cmd_ado_git(args)
         self.assertEqual(result, 1)
 
     @patch('subprocess.run')
-    def test_runs_git_with_credential_helper(self, mock_run):
-        dev.ADO_PAT_FILE.write_text('test-pat-value')
+    @patch('dev.get_ado_token', return_value='test-bearer-token')
+    def test_runs_git_with_bearer_token(self, mock_token, mock_run):
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
         args = argparse.Namespace(git_args=['pull'])
         result = dev.cmd_ado_git(args)
         self.assertEqual(result, 0)
-        mock_run.assert_called_once()
         call_args = mock_run.call_args[0][0]
         self.assertEqual(call_args[0], 'git')
-        self.assertIn('credential.helper=', call_args)
-        self.assertIn('credential.helper=store', call_args)
+        header_arg = [a for a in call_args if 'Authorization: Bearer' in a]
+        self.assertEqual(len(header_arg), 1)
+        self.assertIn('test-bearer-token', header_arg[0])
         self.assertIn('pull', call_args)
-        call_env = mock_run.call_args[1]['env']
-        self.assertEqual(call_env['ADO_PAT'], 'test-pat-value')
 
     @patch('subprocess.run')
-    def test_cleans_up_temp_file(self, mock_run):
-        dev.ADO_PAT_FILE.write_text('test-pat-value')
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
-        args = argparse.Namespace(git_args=['fetch'])
-        dev.cmd_ado_git(args)
-        call_args = mock_run.call_args[0][0]
-        helper_arg = [a for a in call_args
-                      if a.startswith('credential.helper=') and a != 'credential.helper='
-                      and a != 'credential.helper=store']
-        self.assertEqual(len(helper_arg), 1)
-        helper_path = helper_arg[0].split('=', 1)[1]
-        self.assertFalse(os.path.exists(helper_path))
-
-    @patch('subprocess.run')
-    def test_passes_extra_git_args(self, mock_run):
-        dev.ADO_PAT_FILE.write_text('test-pat-value')
+    @patch('dev.get_ado_token', return_value='test-bearer-token')
+    def test_passes_extra_git_args(self, mock_token, mock_run):
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
         args = argparse.Namespace(git_args=['pull', '--rebase'])
         result = dev.cmd_ado_git(args)
@@ -725,8 +700,8 @@ class TestAdoGit(unittest.TestCase):
         self.assertIn('--rebase', call_args)
 
     @patch('subprocess.run')
-    def test_clone_with_url(self, mock_run):
-        dev.ADO_PAT_FILE.write_text('test-pat-value')
+    @patch('dev.get_ado_token', return_value='test-bearer-token')
+    def test_clone_with_url(self, mock_token, mock_run):
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
         args = argparse.Namespace(git_args=['clone', 'https://dev.azure.com/org/proj/_git/repo'])
         result = dev.cmd_ado_git(args)
