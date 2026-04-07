@@ -529,7 +529,6 @@ def cmd_repo_sync(args):
     config = load_config()
 
     print(f"{Colors.BLUE}Syncing repositories to: {base_path}{Colors.NC}")
-    print("-" * 60)
 
     if not config['repos']:
         print(f"{Colors.YELLOW}[WARN]{Colors.NC} No repositories to sync.")
@@ -601,7 +600,7 @@ def cmd_repo_sync(args):
     if config_changed:
         save_config(config)
 
-    print("-" * 60)
+    print()
     synced_str = f"{Colors.GREEN}{synced}{Colors.NC}" if synced > 0 else str(synced)
     skipped_str = f"{Colors.CYAN}{skipped}{Colors.NC}" if skipped > 0 else str(skipped)
     failed_str = f"{Colors.RED}{failed}{Colors.NC}" if failed > 0 else str(failed)
