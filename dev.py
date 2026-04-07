@@ -210,7 +210,6 @@ def _add_tracked_file(file_path):
     config['files'] = [f for f in config['files'] if f['path'] != rel_str]
     config['files'].append({
         'path': rel_str,
-        'addedFrom': str(file_path),
         'addedAt': datetime.now(timezone.utc).isoformat()
     })
 
@@ -253,7 +252,6 @@ def cmd_repo_add(args):
     config['repos'].append({
         'name': repo_name,
         'remoteUrl': remote_url,
-        'addedFrom': str(target_path),
         'addedAt': datetime.now(timezone.utc).isoformat()
     })
 
@@ -455,6 +453,20 @@ def sync_rcfiles_push():
         print(f"{Colors.GREEN}[OK]{Colors.NC} rcfiles up to date")
 
 
+def _ensure_link(link_path, repo_path):
+    """Create a symlink from link_path -> repo_path if needed."""
+    if link_path == repo_path:
+        return
+    if link_path.is_symlink():
+        if link_path.resolve() == repo_path.resolve():
+            return
+        link_path.unlink()
+    elif link_path.exists():
+        return
+    link_path.parent.mkdir(parents=True, exist_ok=True)
+    link_path.symlink_to(repo_path, target_is_directory=True)
+
+
 def cmd_repo_sync(args):
     """Clone missing repositories and sync tracked files."""
     config = load_config()
@@ -480,12 +492,19 @@ def cmd_repo_sync(args):
     for repo in sorted(config['repos'], key=lambda r: r['name']):
         name = repo['name']
         url = repo.get('remoteUrl', '')
+        link_to = repo.get('linkTo')
         # Handle nested paths like platform/src
-        target_path = base_path / name.replace('/', os.sep)
+        link_path = base_path / name.replace('/', os.sep)
 
-        if target_path.exists():
+        if link_to:
+            repo_path = Path(os.path.expandvars(os.path.expanduser(link_to)))
+        else:
+            repo_path = link_path
+
+        if repo_path.exists():
+            _ensure_link(link_path, repo_path)
             print(f"{Colors.GREEN}[OK]{Colors.NC} {name}")
-            check_stale_branch(target_path, name)
+            check_stale_branch(repo_path, name)
             skipped += 1
             continue
 
@@ -519,11 +538,12 @@ def cmd_repo_sync(args):
             skipped += 1
             continue
 
-        target_path.parent.mkdir(parents=True, exist_ok=True)
+        repo_path.parent.mkdir(parents=True, exist_ok=True)
 
         print(f"{Colors.BLUE}[DOWN] Cloning {name}...{Colors.NC}")
-        result = subprocess.run(['git', 'clone', url, str(target_path)])
+        result = subprocess.run(['git', 'clone', url, str(repo_path)])
         if result.returncode == 0:
+            _ensure_link(link_path, repo_path)
             print(f"{Colors.GREEN}[OK] Cloned {name}{Colors.NC}")
             synced += 1
         else:
