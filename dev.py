@@ -44,7 +44,11 @@ def get_os_type():
 
 def load_config():
     with open(CONFIG_FILE, 'r') as f:
-        return json.load(f)
+        config = json.load(f)
+    for repo in config.get('repos', []):
+        if 'name' in repo and 'path' not in repo:
+            repo['path'] = repo.pop('name')
+    return config
 
 def save_config(config):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -473,6 +477,8 @@ def cmd_repo_sync(args):
     sync_tracked_files(base_path)
     sync_rcfiles_push()
     print()
+
+    config = load_config()
 
     print(f"{Colors.BLUE}Syncing repositories to: {base_path}{Colors.NC}")
     print("-" * 60)
