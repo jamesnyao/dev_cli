@@ -52,6 +52,11 @@ def load_config():
 
 def save_config(config):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    for repo in config.get('repos', []):
+        if 'skipOn' in repo:
+            repo['skipOn'] = sorted(repo['skipOn'])
+    config['repos'] = sorted(config.get('repos', []), key=lambda r: r.get('path', r.get('name', '')))
+    config['files'] = sorted(config.get('files', []), key=lambda f: f.get('path', ''))
     with open(CONFIG_FILE, 'w') as f:
         json.dump(config, f, indent=2)
 
@@ -516,7 +521,7 @@ def cmd_repo_sync(args):
             failed += 1
             continue
 
-        # Check if this repo was previously declined on this machine
+        # Check if this repo is skipped on this machine
         devconfig = os.getenv('DEVCONFIG', '')
         skip_list = repo.get('skipOn', [])
         if devconfig and devconfig in skip_list:
@@ -532,11 +537,8 @@ def cmd_repo_sync(args):
 
         if response != 'y':
             if devconfig:
-                if 'skipOn' not in repo:
-                    repo['skipOn'] = []
-                if devconfig not in repo['skipOn']:
-                    repo['skipOn'].append(devconfig)
-                    config_changed = True
+                repo.setdefault('skipOn', []).append(devconfig)
+                config_changed = True
             print(f"{Colors.GREEN}[SKIP]{Colors.NC} {name}")
             skipped += 1
             continue
