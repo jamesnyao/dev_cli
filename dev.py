@@ -395,40 +395,6 @@ def _build_commit_message():
     return msg
 
 
-def sync_rcfiles_pull():
-    """Commit pending changes, fetch remote, and rebase."""
-    print(f"{Colors.BLUE}Syncing rcfiles (dev_scripts)...{Colors.NC}")
-
-    run_git(SCRIPT_DIR, 'add', '-A')
-    _, status = run_git(SCRIPT_DIR, 'status', '--porcelain')
-    if status:
-        commit_msg = _build_commit_message()
-        run_git(SCRIPT_DIR, 'commit', '-m', commit_msg)
-
-    success, _ = run_git(SCRIPT_DIR, 'fetch', 'origin')
-    if not success:
-        print(f"{Colors.YELLOW}[WARN]{Colors.NC} Could not fetch from remote")
-        return False
-
-    default_branch = get_default_branch(SCRIPT_DIR) or 'main'
-    _, ahead_behind = run_git(SCRIPT_DIR, 'rev-list', '--left-right', '--count', f'HEAD...origin/{default_branch}')
-
-    try:
-        ahead, behind = ahead_behind.split()
-        behind = int(behind)
-    except Exception:
-        behind = 0
-
-    if behind > 0:
-        success, output = run_git(SCRIPT_DIR, 'rebase', f'origin/{default_branch}')
-        if not success:
-            run_git(SCRIPT_DIR, 'rebase', '--abort')
-            print(f"{Colors.RED}[X]{Colors.NC} Rebase conflict in rcfiles. Please resolve manually.")
-            return False
-
-    return True
-
-
 def sync_rcfiles_push():
     """Commit any pending changes and push to remote."""
     run_git(SCRIPT_DIR, 'add', '-A')
@@ -473,7 +439,7 @@ def _ensure_link(link_path, repo_path):
 
 
 def _self_update():
-    """Pull latest dev_scripts and re-exec if code changed."""
+    """Pull latest dev_scripts, re-exec if changed."""
     _, old_hash = run_git(SCRIPT_DIR, 'rev-parse', 'HEAD')
 
     run_git(SCRIPT_DIR, 'add', '-A')
@@ -516,17 +482,14 @@ def cmd_repo_sync(args):
     config = load_config()
     base_path = Path(get_base_path())
 
-    # 1. rcfiles
     print(f"{Colors.BLUE}Syncing rcfiles...{Colors.NC}")
     sync_rcfiles_push()
     print()
 
-    # 2. tracked files
     print(f"{Colors.BLUE}Syncing tracked files...{Colors.NC}")
     sync_tracked_files(base_path)
     print()
 
-    # 3. repos
     config = load_config()
 
     print(f"{Colors.BLUE}Syncing repositories to: {base_path}{Colors.NC}")
