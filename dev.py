@@ -55,7 +55,13 @@ def get_base_path(config=None):
     dev_path = os.getenv('DEV')
     if dev_path:
         return dev_path
-    raise ValueError('DEV environment variable is missing.')
+    if config is None:
+        config = load_config()
+    devconfig = os.getenv('DEVCONFIG', '')
+    roots = config.get('workspaceRoots', {})
+    if devconfig and devconfig in roots:
+        return os.path.expandvars(roots[devconfig])
+    raise ValueError('DEV environment variable is missing and no workspaceRoot found for DEVCONFIG.')
 
 def run_git(repo_path, *args):
     try:
@@ -678,6 +684,14 @@ def cmd_repo_status(args):
     return 0
 
 
+def cmd_repo_root(args):
+    """Print the workspace root for the current machine."""
+    config = load_config()
+    base_path = get_base_path(config)
+    print(base_path)
+    return 0
+
+
 def cmd_repo_old(args):
     """List or delete old branches with user/developer/ prefix."""
     from datetime import timedelta
@@ -1034,6 +1048,7 @@ def main():
     repo_sub.add_parser('list', help='List all tracked repositories')
     repo_sub.add_parser('sync', help='Clone missing repositories')
     repo_sub.add_parser('status', help='Show repo status on this machine')
+    repo_sub.add_parser('root', help='Print workspace root for this machine')
 
     old_p = repo_sub.add_parser('old', help='List/delete old branches')
     old_p.add_argument('--delete', action='store_true', help='Delete the old branches')
@@ -1097,6 +1112,7 @@ def main():
             'sync': cmd_repo_sync,
             'status': cmd_repo_status,
             'old': cmd_repo_old,
+            'root': cmd_repo_root,
         }
         if args.repo_command in cmd_map:
             return cmd_map[args.repo_command](args)
