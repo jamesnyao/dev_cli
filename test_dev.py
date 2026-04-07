@@ -737,7 +737,6 @@ class TestAdoGit(unittest.TestCase):
 
 
 class TestCmdInit(unittest.TestCase):
-    """Test dev init shell bootstrap"""
 
     def setUp(self):
         self.tmpdir = Path(tempfile.mkdtemp())
@@ -747,13 +746,11 @@ class TestCmdInit(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
 
-    # -- Unix: zsh already default --
     @patch.dict(os.environ, {'SHELL': '/bin/zsh'})
     @patch('dev.get_os_type', return_value='linux')
     def test_unix_zsh_already_default(self, mock_os):
         self.assertEqual(dev._init_unix(), 0)
 
-    # -- Unix: bash running, bashrc missing --
     @patch.dict(os.environ, {'SHELL': '/bin/bash'})
     @patch('dev.get_os_type', return_value='linux')
     @patch('shutil.which', return_value='/usr/bin/zsh')
@@ -763,7 +760,6 @@ class TestCmdInit(unittest.TestCase):
             self.assertEqual(dev._init_unix(), 0)
         self.assertIn('exec zsh', bashrc.read_text())
 
-    # -- Unix: bashrc exists, no exec zsh --
     @patch.dict(os.environ, {'SHELL': '/bin/bash'})
     @patch('dev.get_os_type', return_value='linux')
     @patch('shutil.which', return_value='/usr/bin/zsh')
@@ -776,7 +772,6 @@ class TestCmdInit(unittest.TestCase):
         self.assertIn('# existing', content)
         self.assertIn('exec zsh', content)
 
-    # -- Unix: bashrc already has exec zsh --
     @patch.dict(os.environ, {'SHELL': '/bin/bash'})
     @patch('dev.get_os_type', return_value='linux')
     @patch('shutil.which', return_value='/usr/bin/zsh')
@@ -787,7 +782,6 @@ class TestCmdInit(unittest.TestCase):
             self.assertEqual(dev._init_unix(), 0)
         self.assertEqual(bashrc.read_text().count('exec zsh'), 1)
 
-    # -- Unix: zsh not installed, apt installs it --
     @patch.dict(os.environ, {'SHELL': '/bin/bash'})
     @patch('subprocess.run')
     @patch('dev.get_os_type', return_value='linux')
@@ -798,7 +792,6 @@ class TestCmdInit(unittest.TestCase):
             self.assertEqual(dev._init_unix(), 0)
         self.assertIn('zsh', mock_run.call_args[0][0])
 
-    # -- Windows: profile already sources psrc --
     @patch('subprocess.run')
     def test_windows_profile_already_set(self, mock_run):
         profile = self.tmpdir / 'profile.ps1'
@@ -807,7 +800,6 @@ class TestCmdInit(unittest.TestCase):
             args=[], returncode=0, stdout=str(profile) + '\n', stderr='')
         self.assertEqual(dev._init_windows(), 0)
 
-    # -- Windows: profile missing, creates it --
     @patch('subprocess.run')
     def test_windows_creates_profile(self, mock_run):
         profile = self.tmpdir / 'Documents' / 'PowerShell' / 'Microsoft.PowerShell_profile.ps1'
@@ -816,6 +808,47 @@ class TestCmdInit(unittest.TestCase):
         self.assertEqual(dev._init_windows(), 0)
         self.assertTrue(profile.exists())
         self.assertIn('.psrc.ps1', profile.read_text())
+
+
+class TestSelfUpdate(unittest.TestCase):
+
+    @patch('dev.run_git')
+    def test_no_update_when_hash_unchanged(self, mock_git):
+        mock_git.return_value = (True, 'abc123')
+        dev._self_update()
+        calls = [c[0][1:] for c in mock_git.call_args_list]
+        self.assertIn(('rev-parse', 'HEAD'), calls)
+        self.assertNotIn('rebase', str(calls))
+
+    @patch('dev.run_git')
+    def test_skips_when_fetch_fails(self, mock_git):
+        def side_effect(path, *args):
+            if args[0] == 'fetch':
+                return (False, '')
+            if args[0] == 'rev-parse':
+                return (True, 'abc123')
+            return (True, '')
+        mock_git.side_effect = side_effect
+        dev._self_update()
+
+    @patch('subprocess.run')
+    @patch('dev.get_default_branch', return_value='main')
+    @patch('dev.run_git')
+    def test_reexecs_when_hash_changes(self, mock_git, mock_branch, mock_subprocess):
+        call_count = [0]
+        def side_effect(path, *args):
+            if args[0] == 'rev-parse':
+                call_count[0] += 1
+                return (True, 'old' if call_count[0] == 1 else 'new')
+            if args[0] == 'rev-list':
+                return (True, '0\t1')
+            return (True, '')
+        mock_git.side_effect = side_effect
+        mock_subprocess.return_value = subprocess.CompletedProcess(args=[], returncode=0)
+        with self.assertRaises(SystemExit) as ctx:
+            dev._self_update()
+        self.assertEqual(ctx.exception.code, 0)
+        mock_subprocess.assert_called_once()
 
 
 class TestEnsureLink(unittest.TestCase):

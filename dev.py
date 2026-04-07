@@ -515,13 +515,6 @@ def cmd_repo_sync(args):
         else:
             repo_path = link_path
 
-        if repo_path.exists():
-            _ensure_link(link_path, repo_path)
-            print(f"{Colors.GREEN}[OK]{Colors.NC} {name}")
-            check_stale_branch(repo_path, name)
-            skipped += 1
-            continue
-
         if not url:
             print(f"{Colors.RED}[X]{Colors.NC} Cannot clone {name} (no remote URL)")
             failed += 1
@@ -532,6 +525,14 @@ def cmd_repo_sync(args):
         skip_list = repo.get('skipOn', [])
         if devconfig and devconfig in skip_list:
             print(f"{Colors.GREEN}[SKIP]{Colors.NC} {name}")
+            skipped += 1
+            continue
+
+        if repo_path.exists():
+            if link_to is not None:
+                _ensure_link(link_path, repo_path)
+            print(f"{Colors.GREEN}[OK]{Colors.NC} {name}")
+            check_stale_branch(repo_path, name)
             skipped += 1
             continue
 
