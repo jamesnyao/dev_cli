@@ -448,7 +448,10 @@ def sync_rcfiles_push():
     if ahead > 0:
         success, output = run_git(SCRIPT_DIR, 'push')
         if success:
+            _, log = run_git(SCRIPT_DIR, 'log', f'origin/{default_branch}~{ahead}..origin/{default_branch}', '--oneline')
             print(f"{Colors.GREEN}[OK]{Colors.NC} rcfiles pushed ({ahead} commits)")
+            for line in log.strip().splitlines():
+                print(f"     {line}")
         else:
             print(f"{Colors.RED}[X]{Colors.NC} Failed to push rcfiles: {output}")
     else:
