@@ -58,7 +58,7 @@ def get_base_path(config=None):
     roots = config.get('workspaceRoots', {})
     if devconfig and devconfig in roots:
         return os.path.expandvars(roots[devconfig])
-    raise ValueError(f'No workspaceRoot found for DEVCONFIG={devconfig!r}. Check repos.json workspaceRoots.')
+    raise ValueError(f'No workspaceRoot found for DEVCONFIG={devconfig!r}. Check {CONFIG_FILE} workspaceRoots.')
 
 def run_git(repo_path, *args):
     try:
