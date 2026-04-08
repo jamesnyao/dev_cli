@@ -8,6 +8,7 @@ Or: python3 -m pytest test_dev.py -v
 
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -897,6 +898,43 @@ class TestEnsureLink(unittest.TestCase):
 
         self.assertTrue(link_path.is_symlink())
         self.assertEqual(link_path.resolve(), repo_path.resolve())
+
+
+class TestToolsInstalled(unittest.TestCase):
+    """Verify all expected tools are installed on the current platform"""
+
+    WINDOWS_TOOLS = ['py', 'git', 'clang', 'choco', 'zoxide', 'fzf', 'agency']
+    WSL_TOOLS = ['zsh', 'python3', 'git', 'zoxide', 'fzf', 'agency']
+
+    @unittest.skipUnless(platform.system() == 'Windows', 'Windows only')
+    def test_windows_tools(self):
+        missing = [t for t in self.WINDOWS_TOOLS if shutil.which(t) is None]
+        self.assertEqual(missing, [], f'Missing Windows tools: {missing}')
+
+    @unittest.skipUnless(platform.system() == 'Windows', 'Windows only')
+    def test_wsl_tools(self):
+        if shutil.which('wsl') is None:
+            self.skipTest('WSL not available')
+        check = ' && '.join(f'command -v {t}' for t in self.WSL_TOOLS)
+        result = subprocess.run(
+            ['wsl', '-e', 'zsh', '-ilc', check],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            missing = []
+            for t in self.WSL_TOOLS:
+                r = subprocess.run(
+                    ['wsl', '-e', 'zsh', '-ilc', f'command -v {t}'],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if r.returncode != 0:
+                    missing.append(t)
+            self.assertEqual(missing, [], f'Missing WSL tools: {missing}')
+
+    @unittest.skipUnless(platform.system() == 'Linux', 'Linux only')
+    def test_linux_tools(self):
+        missing = [t for t in self.WSL_TOOLS if shutil.which(t) is None]
+        self.assertEqual(missing, [], f'Missing Linux tools: {missing}')
 
 
 if __name__ == '__main__':
