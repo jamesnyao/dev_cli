@@ -719,6 +719,53 @@ def cmd_repo_root(args):
     return 0
 
 
+def _parse_ado_remote(remote_url):
+    """Parse an ADO remote URL into (org, project, repo) or None."""
+    import re
+    # https://dev.azure.com/{org}/{project}/_git/{repo}
+    # https://{org}@dev.azure.com/{org}/{project}/_git/{repo}
+    m = re.match(r'https://(?:[^@]+@)?dev\.azure\.com/([^/]+)/([^/]+)/_git/(.+?)(?:\.git)?$', remote_url)
+    if m:
+        return m.group(1), m.group(2), m.group(3)
+    # https://{org}.visualstudio.com/{collection}/{project}/_git/{repo}
+    m = re.match(r'https://([^.]+)\.visualstudio\.com/[^/]+/([^/]+)/_git/(.+?)(?:\.git)?$', remote_url)
+    if m:
+        return m.group(1), m.group(2), m.group(3)
+    return None
+
+
+def _fetch_ado_prs_for_branches(ado_info, branch_names):
+    """Fetch ADO PRs for a list of branch names. Returns {branch_name: [pr_dict, ...]}."""
+    import urllib.request
+    import urllib.error
+
+    org, project, repo = ado_info
+    token = get_ado_token()
+    if not token:
+        return None
+
+    result = {}
+    for branch_name in branch_names:
+        ref = f'refs/heads/{branch_name}'
+        url = (f'https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo}'
+               f'/pullrequests?searchCriteria.sourceRefName={ref}'
+               f'&searchCriteria.status=all&api-version=7.0')
+        req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+                prs = data.get('value', [])
+                if prs:
+                    result[branch_name] = [
+                        {'id': pr['pullRequestId'], 'title': pr.get('title', ''),
+                         'status': pr.get('status', '')}
+                        for pr in prs
+                    ]
+        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
+            continue
+    return result
+
+
 def cmd_repo_old(args):
     """List or delete old branches with user/developer/ prefix."""
     from datetime import timedelta
@@ -783,12 +830,32 @@ def cmd_repo_old(args):
     # Sort by age (oldest first)
     old_branches.sort(key=lambda x: x[1])
 
+    # Look up linked PRs from ADO
+    remote_url = get_remote_url(repo_path)
+    ado_info = _parse_ado_remote(remote_url) if remote_url else None
+    pr_map = {}
+    if ado_info:
+        branch_names = [b.replace('remotes/origin/', '').replace('origin/', '')
+                        for b, _, _ in old_branches]
+        fetched = _fetch_ado_prs_for_branches(ado_info, branch_names)
+        if fetched:
+            pr_map = fetched
+        org, project = ado_info[0], ado_info[1]
+
     print(f"\n{Colors.YELLOW}Found {len(old_branches)} old branches:{Colors.NC}\n")
     for branch, commit_date, age_days in old_branches:
         # Strip 'remotes/origin/' prefix for display
         display_name = branch.replace('remotes/origin/', 'origin/')
+        branch_name = branch.replace('remotes/origin/', '').replace('origin/', '')
         print(f"  {display_name}")
         print(f"    Last commit: {commit_date.strftime('%Y-%m-%d')} ({age_days} days ago)")
+        if branch_name in pr_map:
+            for pr in pr_map[branch_name]:
+                status_color = Colors.GREEN if pr['status'] == 'completed' else (
+                    Colors.YELLOW if pr['status'] == 'active' else Colors.NC)
+                pr_url = f'https://dev.azure.com/{org}/{project}/_git/pullrequest/{pr["id"]}'
+                print(f"    PR !{pr['id']} [{status_color}{pr['status']}{Colors.NC}] {pr['title']}")
+                print(f"       {pr_url}")
 
     if not args.delete:
         print(f"\n{Colors.CYAN}To delete these branches, run:{Colors.NC}")

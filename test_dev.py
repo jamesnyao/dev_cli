@@ -711,6 +711,29 @@ class TestAdoGit(unittest.TestCase):
         self.assertIn('https://dev.azure.com/org/proj/_git/repo', call_args)
 
 
+class TestParseAdoRemote(unittest.TestCase):
+
+    def test_devazure_with_user_prefix(self):
+        result = dev._parse_ado_remote('https://contoso@dev.azure.com/contoso/platform/_git/internal.service')
+        self.assertEqual(result, ('contoso', 'platform', 'internal.service'))
+
+    def test_devazure_without_user_prefix(self):
+        result = dev._parse_ado_remote('https://dev.azure.com/contoso/platform/_git/internal.service.dashboard')
+        self.assertEqual(result, ('contoso', 'platform', 'internal.service.dashboard'))
+
+    def test_visualstudio_format(self):
+        result = dev._parse_ado_remote('https://contoso.visualstudio.com/DefaultCollection/platform/_git/bigrepo.toolchain_tools')
+        self.assertEqual(result, ('contoso', 'platform', 'bigrepo.toolchain_tools'))
+
+    def test_github_url_returns_none(self):
+        result = dev._parse_ado_remote('git@github.com-work:acme-corp/platform-agents.git')
+        self.assertIsNone(result)
+
+    def test_with_dot_git_suffix(self):
+        result = dev._parse_ado_remote('https://dev.azure.com/org/proj/_git/repo.git')
+        self.assertEqual(result, ('org', 'proj', 'repo'))
+
+
 class TestCmdInit(unittest.TestCase):
 
     def setUp(self):
