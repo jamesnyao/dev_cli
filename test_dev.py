@@ -825,6 +825,107 @@ class TestSelfUpdate(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 0)
         mock_subprocess.assert_called_once()
 
+    @patch('subprocess.run')
+    @patch('dev.get_default_branch', return_value='main')
+    @patch('dev.run_git')
+    def test_sets_pre_update_hash_on_reexec(self, mock_git, mock_branch, mock_subprocess):
+        """_self_update sets _DEV_PRE_UPDATE_HASH env var before re-exec."""
+        call_count = [0]
+        def side_effect(path, *args):
+            if args[0] == 'rev-parse':
+                call_count[0] += 1
+                return (True, 'oldhash' if call_count[0] == 1 else 'newhash')
+            if args[0] == 'rev-list':
+                return (True, '0\t1')
+            return (True, '')
+        mock_git.side_effect = side_effect
+        mock_subprocess.return_value = subprocess.CompletedProcess(args=[], returncode=0)
+        os.environ.pop('_DEV_PRE_UPDATE_HASH', None)
+        with self.assertRaises(SystemExit):
+            dev._self_update()
+        self.assertEqual(os.environ.pop('_DEV_PRE_UPDATE_HASH'), 'oldhash')
+
+
+class TestSyncRcfilesPull(unittest.TestCase):
+    """Test that cmd_repo_sync shows pulled commits."""
+
+    @patch('dev.sync_tracked_files')
+    @patch('dev.sync_rcfiles_push')
+    @patch('dev._self_update')
+    @patch('dev.load_config', return_value={'repos': [], 'files': []})
+    @patch('dev.get_base_path', return_value='/tmp/dev')
+    @patch('dev.run_git')
+    def test_shows_pulled_commits(self, mock_git, mock_base, mock_config,
+                                   mock_update, mock_push, mock_sync):
+        """When _DEV_PRE_UPDATE_HASH is set, show pulled commits."""
+        mock_git.return_value = (True, 'abc1234 Update dev.py')
+        os.environ['_DEV_PRE_UPDATE_HASH'] = 'oldhash'
+        from io import StringIO
+        with patch('sys.stdout', new_callable=StringIO) as mock_out:
+            dev.cmd_repo_sync(argparse.Namespace())
+        output = mock_out.getvalue()
+        self.assertIn('rcfiles updated from remote', output)
+        self.assertIn('Update dev.py', output)
+        mock_push.assert_called_once_with(pulled=True)
+        os.environ.pop('_DEV_PRE_UPDATE_HASH', None)
+
+    @patch('dev.sync_tracked_files')
+    @patch('dev.sync_rcfiles_push')
+    @patch('dev._self_update')
+    @patch('dev.load_config', return_value={'repos': [], 'files': []})
+    @patch('dev.get_base_path', return_value='/tmp/dev')
+    def test_no_env_var_shows_nothing(self, mock_base, mock_config,
+                                      mock_update, mock_push, mock_sync):
+        """Without _DEV_PRE_UPDATE_HASH, no pull message shown."""
+        os.environ.pop('_DEV_PRE_UPDATE_HASH', None)
+        from io import StringIO
+        with patch('sys.stdout', new_callable=StringIO) as mock_out:
+            dev.cmd_repo_sync(argparse.Namespace())
+        output = mock_out.getvalue()
+        self.assertNotIn('rcfiles updated from remote', output)
+        mock_push.assert_called_once_with(pulled=False)
+
+    @patch('dev.sync_tracked_files')
+    @patch('dev.sync_rcfiles_push')
+    @patch('dev._self_update')
+    @patch('dev.load_config', return_value={'repos': [], 'files': []})
+    @patch('dev.get_base_path', return_value='/tmp/dev')
+    @patch('dev.run_git')
+    def test_empty_log_passes_pulled_false(self, mock_git, mock_base, mock_config,
+                                            mock_update, mock_push, mock_sync):
+        """When pulled commits exist but log is empty, pulled=False."""
+        mock_git.return_value = (True, '')
+        os.environ['_DEV_PRE_UPDATE_HASH'] = 'oldhash'
+        from io import StringIO
+        with patch('sys.stdout', new_callable=StringIO) as mock_out:
+            dev.cmd_repo_sync(argparse.Namespace())
+        output = mock_out.getvalue()
+        self.assertNotIn('rcfiles updated from remote', output)
+        mock_push.assert_called_once_with(pulled=False)
+        os.environ.pop('_DEV_PRE_UPDATE_HASH', None)
+
+
+class TestSyncRcfilesPushPulled(unittest.TestCase):
+    """Test that sync_rcfiles_push suppresses 'up to date' when pulled."""
+
+    @patch('dev.get_default_branch', return_value='main')
+    @patch('dev.run_git')
+    def test_up_to_date_shown_when_not_pulled(self, mock_git, mock_branch):
+        mock_git.return_value = (True, '0\t0')
+        from io import StringIO
+        with patch('sys.stdout', new_callable=StringIO) as mock_out:
+            dev.sync_rcfiles_push(pulled=False)
+        self.assertIn('rcfiles up to date', mock_out.getvalue())
+
+    @patch('dev.get_default_branch', return_value='main')
+    @patch('dev.run_git')
+    def test_up_to_date_hidden_when_pulled(self, mock_git, mock_branch):
+        mock_git.return_value = (True, '0\t0')
+        from io import StringIO
+        with patch('sys.stdout', new_callable=StringIO) as mock_out:
+            dev.sync_rcfiles_push(pulled=True)
+        self.assertNotIn('rcfiles up to date', mock_out.getvalue())
+
 
 class TestEnsureLink(unittest.TestCase):
     """Test _ensure_link symlink creation"""

@@ -470,8 +470,7 @@ def cmd_repo_sync(args):
     pulled = False
     pre_hash = os.environ.pop('_DEV_PRE_UPDATE_HASH', None)
     if pre_hash:
-        _, log = run_git(SCRIPT_DIR, 'log', '--oneline', f'{pre_hash}..HEAD', '--',
-                         'repoconfig/rcfiles/')
+        _, log = run_git(SCRIPT_DIR, 'log', '--oneline', f'{pre_hash}..HEAD')
         if log:
             pulled = True
             print(f"{Colors.GREEN}[OK]{Colors.NC} rcfiles updated from remote:")
