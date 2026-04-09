@@ -431,6 +431,8 @@ def _self_update():
         commit_msg = _build_commit_message()
         run_git(SCRIPT_DIR, 'commit', '-m', commit_msg)
 
+    _, pre_fetch_hash = run_git(SCRIPT_DIR, 'rev-parse', 'HEAD')
+
     success, _ = run_git(SCRIPT_DIR, 'fetch', 'origin')
     if not success:
         return
@@ -453,7 +455,11 @@ def _self_update():
     _, new_hash = run_git(SCRIPT_DIR, 'rev-parse', 'HEAD')
 
     if old_hash != new_hash:
-        os.environ['_DEV_PRE_UPDATE_HASH'] = old_hash
+        if pre_fetch_hash != new_hash:
+            os.environ['_DEV_PULLED_RCFILES'] = ''
+            _, log = run_git(SCRIPT_DIR, 'log', '--oneline', f'{pre_fetch_hash}..{new_hash}')
+            if log:
+                os.environ['_DEV_PULLED_RCFILES'] = log
         result = subprocess.run(
             [sys.executable, str(SCRIPT_DIR / 'dev.py')] + sys.argv[1:])
         sys.exit(result.returncode)
@@ -468,14 +474,12 @@ def cmd_repo_sync(args):
 
     print(f"{Colors.BLUE}Syncing rcfiles...{Colors.NC}")
     pulled = False
-    pre_hash = os.environ.pop('_DEV_PRE_UPDATE_HASH', None)
-    if pre_hash:
-        _, log = run_git(SCRIPT_DIR, 'log', '--oneline', f'{pre_hash}..HEAD')
-        if log:
-            pulled = True
-            print(f"{Colors.GREEN}[OK]{Colors.NC} rcfiles updated from remote:")
-            for line in log.strip().splitlines():
-                print(f"     {Colors.YELLOW}{line}{Colors.NC}")
+    pulled_log = os.environ.pop('_DEV_PULLED_RCFILES', None)
+    if pulled_log:
+        pulled = True
+        print(f"{Colors.GREEN}[OK]{Colors.NC} rcfiles updated from remote:")
+        for line in pulled_log.strip().splitlines():
+            print(f"     {Colors.YELLOW}{line}{Colors.NC}")
     sync_rcfiles_push(pulled=pulled)
     print()
 

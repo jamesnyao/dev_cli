@@ -828,22 +828,54 @@ class TestSelfUpdate(unittest.TestCase):
     @patch('subprocess.run')
     @patch('dev.get_default_branch', return_value='main')
     @patch('dev.run_git')
-    def test_sets_pre_update_hash_on_reexec(self, mock_git, mock_branch, mock_subprocess):
-        """_self_update sets _DEV_PRE_UPDATE_HASH env var before re-exec."""
+    def test_sets_pulled_rcfiles_on_remote_rebase(self, mock_git, mock_branch, mock_subprocess):
+        """_self_update sets _DEV_PULLED_RCFILES only when remote commits are pulled."""
         call_count = [0]
         def side_effect(path, *args):
             if args[0] == 'rev-parse':
                 call_count[0] += 1
-                return (True, 'oldhash' if call_count[0] == 1 else 'newhash')
+                if call_count[0] == 1:
+                    return (True, 'oldhash')
+                elif call_count[0] == 2:
+                    return (True, 'oldhash')
+                else:
+                    return (True, 'newhash')
             if args[0] == 'rev-list':
                 return (True, '0\t1')
+            if args[0] == 'log':
+                return (True, 'abc123 some commit')
             return (True, '')
         mock_git.side_effect = side_effect
         mock_subprocess.return_value = subprocess.CompletedProcess(args=[], returncode=0)
-        os.environ.pop('_DEV_PRE_UPDATE_HASH', None)
+        os.environ.pop('_DEV_PULLED_RCFILES', None)
         with self.assertRaises(SystemExit):
             dev._self_update()
-        self.assertEqual(os.environ.pop('_DEV_PRE_UPDATE_HASH'), 'oldhash')
+        self.assertEqual(os.environ.pop('_DEV_PULLED_RCFILES'), 'abc123 some commit')
+
+    @patch('subprocess.run')
+    @patch('dev.get_default_branch', return_value='main')
+    @patch('dev.run_git')
+    def test_no_pulled_rcfiles_on_local_commit_only(self, mock_git, mock_branch, mock_subprocess):
+        """_self_update does NOT set _DEV_PULLED_RCFILES for local-only commits."""
+        call_count = [0]
+        def side_effect(path, *args):
+            if args[0] == 'rev-parse':
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    return (True, 'oldhash')
+                else:
+                    return (True, 'newhash')
+            if args[0] == 'rev-list':
+                return (True, '0\t0')
+            if args[0] == 'status':
+                return (True, 'M dev.py')
+            return (True, '')
+        mock_git.side_effect = side_effect
+        mock_subprocess.return_value = subprocess.CompletedProcess(args=[], returncode=0)
+        os.environ.pop('_DEV_PULLED_RCFILES', None)
+        with self.assertRaises(SystemExit):
+            dev._self_update()
+        self.assertNotIn('_DEV_PULLED_RCFILES', os.environ)
 
 
 class TestSyncRcfilesPull(unittest.TestCase):
@@ -854,12 +886,10 @@ class TestSyncRcfilesPull(unittest.TestCase):
     @patch('dev._self_update')
     @patch('dev.load_config', return_value={'repos': [], 'files': []})
     @patch('dev.get_base_path', return_value='/tmp/dev')
-    @patch('dev.run_git')
-    def test_shows_pulled_commits(self, mock_git, mock_base, mock_config,
+    def test_shows_pulled_commits(self, mock_base, mock_config,
                                    mock_update, mock_push, mock_sync):
-        """When _DEV_PRE_UPDATE_HASH is set, show pulled commits."""
-        mock_git.return_value = (True, 'abc1234 Update dev.py')
-        os.environ['_DEV_PRE_UPDATE_HASH'] = 'oldhash'
+        """When _DEV_PULLED_RCFILES is set, show pulled commits."""
+        os.environ['_DEV_PULLED_RCFILES'] = 'abc1234 Update dev.py'
         from io import StringIO
         with patch('sys.stdout', new_callable=StringIO) as mock_out:
             dev.cmd_repo_sync(argparse.Namespace())
@@ -867,7 +897,7 @@ class TestSyncRcfilesPull(unittest.TestCase):
         self.assertIn('rcfiles updated from remote', output)
         self.assertIn('Update dev.py', output)
         mock_push.assert_called_once_with(pulled=True)
-        os.environ.pop('_DEV_PRE_UPDATE_HASH', None)
+        os.environ.pop('_DEV_PULLED_RCFILES', None)
 
     @patch('dev.sync_tracked_files')
     @patch('dev.sync_rcfiles_push')
@@ -876,33 +906,14 @@ class TestSyncRcfilesPull(unittest.TestCase):
     @patch('dev.get_base_path', return_value='/tmp/dev')
     def test_no_env_var_shows_nothing(self, mock_base, mock_config,
                                       mock_update, mock_push, mock_sync):
-        """Without _DEV_PRE_UPDATE_HASH, no pull message shown."""
-        os.environ.pop('_DEV_PRE_UPDATE_HASH', None)
+        """Without _DEV_PULLED_RCFILES, no pull message shown."""
+        os.environ.pop('_DEV_PULLED_RCFILES', None)
         from io import StringIO
         with patch('sys.stdout', new_callable=StringIO) as mock_out:
             dev.cmd_repo_sync(argparse.Namespace())
         output = mock_out.getvalue()
         self.assertNotIn('rcfiles updated from remote', output)
         mock_push.assert_called_once_with(pulled=False)
-
-    @patch('dev.sync_tracked_files')
-    @patch('dev.sync_rcfiles_push')
-    @patch('dev._self_update')
-    @patch('dev.load_config', return_value={'repos': [], 'files': []})
-    @patch('dev.get_base_path', return_value='/tmp/dev')
-    @patch('dev.run_git')
-    def test_empty_log_passes_pulled_false(self, mock_git, mock_base, mock_config,
-                                            mock_update, mock_push, mock_sync):
-        """When pulled commits exist but log is empty, pulled=False."""
-        mock_git.return_value = (True, '')
-        os.environ['_DEV_PRE_UPDATE_HASH'] = 'oldhash'
-        from io import StringIO
-        with patch('sys.stdout', new_callable=StringIO) as mock_out:
-            dev.cmd_repo_sync(argparse.Namespace())
-        output = mock_out.getvalue()
-        self.assertNotIn('rcfiles updated from remote', output)
-        mock_push.assert_called_once_with(pulled=False)
-        os.environ.pop('_DEV_PRE_UPDATE_HASH', None)
 
 
 class TestSyncRcfilesPushPulled(unittest.TestCase):
