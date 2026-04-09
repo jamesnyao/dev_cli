@@ -376,7 +376,7 @@ def _build_commit_message():
     return msg
 
 
-def sync_rcfiles_push():
+def sync_rcfiles_push(pulled=False):
     """Commit any pending changes and push to remote."""
     run_git(SCRIPT_DIR, 'add', '-A')
     _, status = run_git(SCRIPT_DIR, 'status', '--porcelain')
@@ -403,7 +403,8 @@ def sync_rcfiles_push():
         else:
             print(f"{Colors.RED}[X]{Colors.NC} Failed to push rcfiles: {output}")
     else:
-        print(f"{Colors.GREEN}[OK]{Colors.NC} rcfiles up to date")
+        if not pulled:
+            print(f"{Colors.GREEN}[OK]{Colors.NC} rcfiles up to date")
 
 
 def _ensure_link(link_path, repo_path):
@@ -466,15 +467,17 @@ def cmd_repo_sync(args):
     base_path = Path(get_base_path())
 
     print(f"{Colors.BLUE}Syncing rcfiles...{Colors.NC}")
+    pulled = False
     pre_hash = os.environ.pop('_DEV_PRE_UPDATE_HASH', None)
     if pre_hash:
         _, log = run_git(SCRIPT_DIR, 'log', '--oneline', f'{pre_hash}..HEAD', '--',
                          'repoconfig/rcfiles/')
         if log:
+            pulled = True
             print(f"{Colors.GREEN}[OK]{Colors.NC} rcfiles updated from remote:")
             for line in log.strip().splitlines():
                 print(f"     {Colors.YELLOW}{line}{Colors.NC}")
-    sync_rcfiles_push()
+    sync_rcfiles_push(pulled=pulled)
     print()
 
     print(f"{Colors.BLUE}Syncing tracked files...{Colors.NC}")
