@@ -2,8 +2,7 @@
 """
 Lightweight unit tests for dev.py
 
-Run with: python3 test_dev.py
-Or: python3 -m pytest test_dev.py -v
+Run with: dev test
 """
 
 import json
