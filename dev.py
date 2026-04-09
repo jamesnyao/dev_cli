@@ -665,7 +665,6 @@ def cmd_repo_status(args):
     base_path = Path(get_base_path())
 
     print(f"{Colors.BLUE}Repository Status (base: {base_path}){Colors.NC}")
-    print("-" * 60)
 
     present = missing = 0
     for repo in sorted(config['repos'], key=lambda r: r['path']):
@@ -678,13 +677,11 @@ def cmd_repo_status(args):
             print(f"{Colors.RED}[X]{Colors.NC} {repo['path']} {Colors.YELLOW}(missing){Colors.NC}")
             missing += 1
 
-    print("-" * 60)
     print(f"Present: {Colors.GREEN}{present}{Colors.NC} | Missing: {Colors.RED}{missing}{Colors.NC}")
 
     files = _get_all_tracked_files()
     if files:
         print(f"\n{Colors.BLUE}Tracked Files:{Colors.NC}")
-        print("-" * 60)
         f_present = f_missing = 0
         for f in sorted(files, key=lambda x: x['path']):
             workspace_file = base_path / f['path'].replace('/', os.sep)
@@ -694,7 +691,6 @@ def cmd_repo_status(args):
             else:
                 print(f"{Colors.RED}[X]{Colors.NC} {f['path']} {Colors.YELLOW}(missing){Colors.NC}")
                 f_missing += 1
-        print("-" * 60)
         print(f"Present: {Colors.GREEN}{f_present}{Colors.NC} | Missing: {Colors.RED}{f_missing}{Colors.NC}")
 
     return 0
@@ -728,7 +724,6 @@ def cmd_repo_old(args):
     print(f"{Colors.BLUE}Scanning for branches older than {days} days with prefix '{prefix}'...{Colors.NC}")
     print(f"Repository: {repo_path}")
     print(f"Cutoff date: {cutoff.strftime('%Y-%m-%d')}")
-    print("-" * 60)
 
     # Get all remote branches matching the prefix
     result = subprocess.run(
@@ -812,7 +807,6 @@ def cmd_repo_old(args):
                 print(f"    {result.stderr.strip()}")
             failed += 1
 
-    print("-" * 60)
     print(f"Deleted: {Colors.GREEN}{deleted}{Colors.NC} | Failed: {Colors.RED}{failed}{Colors.NC}")
 
     return 0 if failed == 0 else 1
