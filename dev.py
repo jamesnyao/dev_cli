@@ -163,12 +163,6 @@ def get_rcfile_git_timestamp(rel_path):
             return None
     return None
 
-def get_rcfile_commit_subject(rel_path):
-    """Get the subject line of the last commit that modified an rcfile."""
-    rcfile_rel = str(Path('repoconfig') / 'rcfiles' / rel_path).replace('\\', '/')
-    success, subject = run_git(SCRIPT_DIR, 'log', '-1', '--format=%s', '--', rcfile_rel)
-    return subject if success and subject else None
-
 def get_file_mtime(file_path):
     """Get the modification time of a file as a timezone-aware datetime."""
     try:
@@ -458,6 +452,7 @@ def _self_update():
     _, new_hash = run_git(SCRIPT_DIR, 'rev-parse', 'HEAD')
 
     if old_hash != new_hash:
+        os.environ['_DEV_PRE_UPDATE_HASH'] = old_hash
         result = subprocess.run(
             [sys.executable, str(SCRIPT_DIR / 'dev.py')] + sys.argv[1:])
         sys.exit(result.returncode)
@@ -471,6 +466,14 @@ def cmd_repo_sync(args):
     base_path = Path(get_base_path())
 
     print(f"{Colors.BLUE}Syncing rcfiles...{Colors.NC}")
+    pre_hash = os.environ.pop('_DEV_PRE_UPDATE_HASH', None)
+    if pre_hash:
+        _, log = run_git(SCRIPT_DIR, 'log', '--oneline', f'{pre_hash}..HEAD', '--',
+                         'repoconfig/rcfiles/')
+        if log:
+            print(f"{Colors.GREEN}[OK]{Colors.NC} rcfiles updated from remote:")
+            for line in log.strip().splitlines():
+                print(f"     {Colors.YELLOW}{line}{Colors.NC}")
     sync_rcfiles_push()
     print()
 
@@ -660,11 +663,7 @@ def sync_tracked_files(base_path):
             if remote_ts:
                 ts_epoch = remote_ts.timestamp()
                 os.utime(str(target_file), (ts_epoch, ts_epoch))
-            subject = get_rcfile_commit_subject(rel_path)
-            msg = f"{Colors.GREEN}[OK]{Colors.NC} {rel_path} {Colors.CYAN}(remote -> local){Colors.NC}"
-            if subject:
-                msg += f" {Colors.YELLOW}{subject}{Colors.NC}"
-            print(msg)
+            print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path} {Colors.CYAN}(remote -> local){Colors.NC}")
 
     return rcfiles_changed
 
