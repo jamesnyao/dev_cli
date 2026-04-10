@@ -101,6 +101,14 @@ def _strip_url_credentials(url):
     import re
     return re.sub(r'https://[^@]+@', 'https://', url)
 
+def _normalize_url_for_comparison(url):
+    """Normalize a URL for comparison: strip credentials and resolve GitHub SSH aliases."""
+    import re
+    url = _strip_url_credentials(url)
+    # Normalize github.com-* aliases back to github.com
+    url = re.sub(r'git@github\.com-[^:]+:', 'git@github.com:', url)
+    return url.rstrip('/').removesuffix('.git')
+
 def get_remote_url(repo_path, normalize=False):
     success, url = run_git(repo_path, 'remote', 'get-url', 'origin')
     if success and normalize:
@@ -536,7 +544,8 @@ def cmd_repo_sync(args):
             if link_to is not None:
                 _ensure_link(link_path, repo_path)
             actual_url = get_remote_url(repo_path)
-            if url and actual_url and _strip_url_credentials(actual_url) != _strip_url_credentials(url):
+            if (url and actual_url and _parse_ado_remote(url)
+                    and _normalize_url_for_comparison(actual_url) != _normalize_url_for_comparison(url)):
                 subprocess.run(
                     ['git', '-C', str(repo_path), 'remote', 'set-url', 'origin', url],
                     capture_output=True, text=True

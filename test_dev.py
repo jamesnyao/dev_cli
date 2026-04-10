@@ -1071,5 +1071,49 @@ class TestToolsInstalled(unittest.TestCase):
         self.assertEqual(missing, [], f'Missing Linux tools: {missing}')
 
 
+class TestNormalizeUrlForComparison(unittest.TestCase):
+
+    def test_ado_with_credentials_matches_without(self):
+        url1 = 'https://AzToken123@dev.azure.com/contoso/platform/_git/bigrepo.infra.build'
+        url2 = 'https://contoso@dev.azure.com/contoso/platform/_git/bigrepo.infra.build'
+        self.assertEqual(dev._normalize_url_for_comparison(url1),
+                         dev._normalize_url_for_comparison(url2))
+
+    def test_ado_without_credentials_matches_config(self):
+        url1 = 'https://dev.azure.com/contoso/platform/_git/internal.service'
+        url2 = 'https://contoso@dev.azure.com/contoso/platform/_git/internal.service'
+        self.assertEqual(dev._normalize_url_for_comparison(url1),
+                         dev._normalize_url_for_comparison(url2))
+
+    def test_github_ssh_alias_matches_plain(self):
+        url1 = 'git@github.com-personal:example-user/rcfiles.git'
+        url2 = 'git@github.com:example-user/rcfiles.git'
+        self.assertEqual(dev._normalize_url_for_comparison(url1),
+                         dev._normalize_url_for_comparison(url2))
+
+    def test_github_edge_alias_matches_plain(self):
+        url1 = 'git@github.com-work:acme-corp/platform-agents.git'
+        url2 = 'git@github.com:acme-corp/platform-agents.git'
+        self.assertEqual(dev._normalize_url_for_comparison(url1),
+                         dev._normalize_url_for_comparison(url2))
+
+    def test_trailing_dot_git_ignored(self):
+        url1 = 'https://dev.azure.com/contoso/platform/_git/repo.git'
+        url2 = 'https://dev.azure.com/contoso/platform/_git/repo'
+        self.assertEqual(dev._normalize_url_for_comparison(url1),
+                         dev._normalize_url_for_comparison(url2))
+
+    def test_different_repos_do_not_match(self):
+        url1 = 'https://dev.azure.com/contoso/platform/_git/repo-a'
+        url2 = 'https://dev.azure.com/contoso/platform/_git/repo-b'
+        self.assertNotEqual(dev._normalize_url_for_comparison(url1),
+                            dev._normalize_url_for_comparison(url2))
+
+    def test_sync_skips_non_ado_repos(self):
+        """_parse_ado_remote returns None for non-ADO URLs, so sync won't fix them."""
+        github_url = 'git@github.com-personal:example-user/rcfiles.git'
+        self.assertIsNone(dev._parse_ado_remote(github_url))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2, buffer=True)
