@@ -940,7 +940,7 @@ def _print_old_branches(repo_path, old_branches, creator_prefix=None):
                 status_color = Colors.GREEN if pr['status'] == 'completed' else (
                     Colors.YELLOW if pr['status'] == 'active' else (
                     Colors.PURPLE if pr['status'] == 'abandoned' else Colors.NC))
-                pr_url = f'https://dev.azure.com/{org}/{project}/_git/pullrequest/{pr["id"]}'
+                pr_url = f'https://dev.azure.com/{org}/{project}/_git/{ado_info[2]}/pullrequest/{pr["id"]}'
                 print(f"    PR !{pr['id']} [{status_color}{pr['status']}{Colors.NC}] {pr['title']}")
                 print(f"       {pr_url}")
 
