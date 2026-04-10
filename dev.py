@@ -862,6 +862,17 @@ def _abandon_ado_pr(ado_info, pr_id):
         return False
 
 
+SKIP_BRANCH_PREFIXES = ('official/', 'int/', 'main', 'master', 'develop')
+
+
+def _should_skip_branch(name):
+    """Return True for branches that should never be listed for cleanup."""
+    for prefix in SKIP_BRANCH_PREFIXES:
+        if name == prefix or name.startswith(prefix):
+            return True
+    return False
+
+
 def _scan_old_branches_ado(ado_info, creator, cutoff):
     """Scan an ADO repo for old branches owned by creator. Returns list of (branch_ref, commit_date, age_days)."""
     import urllib.request
@@ -904,6 +915,8 @@ def _scan_old_branches_ado(ado_info, creator, cutoff):
             continue
         if branch_stat.get('isBaseVersion', False):
             continue
+        if _should_skip_branch(name):
+            continue
         commit = branch_stat.get('commit', {})
         date_str = commit.get('committer', {}).get('date', '')
         if not date_str:
@@ -938,6 +951,9 @@ def _scan_old_branches_git(repo_path, prefix, author_email, cutoff):
     for b in result.stdout.strip().split('\n'):
         b = b.strip()
         if not b or 'HEAD' in b:
+            continue
+        branch_name = b.replace('remotes/origin/', '').replace('origin/', '')
+        if _should_skip_branch(branch_name):
             continue
         if default_ref and b.replace('remotes/', 'refs/remotes/') == default_ref:
             continue
