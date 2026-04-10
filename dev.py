@@ -985,9 +985,14 @@ def cmd_repo_old(args):
     print(f"Cutoff date: {cutoff.strftime('%Y-%m-%d')}")
 
     all_old = []  # (repo_path, branch, commit_date, age_days)
+    scanned_remotes = set()
     for rp in repo_paths:
         remote_url = get_remote_url(rp)
         ado_info = _parse_ado_remote(remote_url) if remote_url else None
+        remote_key = remote_url or str(rp)
+        if remote_key in scanned_remotes:
+            continue
+        scanned_remotes.add(remote_key)
         if ado_info:
             old = _scan_old_branches_ado(ado_info, creator_email, cutoff)
         else:
