@@ -989,7 +989,7 @@ def cmd_repo_old(args):
     for rp in repo_paths:
         remote_url = get_remote_url(rp)
         ado_info = _parse_ado_remote(remote_url) if remote_url else None
-        remote_key = remote_url or str(rp)
+        remote_key = ado_info[2] if ado_info else (remote_url or str(rp))
         if remote_key in scanned_remotes:
             continue
         scanned_remotes.add(remote_key)
