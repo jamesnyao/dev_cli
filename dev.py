@@ -96,6 +96,11 @@ def normalize_github_url(url):
         return f'git@{host}:{org}/{repo}.git'
     return url
 
+def _strip_url_credentials(url):
+    """Strip embedded credentials from a URL for comparison."""
+    import re
+    return re.sub(r'https://[^@]+@', 'https://', url)
+
 def get_remote_url(repo_path, normalize=False):
     success, url = run_git(repo_path, 'remote', 'get-url', 'origin')
     if success and normalize:
@@ -530,7 +535,15 @@ def cmd_repo_sync(args):
         if repo_path.exists():
             if link_to is not None:
                 _ensure_link(link_path, repo_path)
-            print(f"{Colors.GREEN}[OK]{Colors.NC} {name}")
+            actual_url = get_remote_url(repo_path)
+            if url and actual_url and _strip_url_credentials(actual_url) != _strip_url_credentials(url):
+                subprocess.run(
+                    ['git', '-C', str(repo_path), 'remote', 'set-url', 'origin', url],
+                    capture_output=True, text=True
+                )
+                print(f"{Colors.GREEN}[OK]{Colors.NC} {name} {Colors.YELLOW}(fixed remote URL){Colors.NC}")
+            else:
+                print(f"{Colors.GREEN}[OK]{Colors.NC} {name}")
             check_stale_branch(repo_path, name)
             skipped += 1
             continue
@@ -898,6 +911,13 @@ def _scan_old_branches_ado(ado_info, creator, cutoff):
 
 def _scan_old_branches_git(repo_path, prefix, author_email, cutoff):
     """Scan a git repo for old branches by prefix + author. Returns list of (branch, commit_date, age_days)."""
+    # Get the default branch to exclude it
+    head_result = subprocess.run(
+        ['git', '-C', str(repo_path), 'symbolic-ref', 'refs/remotes/origin/HEAD'],
+        capture_output=True, text=True
+    )
+    default_ref = head_result.stdout.strip() if head_result.returncode == 0 else ''
+
     result = subprocess.run(
         ['git', '-C', str(repo_path), 'branch', '-r', '--list', f'*{prefix}*'],
         capture_output=True, text=True
@@ -905,8 +925,14 @@ def _scan_old_branches_git(repo_path, prefix, author_email, cutoff):
     if result.returncode != 0:
         return []
 
-    branches = [b.strip() for b in result.stdout.strip().split('\n')
-                if b.strip() and 'HEAD' not in b]
+    branches = []
+    for b in result.stdout.strip().split('\n'):
+        b = b.strip()
+        if not b or 'HEAD' in b:
+            continue
+        if default_ref and b.replace('remotes/', 'refs/remotes/') == default_ref:
+            continue
+        branches.append(b)
     old_branches = []
     for branch in branches:
         result = subprocess.run(
