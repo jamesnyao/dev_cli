@@ -16,13 +16,14 @@ from pathlib import Path
 # Colors (ANSI escape codes, disabled on Windows cmd)
 class Colors:
     if sys.platform == 'win32' and 'WT_SESSION' not in os.environ:
-        RED = YELLOW = GREEN = BLUE = CYAN = NC = ''
+        RED = YELLOW = GREEN = BLUE = CYAN = PURPLE = NC = ''
     else:
         RED = '\033[0;31m'
         YELLOW = '\033[1;33m'
         GREEN = '\033[0;32m'
         BLUE = '\033[0;34m'
         CYAN = '\033[0;36m'
+        PURPLE = '\033[0;35m'
         NC = '\033[0m'
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -734,8 +735,11 @@ def _parse_ado_remote(remote_url):
     return None
 
 
-def _fetch_ado_prs_for_branches(ado_info, branch_names):
-    """Fetch ADO PRs for a list of branch names. Returns {branch_name: [pr_dict, ...]}."""
+def _fetch_ado_prs_for_branches(ado_info, branch_names, creator_prefix=None):
+    """Fetch ADO PRs for a list of branch names. Returns {branch_name: [pr_dict, ...]}.
+
+    If creator_prefix is given, only PRs whose creator uniqueName starts with it are included.
+    """
     import urllib.request
     import urllib.error
 
@@ -755,6 +759,10 @@ def _fetch_ado_prs_for_branches(ado_info, branch_names):
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read())
                 prs = data.get('value', [])
+                if creator_prefix:
+                    prs = [pr for pr in prs
+                           if pr.get('createdBy', {}).get('uniqueName', '')
+                           .lower().startswith(creator_prefix.lower())]
                 if prs:
                     result[branch_name] = [
                         {'id': pr['pullRequestId'], 'title': pr.get('title', ''),
@@ -766,8 +774,117 @@ def _fetch_ado_prs_for_branches(ado_info, branch_names):
     return result
 
 
-def _scan_old_branches(repo_path, prefix, cutoff):
-    """Scan a single repo for old branches. Returns list of (branch, commit_date, age_days)."""
+def _delete_ado_branch(ado_info, branch_name, repo_path):
+    """Delete a remote branch via the ADO refs API. Returns (ok, error_msg)."""
+    import urllib.request
+    import urllib.error
+
+    org, project, repo = ado_info
+    token = get_ado_token()
+    if not token:
+        return False, 'no ADO token'
+
+    result = subprocess.run(
+        ['git', '-C', str(repo_path), 'rev-parse', f'origin/{branch_name}'],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        return False, 'could not resolve branch ref'
+    old_object_id = result.stdout.strip()
+
+    url = (f'https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo}'
+           f'/refs?api-version=7.0')
+    body = json.dumps([{
+        'name': f'refs/heads/{branch_name}',
+        'oldObjectId': old_object_id,
+        'newObjectId': '0000000000000000000000000000000000000000'
+    }]).encode('utf-8')
+    req = urllib.request.Request(url, data=body, method='POST',
+                                headers={'Authorization': f'Bearer {token}',
+                                         'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+            results = data.get('value', [])
+            if results and results[0].get('success', False):
+                return True, ''
+            status = results[0].get('updateStatus', 'unknown') if results else 'empty response'
+            return False, status
+    except urllib.error.HTTPError as e:
+        return False, f'HTTP {e.code}'
+    except urllib.error.URLError as e:
+        return False, str(e.reason)
+
+
+def _abandon_ado_pr(ado_info, pr_id):
+    """Abandon an active ADO pull request. Returns True on success."""
+    import urllib.request
+    import urllib.error
+
+    org, project, repo = ado_info
+    token = get_ado_token()
+    if not token:
+        return False
+
+    url = (f'https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo}'
+           f'/pullrequests/{pr_id}?api-version=7.0')
+    body = json.dumps({'status': 'abandoned'}).encode('utf-8')
+    req = urllib.request.Request(url, data=body, method='PATCH',
+                                headers={'Authorization': f'Bearer {token}',
+                                         'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return True
+    except (urllib.error.URLError, urllib.error.HTTPError):
+        return False
+
+
+def _scan_old_branches_ado(ado_info, creator, cutoff):
+    """Scan an ADO repo for old branches owned by creator. Returns list of (branch_ref, commit_date, age_days)."""
+    import urllib.request
+    import urllib.error
+
+    org, project, repo = ado_info
+    token = get_ado_token()
+    if not token:
+        return []
+
+    url = (f'https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo}'
+           f'/refs?filter=heads/&api-version=7.1')
+    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
+        return []
+
+    old_branches = []
+    for ref in data.get('value', []):
+        ref_creator = ref.get('creator', {}).get('uniqueName', '')
+        if creator not in ref_creator:
+            continue
+        branch_name = ref['name'].replace('refs/heads/', '')
+        # Get commit date via statuses or use a simple REST call
+        commit_url = (f'https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo}'
+                      f'/commits/{ref["objectId"]}?api-version=7.1')
+        creq = urllib.request.Request(commit_url, headers={'Authorization': f'Bearer {token}'})
+        try:
+            with urllib.request.urlopen(creq, timeout=10) as cresp:
+                cdata = json.loads(cresp.read())
+                date_str = cdata.get('committer', {}).get('date', '')
+                if not date_str:
+                    continue
+                commit_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                if commit_date < cutoff:
+                    age_days = (datetime.now(timezone.utc) - commit_date).days
+                    old_branches.append((f'origin/{branch_name}', commit_date, age_days))
+        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, ValueError):
+            continue
+    return old_branches
+
+
+def _scan_old_branches_git(repo_path, prefix, author_email, cutoff):
+    """Scan a git repo for old branches by prefix + author. Returns list of (branch, commit_date, age_days)."""
     result = subprocess.run(
         ['git', '-C', str(repo_path), 'branch', '-r', '--list', f'*{prefix}*'],
         capture_output=True, text=True
@@ -779,13 +896,16 @@ def _scan_old_branches(repo_path, prefix, cutoff):
     old_branches = []
     for branch in branches:
         result = subprocess.run(
-            ['git', '-C', str(repo_path), 'log', '-1', '--format=%cI', branch],
+            ['git', '-C', str(repo_path), 'log', '-1', '--format=%cI%n%ae', branch],
             capture_output=True, text=True
         )
         if result.returncode != 0:
             continue
-        date_str = result.stdout.strip()
-        if not date_str:
+        lines = result.stdout.strip().split('\n')
+        if len(lines) < 2:
+            continue
+        date_str, email = lines[0], lines[1]
+        if author_email and author_email not in email:
             continue
         try:
             commit_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
@@ -797,7 +917,7 @@ def _scan_old_branches(repo_path, prefix, cutoff):
     return old_branches
 
 
-def _print_old_branches(repo_path, old_branches):
+def _print_old_branches(repo_path, old_branches, creator_prefix=None):
     """Print old branches with linked PR info for a single repo."""
     remote_url = get_remote_url(repo_path)
     ado_info = _parse_ado_remote(remote_url) if remote_url else None
@@ -805,7 +925,7 @@ def _print_old_branches(repo_path, old_branches):
     if ado_info:
         branch_names = [b.replace('remotes/origin/', '').replace('origin/', '')
                         for b, _, _ in old_branches]
-        fetched = _fetch_ado_prs_for_branches(ado_info, branch_names)
+        fetched = _fetch_ado_prs_for_branches(ado_info, branch_names, creator_prefix)
         if fetched:
             pr_map = fetched
         org, project = ado_info[0], ado_info[1]
@@ -818,17 +938,20 @@ def _print_old_branches(repo_path, old_branches):
         if branch_name in pr_map:
             for pr in pr_map[branch_name]:
                 status_color = Colors.GREEN if pr['status'] == 'completed' else (
-                    Colors.YELLOW if pr['status'] == 'active' else Colors.NC)
+                    Colors.YELLOW if pr['status'] == 'active' else (
+                    Colors.PURPLE if pr['status'] == 'abandoned' else Colors.NC))
                 pr_url = f'https://dev.azure.com/{org}/{project}/_git/pullrequest/{pr["id"]}'
                 print(f"    PR !{pr['id']} [{status_color}{pr['status']}{Colors.NC}] {pr['title']}")
                 print(f"       {pr_url}")
 
 
 def cmd_repo_old(args):
-    """List or delete old branches with user/developer/ prefix."""
+    """List or delete old branches you pushed."""
     from datetime import timedelta
 
     prefix = args.prefix or 'user/developer/'
+    creator_email = 'developer@example.com'
+    creator_alias = prefix.strip('/').split('/')[-1] if '/' in prefix else None
     days = args.days or 30
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
@@ -858,12 +981,17 @@ def cmd_repo_old(args):
             print(f"{Colors.RED}Error: No tracked git repositories found{Colors.NC}")
             return 1
 
-    print(f"{Colors.BLUE}Scanning for branches older than {days} days with prefix '{prefix}'...{Colors.NC}")
+    print(f"{Colors.BLUE}Scanning for branches older than {days} days (owned by {creator_email})...{Colors.NC}")
     print(f"Cutoff date: {cutoff.strftime('%Y-%m-%d')}")
 
     all_old = []  # (repo_path, branch, commit_date, age_days)
     for rp in repo_paths:
-        old = _scan_old_branches(rp, prefix, cutoff)
+        remote_url = get_remote_url(rp)
+        ado_info = _parse_ado_remote(remote_url) if remote_url else None
+        if ado_info:
+            old = _scan_old_branches_ado(ado_info, creator_email, cutoff)
+        else:
+            old = _scan_old_branches_git(rp, prefix, creator_email, cutoff)
         for entry in old:
             all_old.append((rp, *entry))
 
@@ -882,40 +1010,79 @@ def cmd_repo_old(args):
     print(f"\n{Colors.YELLOW}Found {total} old branches across {len(by_repo)} repo(s):{Colors.NC}")
     for rp, branches in by_repo.items():
         print(f"\n{Colors.CYAN}{rp.name}{Colors.NC} ({len(branches)} branches)")
-        _print_old_branches(rp, branches)
+        _print_old_branches(rp, branches, creator_alias)
 
     if not args.delete:
         print(f"\n{Colors.CYAN}To delete these branches, run:{Colors.NC}")
         print("  dev repo old --delete")
         return 0
 
-    # Delete mode
-    print(f"\n{Colors.RED}WARNING: This will delete {total} remote branches!{Colors.NC}")
-    confirm = input("Type 'yes' to confirm deletion: ")
+    # Delete mode — build per-repo ADO info and PR map
+    ado_info_map = {}
+    pr_map = {}
+    for rp, branch, commit_date, age_days in all_old:
+        if rp not in ado_info_map:
+            remote_url = get_remote_url(rp)
+            ado_info_map[rp] = _parse_ado_remote(remote_url) if remote_url else None
+        ado_info = ado_info_map[rp]
+        if ado_info:
+            branch_name = branch.replace('remotes/origin/', '').replace('origin/', '')
+            fetched = _fetch_ado_prs_for_branches(ado_info, [branch_name], creator_alias)
+            if fetched and branch_name in fetched:
+                pr_map[(rp, branch)] = fetched[branch_name]
+
+    active_pr_count = sum(
+        1 for prs in pr_map.values() for pr in prs if pr['status'] == 'active')
+
+    print(f"\n{Colors.RED}WARNING: This will delete {total} remote branch(es)"
+          f" and abandon {active_pr_count} active PR(s)!{Colors.NC}")
+    confirm = input("Type 'yes' to confirm: ")
     if confirm.lower() != 'yes':
         print("Aborted.")
         return 0
 
     deleted = 0
     failed = 0
+    abandoned = 0
     for rp, branch, commit_date, age_days in all_old:
         remote_branch = branch.replace('remotes/origin/', '').replace('origin/', '')
         print(f"Deleting origin/{remote_branch} ({rp.name})...", end=' ')
 
-        result = subprocess.run(
-            ['git', '-C', str(rp), 'push', 'origin', '--delete', remote_branch],
-            capture_output=True, text=True
-        )
-        if result.returncode == 0:
-            print(f"{Colors.GREEN}OK{Colors.NC}")
-            deleted += 1
+        ado_info = ado_info_map.get(rp)
+        if ado_info:
+            ok, err = _delete_ado_branch(ado_info, remote_branch, rp)
         else:
-            print(f"{Colors.RED}FAILED{Colors.NC}")
-            if result.stderr:
-                print(f"    {result.stderr.strip()}")
-            failed += 1
+            result = subprocess.run(
+                ['git', '-C', str(rp), 'push', 'origin', '--delete', remote_branch],
+                capture_output=True, text=True
+            )
+            ok = result.returncode == 0
+            err = result.stderr.strip() if not ok else ''
 
-    print(f"Deleted: {Colors.GREEN}{deleted}{Colors.NC} | Failed: {Colors.RED}{failed}{Colors.NC}")
+        if not ok:
+            print(f"{Colors.RED}FAILED{Colors.NC}")
+            if err:
+                print(f"    {err}")
+            failed += 1
+            continue
+
+        print(f"{Colors.GREEN}OK{Colors.NC}")
+        deleted += 1
+        if (rp, branch) not in pr_map:
+            continue
+        prs = pr_map[(rp, branch)]
+        active_prs = [pr for pr in prs if pr['status'] == 'active']
+        for pr in active_prs:
+            print(f"  Abandoning PR !{pr['id']}...", end=' ')
+            if _abandon_ado_pr(ado_info, pr['id']):
+                print(f"{Colors.GREEN}OK{Colors.NC}")
+                abandoned += 1
+            else:
+                print(f"{Colors.RED}FAILED{Colors.NC}")
+
+    print(f"Deleted: {Colors.GREEN}{deleted}{Colors.NC} | "
+          f"Abandoned PRs: {Colors.GREEN}{abandoned}{Colors.NC} | "
+          f"Failed: {Colors.RED}{failed}{Colors.NC}")
 
     return 0 if failed == 0 else 1
 
@@ -1146,6 +1313,152 @@ def cmd_ado_token(args):
     return 0
 
 
+def _parse_ado_remote(url):
+    """Parse org, project, repo from an ADO git remote URL.
+
+    Supports:
+      https://dev.azure.com/{org}/{project}/_git/{repo}
+      https://{user}@dev.azure.com/{org}/{project}/_git/{repo}
+      https://{org}.visualstudio.com/DefaultCollection/{project}/_git/{repo}
+      https://{org}.visualstudio.com/{project}/_git/{repo}
+      git@ssh.dev.azure.com:v3/{org}/{project}/{repo}
+    Returns (org, project, repo) or None.
+    """
+    import re
+    url = re.sub(r'\.git$', '', url)
+    m = re.match(r'https://(?:[^@]+@)?dev\.azure\.com/([^/]+)/([^/]+)/_git/(.+)', url)
+    if m:
+        return m.group(1), m.group(2), m.group(3)
+    m = re.match(r'https://([^.]+)\.visualstudio\.com/(?:DefaultCollection/)?([^/]+)/_git/(.+)', url)
+    if m:
+        return m.group(1), m.group(2), m.group(3)
+    m = re.match(r'git@ssh\.dev\.azure\.com:v3/([^/]+)/([^/]+)/(.+)', url)
+    if m:
+        return m.group(1), m.group(2), m.group(3)
+    return None
+
+
+def _resolve_pr_context(args):
+    """Resolve repo path, branch, ADO remote, and find existing PR.
+
+    Returns (org, project, repo, branch, pr_id, az_cmd) or prints error and
+    returns None.
+    """
+    repo_path = args.repo or '.'
+
+    def git(*cmd_args):
+        result = subprocess.run(
+            ['git', '--no-pager', '-C', repo_path] + list(cmd_args),
+            capture_output=True, text=True)
+        return result.returncode, result.stdout.strip()
+
+    branch = args.branch
+    if not branch:
+        rc, branch = git('branch', '--show-current')
+        if rc != 0 or not branch:
+            print(f"{Colors.RED}[X]{Colors.NC} Not on a branch", file=sys.stderr)
+            return None
+
+    rc, remote_url = git('remote', 'get-url', 'origin')
+    if rc != 0 or not remote_url:
+        print(f"{Colors.RED}[X]{Colors.NC} No origin remote found", file=sys.stderr)
+        return None
+
+    parsed = _parse_ado_remote(remote_url)
+    if not parsed:
+        print(f"{Colors.RED}[X]{Colors.NC} Could not parse ADO remote: {remote_url}", file=sys.stderr)
+        return None
+    org, project, repo = parsed
+
+    az_cmd = shutil.which('az') or 'az'
+
+    list_result = subprocess.run(
+        [az_cmd, 'repos', 'pr', 'list',
+         '--org', f'https://dev.azure.com/{org}',
+         '--project', project,
+         '--repository', repo,
+         '--source-branch', branch,
+         '--status', 'active',
+         '--output', 'json'],
+        capture_output=True, text=True)
+
+    pr_id = None
+    if list_result.returncode == 0 and list_result.stdout.strip():
+        try:
+            prs = json.loads(list_result.stdout)
+            if prs:
+                pr_id = prs[0].get('pullRequestId', prs[0].get('codeReviewId'))
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    return org, project, repo, branch, pr_id, az_cmd, git
+
+
+def cmd_pr_create(args):
+    """Create a draft ADO pull request from the current branch."""
+    ctx = _resolve_pr_context(args)
+    if not ctx:
+        return 1
+    org, project, repo, branch, pr_id, az_cmd, git = ctx
+
+    if pr_id:
+        pr_url = f'https://dev.azure.com/{org}/{project}/_git/pullrequest/{pr_id}'
+        print(f"{Colors.YELLOW}[!]{Colors.NC} PR already exists: !{pr_id} {pr_url}")
+        return 0
+
+    rc, default_branch = git('rev-parse', '--abbrev-ref', 'origin/HEAD')
+    if rc != 0 or not default_branch:
+        default_branch = 'origin/master'
+    target = default_branch.replace('origin/', '', 1)
+
+    title = args.title
+    if not title:
+        _, title = git('log', '-1', '--format=%s')
+
+    cmd = [
+        az_cmd, 'repos', 'pr', 'create',
+        '--draft',
+        '--org', f'https://dev.azure.com/{org}',
+        '--project', project,
+        '--repository', repo,
+        '--source-branch', branch,
+        '--target-branch', target,
+        '--title', title,
+        '--output', 'table',
+    ]
+    if args.description:
+        cmd += ['--description', args.description]
+
+    print(f"{Colors.CYAN}[>]{Colors.NC} Creating draft PR: {branch} → {target}")
+    result = subprocess.run(cmd)
+    return result.returncode
+
+
+def cmd_pr_desc(args):
+    """Update the description of an existing PR."""
+    if not args.description:
+        print(f"{Colors.RED}[X]{Colors.NC} --description is required", file=sys.stderr)
+        return 1
+
+    ctx = _resolve_pr_context(args)
+    if not ctx:
+        return 1
+    org, _, _, _, pr_id, az_cmd, _ = ctx
+
+    if not pr_id:
+        print(f"{Colors.RED}[X]{Colors.NC} No active PR found for this branch", file=sys.stderr)
+        return 1
+
+    result = subprocess.run([
+        az_cmd, 'repos', 'pr', 'update',
+        '--org', f'https://dev.azure.com/{org}',
+        '--id', str(pr_id),
+        '--description', args.description,
+        '--output', 'table',
+    ])
+    return result.returncode
+
+
 def main():
     parser = argparse.ArgumentParser(description='Dev CLI - Development workflow tool')
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
@@ -1186,6 +1499,21 @@ def main():
 
     ado_sub.add_parser('token', help='Get ADO access token (cached)')
 
+    # pr subcommand
+    pr_parser = subparsers.add_parser('pr', help='Pull request operations')
+    pr_sub = pr_parser.add_subparsers(dest='pr_command')
+
+    pr_create_p = pr_sub.add_parser('create', help='Create a draft PR from the current branch')
+    pr_create_p.add_argument('--title', '-t', help='PR title (defaults to last commit message)')
+    pr_create_p.add_argument('--description', '-d', default='', help='PR description')
+    pr_create_p.add_argument('--repo', '-r', help='Path to git repository (default: current directory)')
+    pr_create_p.add_argument('--branch', '-b', help='Source branch (default: current branch)')
+
+    pr_desc_p = pr_sub.add_parser('desc', help='Update PR description')
+    pr_desc_p.add_argument('--description', '-d', required=True, help='New PR description')
+    pr_desc_p.add_argument('--repo', '-r', help='Path to git repository (default: current directory)')
+    pr_desc_p.add_argument('--branch', '-b', help='Source branch (default: current branch)')
+
     # Init command
     subparsers.add_parser('init', help='Bootstrap shell profile ($PROFILE on Windows, .bashrc→zsh on Linux)')
 
@@ -1210,6 +1538,15 @@ def main():
             return cmd_map[args.ado_command](args)
         else:
             ado_parser.print_help()
+    elif args.command == 'pr':
+        cmd_map = {
+            'create': cmd_pr_create,
+            'desc': cmd_pr_desc,
+        }
+        if args.pr_command in cmd_map:
+            return cmd_map[args.pr_command](args)
+        else:
+            pr_parser.print_help()
     elif args.command == 'repo':
         cmd_map = {
             'add': cmd_repo_add,
