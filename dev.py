@@ -16,7 +16,7 @@ from pathlib import Path
 # Colors (ANSI escape codes, disabled on Windows cmd)
 class Colors:
     if sys.platform == 'win32' and 'WT_SESSION' not in os.environ:
-        RED = YELLOW = GREEN = BLUE = CYAN = PURPLE = NC = ''
+        RED = YELLOW = GREEN = BLUE = CYAN = PURPLE = GREY = NC = ''
     else:
         RED = '\033[0;31m'
         YELLOW = '\033[1;33m'
@@ -24,6 +24,7 @@ class Colors:
         BLUE = '\033[0;34m'
         CYAN = '\033[0;36m'
         PURPLE = '\033[0;35m'
+        GREY = '\033[0;90m'
         NC = '\033[0m'
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -849,8 +850,9 @@ def _scan_old_branches_ado(ado_info, creator, cutoff):
     if not token:
         return []
 
+    # stats/branches returns commit dates inline — single API call
     url = (f'https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo}'
-           f'/refs?filter=heads/&api-version=7.1')
+           f'/stats/branches?api-version=7.1')
     req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
@@ -858,27 +860,38 @@ def _scan_old_branches_ado(ado_info, creator, cutoff):
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
         return []
 
+    # Also get refs to check creator (stats API doesn't include pusher)
+    refs_url = (f'https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo}'
+                f'/refs?filter=heads/&api-version=7.1')
+    refs_req = urllib.request.Request(refs_url, headers={'Authorization': f'Bearer {token}'})
+    creator_branches = set()
+    try:
+        with urllib.request.urlopen(refs_req, timeout=30) as resp:
+            refs_data = json.loads(resp.read())
+            for ref in refs_data.get('value', []):
+                ref_creator = ref.get('creator', {}).get('uniqueName', '')
+                if creator in ref_creator:
+                    creator_branches.add(ref['name'].replace('refs/heads/', ''))
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
+        return []
+
     old_branches = []
-    for ref in data.get('value', []):
-        ref_creator = ref.get('creator', {}).get('uniqueName', '')
-        if creator not in ref_creator:
+    for branch_stat in data.get('value', []):
+        name = branch_stat.get('name', '')
+        if name not in creator_branches:
             continue
-        branch_name = ref['name'].replace('refs/heads/', '')
-        # Get commit date via statuses or use a simple REST call
-        commit_url = (f'https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo}'
-                      f'/commits/{ref["objectId"]}?api-version=7.1')
-        creq = urllib.request.Request(commit_url, headers={'Authorization': f'Bearer {token}'})
+        if branch_stat.get('isBaseVersion', False):
+            continue
+        commit = branch_stat.get('commit', {})
+        date_str = commit.get('committer', {}).get('date', '')
+        if not date_str:
+            continue
         try:
-            with urllib.request.urlopen(creq, timeout=10) as cresp:
-                cdata = json.loads(cresp.read())
-                date_str = cdata.get('committer', {}).get('date', '')
-                if not date_str:
-                    continue
-                commit_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-                if commit_date < cutoff:
-                    age_days = (datetime.now(timezone.utc) - commit_date).days
-                    old_branches.append((f'origin/{branch_name}', commit_date, age_days))
-        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, ValueError):
+            commit_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+            if commit_date < cutoff:
+                age_days = (datetime.now(timezone.utc) - commit_date).days
+                old_branches.append((f'origin/{name}', commit_date, age_days))
+        except ValueError:
             continue
     return old_branches
 
@@ -892,7 +905,8 @@ def _scan_old_branches_git(repo_path, prefix, author_email, cutoff):
     if result.returncode != 0:
         return []
 
-    branches = [b.strip() for b in result.stdout.strip().split('\n') if b.strip()]
+    branches = [b.strip() for b in result.stdout.strip().split('\n')
+                if b.strip() and 'HEAD' not in b]
     old_branches = []
     for branch in branches:
         result = subprocess.run(
@@ -939,7 +953,7 @@ def _print_old_branches(repo_path, old_branches, creator_prefix=None):
             for pr in pr_map[branch_name]:
                 status_color = Colors.GREEN if pr['status'] == 'completed' else (
                     Colors.YELLOW if pr['status'] == 'active' else (
-                    Colors.PURPLE if pr['status'] == 'abandoned' else Colors.NC))
+                    Colors.GREY if pr['status'] == 'abandoned' else Colors.NC))
                 pr_url = f'https://dev.azure.com/{org}/{project}/_git/{ado_info[2]}/pullrequest/{pr["id"]}'
                 print(f"    PR !{pr['id']} [{status_color}{pr['status']}{Colors.NC}] {pr['title']}")
                 print(f"       {pr_url}")
@@ -997,25 +1011,19 @@ def cmd_repo_old(args):
             old = _scan_old_branches_ado(ado_info, creator_email, cutoff)
         else:
             old = _scan_old_branches_git(rp, prefix, creator_email, cutoff)
-        for entry in old:
-            all_old.append((rp, *entry))
+        if old:
+            old.sort(key=lambda x: x[1])
+            print(f"\n{Colors.CYAN}{rp.name}{Colors.NC} ({len(old)} branches)")
+            _print_old_branches(rp, old, creator_alias)
+            for entry in old:
+                all_old.append((rp, *entry))
 
     if not all_old:
-        print(f"{Colors.GREEN}No branches older than {days} days found{Colors.NC}")
+        print(f"\n{Colors.GREEN}No branches older than {days} days found{Colors.NC}")
         return 0
 
-    all_old.sort(key=lambda x: x[2])
-
-    # Group by repo for display
-    by_repo = {}
-    for rp, branch, commit_date, age_days in all_old:
-        by_repo.setdefault(rp, []).append((branch, commit_date, age_days))
-
     total = len(all_old)
-    print(f"\n{Colors.YELLOW}Found {total} old branches across {len(by_repo)} repo(s):{Colors.NC}")
-    for rp, branches in by_repo.items():
-        print(f"\n{Colors.CYAN}{rp.name}{Colors.NC} ({len(branches)} branches)")
-        _print_old_branches(rp, branches, creator_alias)
+    print(f"\n{Colors.YELLOW}Found {total} old branch(es) total{Colors.NC}")
 
     if not args.delete:
         print(f"\n{Colors.CYAN}To delete these branches, run:{Colors.NC}")
