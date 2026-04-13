@@ -1405,9 +1405,41 @@ def _parse_ado_remote(url):
 def _resolve_pr_context(args):
     """Resolve repo path, branch, ADO remote, and find existing PR.
 
-    Returns (org, project, repo, branch, pr_id, az_cmd) or prints error and
+    If args.id is provided, fetches the PR directly by ID (repo/branch not needed).
+    Returns (org, project, repo, branch, pr_id, az_cmd, git) or prints error and
     returns None.
     """
+    az_cmd = shutil.which('az') or 'az'
+
+    if getattr(args, 'id', None):
+        pr_id = args.id
+        token = get_ado_token()
+        if not token:
+            print(f"{Colors.RED}[X]{Colors.NC} Failed to get ADO token", file=sys.stderr)
+            return None
+
+        import urllib.request
+        repos_to_try = [
+            ('contoso', 'platform', 'internal.service'),
+            ('contoso', 'platform', 'internal.service.build'),
+            ('contoso', 'platform', 'bigrepo.src'),
+            ('contoso', 'platform', 'release-helper'),
+        ]
+        for org, project, repo in repos_to_try:
+            base = f'https://dev.azure.com/{org}/{project}'
+            url = f'{base}/_apis/git/repositories/{repo}/pullrequests/{pr_id}?api-version=7.1'
+            req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
+            try:
+                with urllib.request.urlopen(req) as resp:
+                    pr = json.loads(resp.read())
+                    branch = pr['sourceRefName'].replace('refs/heads/', '')
+                    return org, project, repo, branch, pr_id, az_cmd, None
+            except urllib.error.HTTPError:
+                continue
+
+        print(f"{Colors.RED}[X]{Colors.NC} PR !{pr_id} not found in known repos", file=sys.stderr)
+        return None
+
     repo_path = args.repo or '.'
 
     def git(*cmd_args):
@@ -1572,11 +1604,13 @@ def main():
     pr_create_p.add_argument('--description', '-d', default='', help='PR description')
     pr_create_p.add_argument('--repo', '-r', help='Path to git repository (default: current directory)')
     pr_create_p.add_argument('--branch', '-b', help='Source branch (default: current branch)')
+    pr_create_p.add_argument('--id', type=int, help='Existing PR ID (skips creation, prints URL)')
 
     pr_desc_p = pr_sub.add_parser('desc', help='Update PR description')
     pr_desc_p.add_argument('--description', '-d', required=True, help='New PR description')
     pr_desc_p.add_argument('--repo', '-r', help='Path to git repository (default: current directory)')
     pr_desc_p.add_argument('--branch', '-b', help='Source branch (default: current branch)')
+    pr_desc_p.add_argument('--id', type=int, help='PR ID (alternative to --repo/--branch)')
 
     # Init command
     subparsers.add_parser('init', help='Bootstrap shell profile ($PROFILE on Windows, .bashrc→zsh on Linux)')
