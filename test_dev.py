@@ -1049,6 +1049,15 @@ class TestToolsInstalled(unittest.TestCase):
     def test_wsl_tools(self):
         if shutil.which('wsl') is None:
             self.skipTest('WSL not available')
+        try:
+            probe = subprocess.run(
+                ['wsl', '-e', 'true'],
+                capture_output=True, timeout=15,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            self.skipTest(f'WSL not usable: {e}')
+        if probe.returncode != 0:
+            self.skipTest('No WSL distro installed/running')
         check = ' && '.join(f'command -v {t}' for t in self.WSL_TOOLS)
         result = subprocess.run(
             ['wsl', '-e', 'zsh', '-ilc', check],
