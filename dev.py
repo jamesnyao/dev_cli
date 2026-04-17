@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
+from contextlib import contextmanager
 from pathlib import Path
 
 # Ensure stdout/stderr can print unicode (e.g. arrows, checkmarks) on Windows
@@ -1531,12 +1532,11 @@ def cmd_pr_create(args):
         '--title', title,
         '--output', 'table',
     ]
-    if args.description:
-        cmd += ['--description', args.description]
-
     print(f"{Colors.CYAN}[>]{Colors.NC} Creating draft PR: {branch} → {target}")
-    result = subprocess.run(cmd)
-    return result.returncode
+    with _description_as_file_arg(args.description) as desc_arg:
+        if desc_arg:
+            cmd += desc_arg
+        return subprocess.run(cmd).returncode
 
 
 def cmd_pr_desc(args):
@@ -1554,14 +1554,42 @@ def cmd_pr_desc(args):
         print(f"{Colors.RED}[X]{Colors.NC} No active PR found for this branch", file=sys.stderr)
         return 1
 
-    result = subprocess.run([
-        az_cmd, 'repos', 'pr', 'update',
-        '--org', f'https://dev.azure.com/{org}',
-        '--id', str(pr_id),
-        '--description', args.description,
-        '--output', 'table',
-    ])
+    with _description_as_file_arg(args.description) as desc_arg:
+        result = subprocess.run([
+            az_cmd, 'repos', 'pr', 'update',
+            '--org', f'https://dev.azure.com/{org}',
+            '--id', str(pr_id),
+            *desc_arg,
+            '--output', 'table',
+        ])
     return result.returncode
+
+
+@contextmanager
+def _description_as_file_arg(description):
+    """Yield ``['--description', '@<tmpfile>']`` with ``description`` written
+    to a tmp file, cleaning up on exit. Yields ``[]`` if description is empty.
+
+    ``az repos pr update/create --description "<string>"`` drops newlines when
+    the string is passed inline through subprocess on Windows. Azure CLI's
+    ``@<file>`` argument-from-file syntax sidesteps that — the file content is
+    read as-is, preserving newlines.
+    """
+    if not description:
+        yield []
+        return
+    import tempfile
+    tf = tempfile.NamedTemporaryFile(
+        mode='w', suffix='.md', delete=False, encoding='utf-8')
+    try:
+        tf.write(description)
+        tf.close()
+        yield ['--description', f'@{tf.name}']
+    finally:
+        try:
+            os.unlink(tf.name)
+        except OSError:
+            pass
 
 
 def main():
