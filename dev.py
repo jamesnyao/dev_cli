@@ -13,6 +13,15 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Ensure stdout/stderr can print unicode (e.g. arrows, checkmarks) on Windows
+# consoles where the default codec is cp1252.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, 'reconfigure'):
+        try:
+            _stream.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
+
 # Colors (ANSI escape codes, disabled on Windows cmd)
 class Colors:
     if sys.platform == 'win32' and 'WT_SESSION' not in os.environ:
