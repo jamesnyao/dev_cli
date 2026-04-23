@@ -997,6 +997,7 @@ def _print_old_branches(repo_path, old_branches, creator_prefix=None):
     remote_url = get_remote_url(repo_path)
     ado_info = _parse_ado_remote(remote_url) if remote_url else None
     pr_map = {}
+    org, project = None, None
     if ado_info:
         branch_names = [b.replace('remotes/origin/', '').replace('origin/', '')
                         for b, _, _ in old_branches]
@@ -1094,7 +1095,7 @@ def cmd_repo_old(args):
     # Delete mode — build per-repo ADO info and PR map
     ado_info_map = {}
     pr_map = {}
-    for rp, branch, commit_date, age_days in all_old:
+    for rp, branch, _commit_date, _age_days in all_old:
         if rp not in ado_info_map:
             remote_url = get_remote_url(rp)
             ado_info_map[rp] = _parse_ado_remote(remote_url) if remote_url else None
@@ -1118,7 +1119,7 @@ def cmd_repo_old(args):
     deleted = 0
     failed = 0
     abandoned = 0
-    for rp, branch, commit_date, age_days in all_old:
+    for rp, branch, _commit_date, _age_days in all_old:
         remote_branch = branch.replace('remotes/origin/', '').replace('origin/', '')
         print(f"Deleting origin/{remote_branch} ({rp.name})...", end=' ')
 
