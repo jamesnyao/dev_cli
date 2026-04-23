@@ -1501,8 +1501,28 @@ def _resolve_pr_context(args):
     return org, project, repo, branch, pr_id, az_cmd, git
 
 
+def _read_description_source(path):
+    """Read a PR description from ``path`` (``-`` means stdin).
+
+    Returns the text on success, or ``None`` after printing an error.
+    """
+    if path == '-':
+        return sys.stdin.read()
+    try:
+        return Path(path).read_text(encoding='utf-8')
+    except OSError as e:
+        print(f"{Colors.RED}[X]{Colors.NC} Failed to read {path}: {e}", file=sys.stderr)
+        return None
+
+
 def cmd_pr_create(args):
     """Create a draft ADO pull request from the current branch."""
+    description = ''
+    if args.description_file:
+        description = _read_description_source(args.description_file)
+        if description is None:
+            return 1
+
     ctx = _resolve_pr_context(args)
     if not ctx:
         return 1
@@ -1534,7 +1554,7 @@ def cmd_pr_create(args):
         '--output', 'table',
     ]
     print(f"{Colors.CYAN}[>]{Colors.NC} Creating draft PR: {branch} → {target}")
-    with _description_as_file_arg(args.description) as desc_arg:
+    with _description_as_file_arg(description) as desc_arg:
         if desc_arg:
             cmd += desc_arg
         return subprocess.run(cmd).returncode
@@ -1542,14 +1562,9 @@ def cmd_pr_create(args):
 
 def cmd_pr_desc(args):
     """Update the description of an existing PR."""
-    if args.file == '-':
-        description = sys.stdin.read()
-    else:
-        try:
-            description = Path(args.file).read_text(encoding='utf-8')
-        except OSError as e:
-            print(f"{Colors.RED}[X]{Colors.NC} Failed to read {args.file}: {e}", file=sys.stderr)
-            return 1
+    description = _read_description_source(args.file)
+    if description is None:
+        return 1
 
     if not description:
         print(f"{Colors.RED}[X]{Colors.NC} --file produced an empty description",
@@ -1650,7 +1665,8 @@ def main():
 
     pr_create_p = pr_sub.add_parser('create', help='Create a draft PR from the current branch')
     pr_create_p.add_argument('--title', '-t', help='PR title (defaults to last commit message)')
-    pr_create_p.add_argument('--description', '-d', default='', help='PR description')
+    pr_create_p.add_argument('--description-file', '-d',
+                             help='Path to a file containing the PR description (use "-" for stdin)')
     pr_create_p.add_argument('--repo', '-r', help='Path to git repository (default: current directory)')
     pr_create_p.add_argument('--branch', '-b', help='Source branch (default: current branch)')
     pr_create_p.add_argument('--id', type=int, help='Existing PR ID (skips creation, prints URL)')
