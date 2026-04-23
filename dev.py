@@ -1541,20 +1541,31 @@ def cmd_pr_create(args):
 
 def cmd_pr_desc(args):
     """Update the description of an existing PR."""
-    if not args.description:
-        print(f"{Colors.RED}[X]{Colors.NC} --description is required", file=sys.stderr)
+    if args.file == '-':
+        description = sys.stdin.read()
+    else:
+        try:
+            description = Path(args.file).read_text(encoding='utf-8')
+        except OSError as e:
+            print(f"{Colors.RED}[X]{Colors.NC} Failed to read {args.file}: {e}", file=sys.stderr)
+            return 1
+
+    if not description:
+        print(f"{Colors.RED}[X]{Colors.NC} --file produced an empty description",
+              file=sys.stderr)
         return 1
 
     ctx = _resolve_pr_context(args)
     if not ctx:
         return 1
-    org, _, _, _, pr_id, az_cmd, _ = ctx
+    org, _, _, _, pr_id, _, _ = ctx
 
     if not pr_id:
         print(f"{Colors.RED}[X]{Colors.NC} No active PR found for this branch", file=sys.stderr)
         return 1
 
-    with _description_as_file_arg(args.description) as desc_arg:
+    az_cmd = shutil.which('az') or 'az'
+    with _description_as_file_arg(description) as desc_arg:
         result = subprocess.run([
             az_cmd, 'repos', 'pr', 'update',
             '--org', f'https://dev.azure.com/{org}',
@@ -1644,7 +1655,8 @@ def main():
     pr_create_p.add_argument('--id', type=int, help='Existing PR ID (skips creation, prints URL)')
 
     pr_desc_p = pr_sub.add_parser('desc', help='Update PR description')
-    pr_desc_p.add_argument('--description', '-d', required=True, help='New PR description')
+    pr_desc_p.add_argument('--file', '-f', required=True,
+                           help='Path to a file containing the new PR description (use "-" for stdin)')
     pr_desc_p.add_argument('--repo', '-r', help='Path to git repository (default: current directory)')
     pr_desc_p.add_argument('--branch', '-b', help='Source branch (default: current branch)')
     pr_desc_p.add_argument('--id', type=int, help='PR ID (alternative to --repo/--branch)')
