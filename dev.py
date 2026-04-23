@@ -1430,12 +1430,17 @@ def _resolve_pr_context(args):
             return None
 
         import urllib.request
-        repos_to_try = [
-            ('contoso', 'platform', 'internal.service'),
-            ('contoso', 'platform', 'internal.service.build'),
-            ('contoso', 'platform', 'bigrepo.src'),
-            ('contoso', 'platform', 'release-helper'),
-        ]
+        repos_to_try = []
+        seen = set()
+        try:
+            for entry in load_config().get('repos', []):
+                parsed = _parse_ado_remote(entry.get('remoteUrl', ''))
+                if parsed and parsed not in seen:
+                    seen.add(parsed)
+                    repos_to_try.append(parsed)
+        except (OSError, json.JSONDecodeError):
+            pass
+
         for org, project, repo in repos_to_try:
             base = f'https://dev.azure.com/{org}/{project}'
             url = f'{base}/_apis/git/repositories/{repo}/pullrequests/{pr_id}?api-version=7.1'
