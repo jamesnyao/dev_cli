@@ -1037,12 +1037,14 @@ class TestEnsureLink(unittest.TestCase):
 class TestToolsInstalled(unittest.TestCase):
     """Verify all expected tools are installed on the current platform"""
 
-    WINDOWS_TOOLS = ['py', 'git', 'clang', 'choco', 'zoxide', 'fzf', 'agency']
-    WSL_TOOLS = ['zsh', 'python3', 'git', 'zoxide', 'fzf', 'agency']
+    WINDOWS_TOOLS = ['py', 'git', 'clang', 'choco', 'zoxide', 'fzf']
+    WSL_TOOLS = ['zsh', 'python3', 'git', 'zoxide', 'fzf']
+    WORK_TOOLS = ['agency']
 
     @unittest.skipUnless(platform.system() == 'Windows', 'Windows only')
     def test_windows_tools(self):
-        missing = [t for t in self.WINDOWS_TOOLS if shutil.which(t) is None]
+        tools = self.WINDOWS_TOOLS + (self.WORK_TOOLS if os.environ.get('WORK') == 'MSFT' else [])
+        missing = [t for t in tools if shutil.which(t) is None]
         self.assertEqual(missing, [], f'Missing Windows tools: {missing}')
 
     @unittest.skipUnless(platform.system() == 'Windows', 'Windows only')
