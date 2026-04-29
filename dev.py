@@ -510,9 +510,10 @@ def cmd_repo_sync(args):
     sync_rcfiles_push(pulled=pulled)
     print()
 
-    print(f"{Colors.BLUE}Syncing tracked files...{Colors.NC}")
-    sync_tracked_files(base_path)
-    print()
+    if _get_all_tracked_files():
+        print(f"{Colors.BLUE}Syncing tracked files...{Colors.NC}")
+        sync_tracked_files(base_path)
+        print()
 
     config = load_config()
 
