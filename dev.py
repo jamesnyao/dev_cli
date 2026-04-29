@@ -291,7 +291,9 @@ def cmd_repo_add(args):
 def cmd_repo_remove(args):
     """Remove a repository or file from tracking."""
     config = load_config()
-    name = args.name
+    name = args.name.replace('\\', '/')
+    if name.startswith('./'):
+        name = name[2:]
 
     original_count = len(config['repos'])
     config['repos'] = [r for r in config['repos'] if r['path'] != name]
