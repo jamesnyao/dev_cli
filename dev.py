@@ -251,6 +251,55 @@ def _add_tracked_file(file_path):
     return 0
 
 
+def _add_tracked_dir(dir_path):
+    """Add a directory to tracking for cross-machine sync.
+
+    All files under the directory are tracked and auto-discovered on sync.
+    """
+    base_path = Path(get_base_path()).resolve()
+    dir_path = dir_path.resolve()
+
+    try:
+        rel_path = dir_path.relative_to(base_path)
+    except ValueError:
+        print(f"{Colors.RED}[X]{Colors.NC} Directory must be under workspace root: {base_path}")
+        return 1
+
+    rel_str = str(rel_path).replace('\\', '/')
+    prefix = rel_str + '/'
+
+    config = load_config()
+    if 'files' not in config:
+        config['files'] = []
+
+    removed = [f['path'] for f in config['files']
+               if f['path'] == rel_str or f['path'].startswith(prefix)]
+    config['files'] = [f for f in config['files']
+                       if f['path'] != rel_str and not f['path'].startswith(prefix)]
+    config['files'].append({'path': rel_str, 'dir': True})
+
+    file_count = 0
+    for src_file in dir_path.rglob('*'):
+        if not src_file.is_file() or src_file.is_symlink():
+            continue
+        try:
+            file_rel = src_file.relative_to(base_path)
+        except ValueError:
+            continue
+        dest = RCFILES_DIR / str(file_rel).replace('\\', '/')
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(src_file), str(dest))
+        file_count += 1
+
+    save_config(config)
+    print(f"{Colors.GREEN}Added directory: {rel_str}/{Colors.NC}")
+    print(f"  Synced {file_count} files to rcfiles")
+    if removed:
+        for r in removed:
+            print(f"  Replaced individual entry: {r}")
+    return 0
+
+
 def cmd_repo_add(args):
     """Add a repository or file to tracking."""
     target_path = Path(args.path).resolve()
@@ -265,8 +314,7 @@ def cmd_repo_add(args):
 
     git_dir = target_path / '.git'
     if not git_dir.exists():
-        print(f"{Colors.RED}[X]{Colors.NC} Not a git repository: {target_path}")
-        return 1
+        return _add_tracked_dir(target_path)
 
     remote_url = get_remote_url(target_path, normalize=True)
     if not remote_url:
@@ -303,14 +351,20 @@ def cmd_repo_remove(args):
 
     files = config.get('files', [])
     original_count = len(files)
+    removed_entry = next((f for f in files if f['path'] == name), None)
     config['files'] = [f for f in files if f['path'] != name]
 
     if len(config.get('files', [])) < original_count:
-        rcfile = RCFILES_DIR / name
-        if rcfile.exists():
-            rcfile.unlink()
+        rcpath = RCFILES_DIR / name
+        if removed_entry and removed_entry.get('dir'):
+            if rcpath.is_dir():
+                shutil.rmtree(str(rcpath))
+            print(f"{Colors.GREEN}Removed directory: {name}{Colors.NC}")
+        else:
+            if rcpath.exists():
+                rcpath.unlink()
+            print(f"{Colors.GREEN}Removed file: {name}{Colors.NC}")
         save_config(config)
-        print(f"{Colors.GREEN}Removed file: {name}{Colors.NC}")
         return 0
 
     print(f"{Colors.RED}[X]{Colors.NC} '{name}' is not tracked")
@@ -342,8 +396,9 @@ def cmd_repo_list(args):
     if files:
         print(f"\n{Colors.BLUE}Tracked Files:{Colors.NC}")
         for f in sorted(files, key=lambda x: x['path']):
-            print(f"  {f['path']}")
-        print(f"Total: {Colors.GREEN}{len(files)}{Colors.NC} files")
+            suffix = f" {Colors.CYAN}[dir]{Colors.NC}" if f.get('dir') else ''
+            print(f"  {f['path']}{suffix}")
+        print(f"Total: {Colors.GREEN}{len(files)}{Colors.NC} entries")
 
     return 0
 
@@ -627,9 +682,41 @@ def has_real_conflict_markers(content):
 HOME_DIR = Path.home()
 
 def _get_all_tracked_files():
-    """Return user-tracked file paths from config."""
+    """Return raw tracked file/dir specs from config."""
     config = load_config()
     return config.get('files', [])
+
+
+def _expand_tracked_files(entries, base_path=None):
+    """Expand directory entries into individual file entries.
+
+    Scans HOME_DIR and RCFILES_DIR (and optionally base_path) for files
+    under each tracked directory. Non-dir entries pass through unchanged.
+    """
+    result = []
+    seen = set()
+    for entry in entries:
+        if not entry.get('dir'):
+            if entry['path'] not in seen:
+                seen.add(entry['path'])
+                result.append(entry)
+            continue
+        dir_rel = entry['path']
+        scan_roots = [HOME_DIR, RCFILES_DIR]
+        if base_path:
+            scan_roots.append(Path(base_path))
+        for root in scan_roots:
+            scan_dir = root / dir_rel.replace('/', os.sep)
+            if not scan_dir.is_dir():
+                continue
+            for f in scan_dir.rglob('*'):
+                if not f.is_file() or f.is_symlink():
+                    continue
+                rel = str(f.relative_to(root)).replace('\\', '/')
+                if rel not in seen:
+                    seen.add(rel)
+                    result.append({'path': rel})
+    return result
 
 
 def sync_tracked_files(base_path):
@@ -637,8 +724,32 @@ def sync_tracked_files(base_path):
 
     All tracked files sync to home (~/).
     The newer version wins. Returns True if any rcfiles were modified.
+    For directory entries, new files from the workspace root are ingested
+    into rcfiles before syncing.
     """
-    all_files = _get_all_tracked_files()
+    raw_entries = _get_all_tracked_files()
+
+    # Ingest new workspace files for tracked directories
+    for entry in raw_entries:
+        if not entry.get('dir'):
+            continue
+        dir_rel = entry['path']
+        workspace_dir = Path(base_path) / dir_rel.replace('/', os.sep)
+        if not workspace_dir.is_dir():
+            continue
+        for f in workspace_dir.rglob('*'):
+            if not f.is_file() or f.is_symlink():
+                continue
+            try:
+                file_rel = str(f.relative_to(Path(base_path))).replace('\\', '/')
+            except ValueError:
+                continue
+            rcfile = RCFILES_DIR / file_rel
+            if not rcfile.exists():
+                rcfile.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(f), str(rcfile))
+
+    all_files = _expand_tracked_files(raw_entries, base_path)
     rcfiles_changed = False
 
     for entry in all_files:
@@ -730,9 +841,10 @@ def cmd_repo_status(args):
 
     files = _get_all_tracked_files()
     if files:
+        expanded = _expand_tracked_files(files, str(base_path))
         print(f"\n{Colors.BLUE}Tracked Files:{Colors.NC}")
         f_present = f_missing = 0
-        for f in sorted(files, key=lambda x: x['path']):
+        for f in sorted(expanded, key=lambda x: x['path']):
             workspace_file = base_path / f['path'].replace('/', os.sep)
             if workspace_file.exists():
                 print(f"{Colors.GREEN}[OK]{Colors.NC} {f['path']}")
