@@ -4,8 +4,6 @@ $GoUrl = "https://go.dev/dl/$GoZip"
 $GoRoot = "C:\Go"
 
 if (Test-Path "$GoRoot\bin\go.exe") {
-    $currentVersion = & "$GoRoot\bin\go.exe" version 2>$null
-    Write-Host "Go already installed: $currentVersion"
     return
 }
 
