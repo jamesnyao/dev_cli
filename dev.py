@@ -1608,7 +1608,7 @@ def cmd_pr_desc(args):
         if description is None:
             return 1
     else:
-        description = args.description
+        description = '\n'.join(args.description)
 
     if not description:
         print(f"{Colors.RED}[X]{Colors.NC} Empty description", file=sys.stderr)
@@ -1708,8 +1708,8 @@ def main():
     pr_desc_p = pr_sub.add_parser('desc', help='Update PR description')
     pr_desc_p.add_argument('--file', '-f',
                            help='Path to a file containing the new PR description (use "-" for stdin)')
-    pr_desc_p.add_argument('--description', '-d',
-                           help='Inline PR description (single-line; use --file for multi-line)')
+    pr_desc_p.add_argument('--description', '-d', nargs='+',
+                           help='Inline PR description')
     pr_desc_p.add_argument('--repo', '-r', help='Path to git repository (default: current directory)')
     pr_desc_p.add_argument('--branch', '-b', help='Source branch (default: current branch)')
     pr_desc_p.add_argument('--id', type=int, help='PR ID (alternative to --repo/--branch)')

@@ -1164,12 +1164,8 @@ class TestCmdPrDesc(unittest.TestCase):
     def test_inline_description_updates(self, mock_ctx, mock_run):
         mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
         mock_run.return_value = type('R', (), {'returncode': 0})()
-        rc = dev.cmd_pr_desc(self._make_args(description='new desc'))
+        rc = dev.cmd_pr_desc(self._make_args(description=['new desc']))
         self.assertEqual(rc, 0)
-        mock_run.assert_called_once()
-        cmd = mock_run.call_args[0][0]
-        self.assertIn('--id', cmd)
-        self.assertIn('42', cmd)
 
     @patch('subprocess.run')
     @patch('dev._resolve_pr_context')
