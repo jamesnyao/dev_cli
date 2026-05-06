@@ -1569,23 +1569,49 @@ def cmd_pr_create(args):
 
 
 def cmd_pr_desc(args):
-    """Update the description of an existing PR."""
-    description = _read_description_source(args.file)
-    if description is None:
-        return 1
-
-    if not description:
-        print(f"{Colors.RED}[X]{Colors.NC} --file produced an empty description",
-              file=sys.stderr)
-        return 1
-
+    """Show or update the description of an existing PR."""
     ctx = _resolve_pr_context(args)
     if not ctx:
         return 1
-    org, _, _, _, pr_id, _, _ = ctx
+    org, project, repo, _, pr_id, _, _ = ctx
 
     if not pr_id:
         print(f"{Colors.RED}[X]{Colors.NC} No active PR found for this branch", file=sys.stderr)
+        return 1
+
+    has_input = args.file or args.description
+
+    if not has_input:
+        token = get_ado_token()
+        if not token:
+            print(f"{Colors.RED}[X]{Colors.NC} Failed to get ADO token", file=sys.stderr)
+            return 1
+        import urllib.request
+        base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
+        url = f'{base}/{repo}/pullrequests/{pr_id}?api-version=7.1'
+        req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
+        try:
+            with urllib.request.urlopen(req) as resp:
+                pr = json.loads(resp.read())
+                desc = pr.get('description', '')
+                if desc:
+                    print(desc)
+                else:
+                    print(f"{Colors.YELLOW}[!]{Colors.NC} PR !{pr_id} has no description")
+                return 0
+        except urllib.error.HTTPError as e:
+            print(f"{Colors.RED}[X]{Colors.NC} Failed to fetch PR: {e}", file=sys.stderr)
+            return 1
+
+    if args.file:
+        description = _read_description_source(args.file)
+        if description is None:
+            return 1
+    else:
+        description = args.description
+
+    if not description:
+        print(f"{Colors.RED}[X]{Colors.NC} Empty description", file=sys.stderr)
         return 1
 
     az_cmd = shutil.which('az') or 'az'
@@ -1680,8 +1706,10 @@ def main():
     pr_create_p.add_argument('--id', type=int, help='Existing PR ID (skips creation, prints URL)')
 
     pr_desc_p = pr_sub.add_parser('desc', help='Update PR description')
-    pr_desc_p.add_argument('--file', '-f', required=True,
+    pr_desc_p.add_argument('--file', '-f',
                            help='Path to a file containing the new PR description (use "-" for stdin)')
+    pr_desc_p.add_argument('--description', '-d',
+                           help='Inline PR description (single-line; use --file for multi-line)')
     pr_desc_p.add_argument('--repo', '-r', help='Path to git repository (default: current directory)')
     pr_desc_p.add_argument('--branch', '-b', help='Source branch (default: current branch)')
     pr_desc_p.add_argument('--id', type=int, help='PR ID (alternative to --repo/--branch)')

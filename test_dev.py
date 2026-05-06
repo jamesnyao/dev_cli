@@ -1126,5 +1126,82 @@ class TestNormalizeUrlForComparison(unittest.TestCase):
         self.assertIsNone(dev._parse_ado_remote(github_url))
 
 
+class TestCmdPrDesc(unittest.TestCase):
+
+    def _make_args(self, **kwargs):
+        defaults = dict(file=None, description=None, repo=None, branch=None, id=None)
+        defaults.update(kwargs)
+        return argparse.Namespace(**defaults)
+
+    @patch('dev.get_ado_token', return_value='fake-token')
+    @patch('dev._resolve_pr_context')
+    def test_no_input_reads_description(self, mock_ctx, mock_token):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        pr_json = json.dumps({'description': 'existing desc'}).encode()
+        mock_resp = type('R', (), {'read': lambda self: pr_json, '__enter__': lambda self: self, '__exit__': lambda *a: None})()
+        with patch('urllib.request.urlopen', return_value=mock_resp):
+            rc = dev.cmd_pr_desc(self._make_args())
+        self.assertEqual(rc, 0)
+
+    @patch('dev._resolve_pr_context')
+    def test_no_pr_found_returns_error(self, mock_ctx):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', None, 'az', None)
+        rc = dev.cmd_pr_desc(self._make_args())
+        self.assertEqual(rc, 1)
+
+    @patch('dev._resolve_pr_context')
+    def test_empty_description_returns_error(self, mock_ctx):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as f:
+            f.write('')
+            f.flush()
+            rc = dev.cmd_pr_desc(self._make_args(file=f.name))
+        os.unlink(f.name)
+        self.assertEqual(rc, 1)
+
+    @patch('subprocess.run')
+    @patch('dev._resolve_pr_context')
+    def test_inline_description_updates(self, mock_ctx, mock_run):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        mock_run.return_value = type('R', (), {'returncode': 0})()
+        rc = dev.cmd_pr_desc(self._make_args(description='new desc'))
+        self.assertEqual(rc, 0)
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        self.assertIn('--id', cmd)
+        self.assertIn('42', cmd)
+
+    @patch('subprocess.run')
+    @patch('dev._resolve_pr_context')
+    def test_file_description_updates(self, mock_ctx, mock_run):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        mock_run.return_value = type('R', (), {'returncode': 0})()
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as f:
+            f.write('# Title\n\nBody with newlines\n- item 1\n- item 2\n')
+            f.flush()
+            rc = dev.cmd_pr_desc(self._make_args(file=f.name))
+        os.unlink(f.name)
+        self.assertEqual(rc, 0)
+        cmd = mock_run.call_args[0][0]
+        desc_args = [a for a in cmd if a.startswith('@')]
+        self.assertEqual(len(desc_args), 1)
+
+    @patch('subprocess.run')
+    @patch('dev._resolve_pr_context')
+    def test_file_with_newlines_preserves_content(self, mock_ctx, mock_run):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        mock_run.return_value = type('R', (), {'returncode': 0})()
+        content = '# Problem\nLine 2\n\n# Changes\n- A\n- B\n'
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as f:
+            f.write(content)
+            f.flush()
+            rc = dev.cmd_pr_desc(self._make_args(file=f.name))
+        os.unlink(f.name)
+        self.assertEqual(rc, 0)
+        cmd = mock_run.call_args[0][0]
+        desc_args = [a for a in cmd if a.startswith('@')]
+        self.assertEqual(len(desc_args), 1)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2, buffer=True)
