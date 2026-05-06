@@ -1568,6 +1568,30 @@ def cmd_pr_create(args):
         return subprocess.run(cmd).returncode
 
 
+def _print_pr_description(org, project, repo, pr_id):
+    """Fetch and print the current PR description."""
+    token = get_ado_token()
+    if not token:
+        print(f"{Colors.RED}[X]{Colors.NC} Failed to get ADO token", file=sys.stderr)
+        return 1
+    import urllib.request
+    base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
+    url = f'{base}/{repo}/pullrequests/{pr_id}?api-version=7.1'
+    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
+    try:
+        with urllib.request.urlopen(req) as resp:
+            pr = json.loads(resp.read())
+            desc = pr.get('description', '')
+            if desc:
+                print(desc)
+            else:
+                print(f"{Colors.YELLOW}[!]{Colors.NC} PR !{pr_id} has no description")
+            return 0
+    except urllib.error.HTTPError as e:
+        print(f"{Colors.RED}[X]{Colors.NC} Failed to fetch PR: {e}", file=sys.stderr)
+        return 1
+
+
 def cmd_pr_desc(args):
     """Show or update the description of an existing PR."""
     ctx = _resolve_pr_context(args)
@@ -1579,40 +1603,13 @@ def cmd_pr_desc(args):
         print(f"{Colors.RED}[X]{Colors.NC} No active PR found for this branch", file=sys.stderr)
         return 1
 
-    has_input = args.file or args.description
+    if not args.description:
+        return _print_pr_description(org, project, repo, pr_id)
 
-    if not has_input:
-        token = get_ado_token()
-        if not token:
-            print(f"{Colors.RED}[X]{Colors.NC} Failed to get ADO token", file=sys.stderr)
-            return 1
-        import urllib.request
-        base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
-        url = f'{base}/{repo}/pullrequests/{pr_id}?api-version=7.1'
-        req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
-        try:
-            with urllib.request.urlopen(req) as resp:
-                pr = json.loads(resp.read())
-                desc = pr.get('description', '')
-                if desc:
-                    print(desc)
-                else:
-                    print(f"{Colors.YELLOW}[!]{Colors.NC} PR !{pr_id} has no description")
-                return 0
-        except urllib.error.HTTPError as e:
-            print(f"{Colors.RED}[X]{Colors.NC} Failed to fetch PR: {e}", file=sys.stderr)
-            return 1
-
-    if args.file:
-        description = _read_description_source(args.file)
-        if description is None:
-            return 1
-    else:
-        description = '\n'.join(args.description)
+    description = '\n'.join(args.description)
 
     if not description:
-        print(f"{Colors.RED}[X]{Colors.NC} Empty description", file=sys.stderr)
-        return 1
+        return _print_pr_description(org, project, repo, pr_id)
 
     az_cmd = shutil.which('az') or 'az'
     with _description_as_file_arg(description) as desc_arg:
@@ -1621,9 +1618,12 @@ def cmd_pr_desc(args):
             '--org', f'https://dev.azure.com/{org}',
             '--id', str(pr_id),
             *desc_arg,
-            '--output', 'table',
+            '--output', 'none',
         ])
-    return result.returncode
+    if result.returncode != 0:
+        return result.returncode
+
+    return _print_pr_description(org, project, repo, pr_id)
 
 
 @contextmanager
@@ -1641,9 +1641,9 @@ def _description_as_file_arg(description):
         return
     import tempfile
     tf = tempfile.NamedTemporaryFile(
-        mode='w', suffix='.md', delete=False, encoding='utf-8')
+        mode='wb', suffix='.md', delete=False)
     try:
-        tf.write(description)
+        tf.write(description.encode('utf-8'))
         tf.close()
         yield ['--description', f'@{tf.name}']
     finally:
@@ -1705,11 +1705,9 @@ def main():
     pr_create_p.add_argument('--branch', '-b', help='Source branch (default: current branch)')
     pr_create_p.add_argument('--id', type=int, help='Existing PR ID (skips creation, prints URL)')
 
-    pr_desc_p = pr_sub.add_parser('desc', help='Update PR description')
-    pr_desc_p.add_argument('--file', '-f',
-                           help='Path to a file containing the new PR description (use "-" for stdin)')
-    pr_desc_p.add_argument('--description', '-d', nargs='+',
-                           help='Inline PR description')
+    pr_desc_p = pr_sub.add_parser('desc', help='Show or update PR description')
+    pr_desc_p.add_argument('description', nargs='*',
+                           help='New description (omit to read current)')
     pr_desc_p.add_argument('--repo', '-r', help='Path to git repository (default: current directory)')
     pr_desc_p.add_argument('--branch', '-b', help='Source branch (default: current branch)')
     pr_desc_p.add_argument('--id', type=int, help='PR ID (alternative to --repo/--branch)')
