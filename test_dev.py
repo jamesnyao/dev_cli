@@ -1184,5 +1184,74 @@ class TestCmdPrDesc(unittest.TestCase):
         mock_print.assert_called_once()
 
 
+class TestCmdPrDiff(unittest.TestCase):
+
+    def _make_args(self, **kwargs):
+        defaults = dict(repo=None, branch=None, id=None, diff_args=[])
+        defaults.update(kwargs)
+        return argparse.Namespace(**defaults)
+
+    @patch('dev._resolve_pr_context')
+    def test_returns_error_when_no_context(self, mock_ctx):
+        mock_ctx.return_value = None
+        rc = dev.cmd_pr_diff(self._make_args())
+        self.assertEqual(rc, 1)
+
+    @patch('subprocess.run')
+    @patch('dev.get_ado_token', return_value='fake-token')
+    @patch('dev._resolve_pr_context')
+    def test_fetches_target_from_pr_api(self, mock_ctx, mock_token, mock_run):
+        git_fn = lambda *a: (0, '')
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', git_fn)
+        pr_json = json.dumps({'targetRefName': 'refs/heads/main'}).encode()
+        mock_resp = type('R', (), {
+            'read': lambda self: pr_json,
+            '__enter__': lambda self: self,
+            '__exit__': lambda *a: None,
+        })()
+        mock_run.return_value = type('R', (), {'returncode': 0})()
+        with patch('urllib.request.urlopen', return_value=mock_resp):
+            rc = dev.cmd_pr_diff(self._make_args())
+        self.assertEqual(rc, 0)
+        diff_call = [c for c in mock_run.call_args_list if 'diff' in c[0][0]]
+        self.assertTrue(len(diff_call) > 0)
+        self.assertIn('origin/main...HEAD', ' '.join(diff_call[-1][0][0]))
+
+    @patch('subprocess.run')
+    @patch('dev._resolve_pr_context')
+    def test_falls_back_to_default_branch(self, mock_ctx, mock_run):
+        def git_fn(*cmd_args):
+            if 'rev-parse' in cmd_args:
+                return 0, 'origin/main'
+            return 0, ''
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', None, 'az', git_fn)
+        mock_run.return_value = subprocess.CompletedProcess([], 0, stdout='origin/main\n', stderr='')
+        rc = dev.cmd_pr_diff(self._make_args())
+        self.assertEqual(rc, 0)
+
+    @patch('subprocess.run')
+    @patch('dev._resolve_pr_context')
+    def test_id_mode_uses_remote_refs(self, mock_ctx, mock_run):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', None, 'az', None)
+        mock_run.return_value = subprocess.CompletedProcess([], 0, stdout='origin/master\n', stderr='')
+        rc = dev.cmd_pr_diff(self._make_args())
+        self.assertEqual(rc, 0)
+        diff_call = [c for c in mock_run.call_args_list if 'diff' in c[0][0]]
+        self.assertTrue(len(diff_call) > 0)
+        self.assertIn('origin/feat', ' '.join(diff_call[-1][0][0]))
+
+    @patch('subprocess.run')
+    @patch('dev._resolve_pr_context')
+    def test_extra_args_passed_to_git_diff(self, mock_ctx, mock_run):
+        git_fn = lambda *a: (0, 'origin/main')
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', None, 'az', git_fn)
+        mock_run.return_value = subprocess.CompletedProcess([], 0, stdout='origin/main\n', stderr='')
+        rc = dev.cmd_pr_diff(self._make_args(diff_args=['--', '--stat']))
+        self.assertEqual(rc, 0)
+        diff_call = [c for c in mock_run.call_args_list if 'diff' in c[0][0]]
+        self.assertTrue(len(diff_call) > 0)
+        self.assertIn('--stat', diff_call[-1][0][0])
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2, buffer=True)

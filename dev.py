@@ -1653,6 +1653,67 @@ def _description_as_file_arg(description):
             pass
 
 
+def cmd_pr_diff(args):
+    """Show the PR diff as ADO would — merge-base diff against target branch."""
+    ctx = _resolve_pr_context(args)
+    if not ctx:
+        return 1
+    org, project, repo, branch, pr_id, az_cmd, git_fn = ctx
+
+    repo_path = getattr(args, 'repo', None) or '.'
+
+    def git(*cmd_args):
+        result = subprocess.run(
+            ['git', '--no-pager', '-C', repo_path] + list(cmd_args),
+            capture_output=True, text=True)
+        return result.returncode, result.stdout.strip()
+
+    # Determine target branch from PR API or fall back to default
+    target = None
+    if pr_id:
+        token = get_ado_token()
+        if token:
+            import urllib.request
+            base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
+            url = f'{base}/{repo}/pullrequests/{pr_id}?api-version=7.1'
+            req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
+            try:
+                with urllib.request.urlopen(req) as resp:
+                    pr_data = json.loads(resp.read())
+                    target = pr_data.get('targetRefName', '').replace('refs/heads/', '')
+            except urllib.error.HTTPError:
+                pass
+
+    if not target:
+        rc, default_branch = git('rev-parse', '--abbrev-ref', 'origin/HEAD')
+        if rc != 0 or not default_branch:
+            default_branch = 'origin/master'
+        target = default_branch.replace('origin/', '', 1)
+
+    # When resolved via --id (no local git helper), diff remote refs;
+    # otherwise diff HEAD against the target (includes unpushed commits).
+    use_head = git_fn is not None
+    fetch_refs = [target]
+    if not use_head:
+        fetch_refs.append(branch)
+
+    ref_names = ', '.join(f'origin/{r}' for r in fetch_refs)
+    print(f"{Colors.CYAN}[>]{Colors.NC} Fetching {ref_names}...")
+    for ref in fetch_refs:
+        subprocess.run(['git', '-C', repo_path, 'fetch', 'origin', ref],
+                       capture_output=True)
+
+    source_ref = 'HEAD' if use_head else f'origin/{branch}'
+    extra = args.diff_args or []
+    if extra and extra[0] == '--':
+        extra = extra[1:]
+
+    print(f"{Colors.CYAN}[>]{Colors.NC} {branch} vs origin/{target} (merge-base)")
+    diff_cmd = ['git', '-C', repo_path, 'diff',
+                f'origin/{target}...{source_ref}'] + extra
+    return subprocess.run(diff_cmd).returncode
+
+
 def main():
     parser = argparse.ArgumentParser(description='Dev CLI - Development workflow tool')
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
@@ -1712,6 +1773,13 @@ def main():
     pr_desc_p.add_argument('--branch', '-b', help='Source branch (default: current branch)')
     pr_desc_p.add_argument('--id', type=int, help='PR ID (alternative to --repo/--branch)')
 
+    pr_diff_p = pr_sub.add_parser('diff', help='Show PR diff (merge-base diff against target)')
+    pr_diff_p.add_argument('--repo', '-r', help='Path to git repository (default: current directory)')
+    pr_diff_p.add_argument('--branch', '-b', help='Source branch (default: current branch)')
+    pr_diff_p.add_argument('--id', type=int, help='PR ID (alternative to --repo/--branch)')
+    pr_diff_p.add_argument('diff_args', nargs=argparse.REMAINDER,
+                           help='Extra args for git diff (e.g. --stat, --name-only)')
+
     # Init command
     subparsers.add_parser('init', help='Bootstrap shell profile ($PROFILE on Windows, .bashrc→zsh on Linux)')
 
@@ -1740,6 +1808,7 @@ def main():
         cmd_map = {
             'create': cmd_pr_create,
             'desc': cmd_pr_desc,
+            'diff': cmd_pr_diff,
         }
         if args.pr_command in cmd_map:
             return cmd_map[args.pr_command](args)
