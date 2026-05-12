@@ -1416,6 +1416,36 @@ def _parse_ado_remote(url):
     return None
 
 
+def _fetch_pr(org, project, repo, pr_id):
+    """Fetch PR details from ADO REST API. Returns the PR dict or None."""
+    token = get_ado_token()
+    if not token:
+        return None
+    import urllib.request
+    base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
+    url = f'{base}/{repo}/pullrequests/{pr_id}?api-version=7.1'
+    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError:
+        return None
+
+
+def _find_local_repo_path(org, project, repo):
+    """Find the local clone path for an ADO repo from config. Returns path or None."""
+    try:
+        config = load_config()
+        base_path = get_base_path(config)
+        for entry in config.get('repos', []):
+            parsed = _parse_ado_remote(entry.get('remoteUrl', ''))
+            if parsed == (org, project, repo):
+                return os.path.join(base_path, entry['path'])
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    return None
+
+
 def _resolve_pr_context(args):
     """Resolve repo path, branch, ADO remote, and find existing PR.
 
@@ -1445,16 +1475,10 @@ def _resolve_pr_context(args):
             pass
 
         for org, project, repo in repos_to_try:
-            base = f'https://dev.azure.com/{org}/{project}'
-            url = f'{base}/_apis/git/repositories/{repo}/pullrequests/{pr_id}?api-version=7.1'
-            req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
-            try:
-                with urllib.request.urlopen(req) as resp:
-                    pr = json.loads(resp.read())
-                    branch = pr['sourceRefName'].replace('refs/heads/', '')
-                    return org, project, repo, branch, pr_id, az_cmd, None
-            except urllib.error.HTTPError:
-                continue
+            pr = _fetch_pr(org, project, repo, pr_id)
+            if pr:
+                branch = pr['sourceRefName'].replace('refs/heads/', '')
+                return org, project, repo, branch, pr_id, az_cmd, None
 
         print(f"{Colors.RED}[X]{Colors.NC} PR !{pr_id} not found in known repos", file=sys.stderr)
         return None
@@ -1570,26 +1594,16 @@ def cmd_pr_create(args):
 
 def _print_pr_description(org, project, repo, pr_id):
     """Fetch and print the current PR description."""
-    token = get_ado_token()
-    if not token:
-        print(f"{Colors.RED}[X]{Colors.NC} Failed to get ADO token", file=sys.stderr)
+    pr = _fetch_pr(org, project, repo, pr_id)
+    if not pr:
+        print(f"{Colors.RED}[X]{Colors.NC} Failed to fetch PR !{pr_id}", file=sys.stderr)
         return 1
-    import urllib.request
-    base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
-    url = f'{base}/{repo}/pullrequests/{pr_id}?api-version=7.1'
-    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
-    try:
-        with urllib.request.urlopen(req) as resp:
-            pr = json.loads(resp.read())
-            desc = pr.get('description', '')
-            if desc:
-                print(desc)
-            else:
-                print(f"{Colors.YELLOW}[!]{Colors.NC} PR !{pr_id} has no description")
-            return 0
-    except urllib.error.HTTPError as e:
-        print(f"{Colors.RED}[X]{Colors.NC} Failed to fetch PR: {e}", file=sys.stderr)
-        return 1
+    desc = pr.get('description', '')
+    if desc:
+        print(desc)
+    else:
+        print(f"{Colors.YELLOW}[!]{Colors.NC} PR !{pr_id} has no description")
+    return 0
 
 
 def cmd_pr_desc(args):
@@ -1662,6 +1676,10 @@ def cmd_pr_diff(args):
 
     repo_path = getattr(args, 'repo', None) or '.'
 
+    # When --id is used without --repo, resolve the local clone from config
+    if git_fn is None and not getattr(args, 'repo', None):
+        repo_path = _find_local_repo_path(org, project, repo) or repo_path
+
     def git(*cmd_args):
         result = subprocess.run(
             ['git', '--no-pager', '-C', repo_path] + list(cmd_args),
@@ -1671,18 +1689,9 @@ def cmd_pr_diff(args):
     # Determine target branch from PR API or fall back to default
     target = None
     if pr_id:
-        token = get_ado_token()
-        if token:
-            import urllib.request
-            base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
-            url = f'{base}/{repo}/pullrequests/{pr_id}?api-version=7.1'
-            req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
-            try:
-                with urllib.request.urlopen(req) as resp:
-                    pr_data = json.loads(resp.read())
-                    target = pr_data.get('targetRefName', '').replace('refs/heads/', '')
-            except urllib.error.HTTPError:
-                pass
+        pr_data = _fetch_pr(org, project, repo, pr_id)
+        if pr_data:
+            target = pr_data.get('targetRefName', '').replace('refs/heads/', '')
 
     if not target:
         rc, default_branch = git('rev-parse', '--abbrev-ref', 'origin/HEAD')
