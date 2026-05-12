@@ -1707,6 +1707,10 @@ def cmd_pr_diff(args):
     extra = args.diff_args or []
     if extra and extra[0] == '--':
         extra = extra[1:]
+    if getattr(args, 'stat', False):
+        extra.append('--stat')
+    if getattr(args, 'name_only', False):
+        extra.append('--name-only')
 
     print(f"{Colors.CYAN}[>]{Colors.NC} {branch} vs origin/{target} (merge-base)")
     diff_cmd = ['git', '-C', repo_path, 'diff',
@@ -1777,8 +1781,10 @@ def main():
     pr_diff_p.add_argument('--repo', '-r', help='Path to git repository (default: current directory)')
     pr_diff_p.add_argument('--branch', '-b', help='Source branch (default: current branch)')
     pr_diff_p.add_argument('--id', type=int, help='PR ID (alternative to --repo/--branch)')
+    pr_diff_p.add_argument('--stat', action='store_true', help='Show diffstat summary')
+    pr_diff_p.add_argument('--name-only', action='store_true', help='Show only changed file names')
     pr_diff_p.add_argument('diff_args', nargs=argparse.REMAINDER,
-                           help='Extra args for git diff (e.g. --stat, --name-only)')
+                           help='Extra args for git diff (use -- before flags)')
 
     # Init command
     subparsers.add_parser('init', help='Bootstrap shell profile ($PROFILE on Windows, .bashrc→zsh on Linux)')
