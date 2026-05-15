@@ -4,6 +4,7 @@ Dev CLI - Cross-platform development workflow tool
 """
 
 import argparse
+import base64
 import json
 import os
 import platform
@@ -42,7 +43,8 @@ CONFIG_DIR = SCRIPT_DIR / 'repoconfig'
 CONFIG_FILE = CONFIG_DIR / 'repos.json'
 ADO_PAT_FILE = CONFIG_DIR / 'ado_pat.txt'
 ADO_TOKEN_CACHE_FILE = CONFIG_DIR / 'ado_token_cache.json'
-ADO_TOKEN_CACHE_SECONDS = 2400  # 40 minutes (tokens last ~60 min)
+ADO_TOKEN_CACHE_SECONDS = 2400  # 40 minute fallback when JWT exp can't be parsed
+ADO_TOKEN_EXPIRY_BUFFER = 60  # Treat token as expired this many seconds before its real exp
 RCFILES_DIR = CONFIG_DIR / 'rcfiles'
 
 def get_os_type():
@@ -1336,6 +1338,31 @@ def cmd_ado_git(args):
     return result.returncode
 
 
+def _decode_jwt_exp(token):
+    """Return the JWT `exp` claim (epoch seconds) for the given token, or None.
+
+    `az account get-access-token` returns tokens from its own cache, so a freshly
+    fetched token may already be partway through (or past) its lifetime. The JWT
+    itself carries the real expiry — trust that instead of a wall-clock heuristic.
+    """
+    if not token or not isinstance(token, str):
+        return None
+    parts = token.split('.')
+    if len(parts) < 2:
+        return None
+    payload = parts[1]
+    padding = '=' * (-len(payload) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(payload + padding)
+        claims = json.loads(decoded)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    exp = claims.get('exp')
+    if isinstance(exp, (int, float)):
+        return float(exp)
+    return None
+
+
 def _get_cached_ado_token():
     """Return cached token if still valid, else None."""
     if not ADO_TOKEN_CACHE_FILE.exists():
@@ -1343,18 +1370,29 @@ def _get_cached_ado_token():
     try:
         cache = json.loads(ADO_TOKEN_CACHE_FILE.read_text())
         expires = cache.get('expires', 0)
-        if datetime.now(timezone.utc).timestamp() < expires:
-            return cache.get('token')
+        token = cache.get('token')
+        now = datetime.now(timezone.utc).timestamp()
+        if now >= expires:
+            return None
+        jwt_exp = _decode_jwt_exp(token)
+        if jwt_exp is not None and now >= jwt_exp - ADO_TOKEN_EXPIRY_BUFFER:
+            return None
+        return token
     except (json.JSONDecodeError, KeyError):
         pass
     return None
 
 
 def _cache_ado_token(token):
-    """Cache a token with expiry."""
+    """Cache a token with expiry derived from its JWT `exp` claim when possible."""
+    jwt_exp = _decode_jwt_exp(token)
+    if jwt_exp is not None:
+        expires = jwt_exp - ADO_TOKEN_EXPIRY_BUFFER
+    else:
+        expires = datetime.now(timezone.utc).timestamp() + ADO_TOKEN_CACHE_SECONDS
     cache = {
         'token': token,
-        'expires': datetime.now(timezone.utc).timestamp() + ADO_TOKEN_CACHE_SECONDS,
+        'expires': expires,
     }
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     ADO_TOKEN_CACHE_FILE.write_text(json.dumps(cache))

@@ -654,6 +654,94 @@ class TestAddTrackedFile(unittest.TestCase):
         self.assertEqual(result, 1)
 
 
+class TestAdoTokenCache(unittest.TestCase):
+    """Tests for the ADO token cache helpers — especially the JWT-aware expiry."""
+
+    @staticmethod
+    def _make_jwt(exp):
+        """Build a minimal JWT (header.payload.sig) with the given exp claim."""
+        import base64 as _b64
+
+        def b64url(d):
+            return _b64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b'=').decode()
+
+        header = b64url({'alg': 'none', 'typ': 'JWT'})
+        payload = b64url({'exp': exp, 'aud': 'test'})
+        return f'{header}.{payload}.sig'
+
+    def test_decode_jwt_exp_returns_claim(self):
+        token = self._make_jwt(1234567890)
+        self.assertEqual(dev._decode_jwt_exp(token), 1234567890.0)
+
+    def test_decode_jwt_exp_handles_garbage(self):
+        self.assertIsNone(dev._decode_jwt_exp(''))
+        self.assertIsNone(dev._decode_jwt_exp(None))
+        self.assertIsNone(dev._decode_jwt_exp('not-a-jwt'))
+        self.assertIsNone(dev._decode_jwt_exp('only.two'))
+        self.assertIsNone(dev._decode_jwt_exp('a.@@notbase64@@.c'))
+
+    def test_cache_uses_jwt_exp_when_available(self):
+        now = datetime.now(timezone.utc).timestamp()
+        token_exp = now + 300  # token expires in 5 minutes
+        token = self._make_jwt(token_exp)
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_file = Path(tmp) / 'ado_token_cache.json'
+            with patch('dev.ADO_TOKEN_CACHE_FILE', cache_file), \
+                 patch('dev.CONFIG_DIR', Path(tmp)):
+                dev._cache_ado_token(token)
+                cache = json.loads(cache_file.read_text())
+            self.assertAlmostEqual(cache['expires'], token_exp - dev.ADO_TOKEN_EXPIRY_BUFFER, places=2)
+
+    def test_cache_falls_back_to_heuristic_for_opaque_token(self):
+        now = datetime.now(timezone.utc).timestamp()
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_file = Path(tmp) / 'ado_token_cache.json'
+            with patch('dev.ADO_TOKEN_CACHE_FILE', cache_file), \
+                 patch('dev.CONFIG_DIR', Path(tmp)):
+                dev._cache_ado_token('not-a-jwt')
+                cache = json.loads(cache_file.read_text())
+            # Should be ~now + ADO_TOKEN_CACHE_SECONDS, allow some scheduling slack.
+            self.assertGreaterEqual(cache['expires'], now + dev.ADO_TOKEN_CACHE_SECONDS - 5)
+            self.assertLessEqual(cache['expires'], now + dev.ADO_TOKEN_CACHE_SECONDS + 5)
+
+    def test_get_cached_rejects_expired_jwt_even_when_cache_says_valid(self):
+        """Regression: az can hand us a token already past its exp; trust the JWT."""
+        now = datetime.now(timezone.utc).timestamp()
+        token = self._make_jwt(now - 60)  # already expired
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_file = Path(tmp) / 'ado_token_cache.json'
+            cache_file.write_text(json.dumps({
+                'token': token,
+                'expires': now + 600,  # cache thinks it's still good
+            }))
+            with patch('dev.ADO_TOKEN_CACHE_FILE', cache_file):
+                self.assertIsNone(dev._get_cached_ado_token())
+
+    def test_get_cached_returns_valid_token(self):
+        now = datetime.now(timezone.utc).timestamp()
+        token = self._make_jwt(now + 600)
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_file = Path(tmp) / 'ado_token_cache.json'
+            cache_file.write_text(json.dumps({
+                'token': token,
+                'expires': now + 500,
+            }))
+            with patch('dev.ADO_TOKEN_CACHE_FILE', cache_file):
+                self.assertEqual(dev._get_cached_ado_token(), token)
+
+    def test_get_cached_returns_none_when_cache_expiry_passed(self):
+        now = datetime.now(timezone.utc).timestamp()
+        token = self._make_jwt(now + 600)
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_file = Path(tmp) / 'ado_token_cache.json'
+            cache_file.write_text(json.dumps({
+                'token': token,
+                'expires': now - 1,
+            }))
+            with patch('dev.ADO_TOKEN_CACHE_FILE', cache_file):
+                self.assertIsNone(dev._get_cached_ado_token())
+
+
 class TestAdoGit(unittest.TestCase):
 
     @patch('dev.get_ado_token', return_value=None)
