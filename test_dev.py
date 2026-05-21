@@ -1272,6 +1272,74 @@ class TestCmdPrDesc(unittest.TestCase):
         mock_print.assert_called_once()
 
 
+class TestParseBoolArg(unittest.TestCase):
+
+    def test_true_values(self):
+        for v in ('true', 'True', 'TRUE', 't', 'yes', 'y', '1'):
+            self.assertTrue(dev._parse_bool_arg(v), f"expected True for {v!r}")
+
+    def test_false_values(self):
+        for v in ('false', 'False', 'FALSE', 'f', 'no', 'n', '0'):
+            self.assertFalse(dev._parse_bool_arg(v), f"expected False for {v!r}")
+
+    def test_none_is_true(self):
+        self.assertTrue(dev._parse_bool_arg(None))
+
+    def test_passthrough_bool(self):
+        self.assertTrue(dev._parse_bool_arg(True))
+        self.assertFalse(dev._parse_bool_arg(False))
+
+    def test_invalid_raises(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            dev._parse_bool_arg('maybe')
+
+
+class TestCmdPrCreate(unittest.TestCase):
+
+    def _make_args(self, **kwargs):
+        defaults = dict(title=None, description_file=None, repo=None,
+                        branch=None, id=None, draft=True)
+        defaults.update(kwargs)
+        return argparse.Namespace(**defaults)
+
+    def _ctx(self):
+        return ('contoso', 'platform', 'repo', 'feature-branch', None,
+                'az', lambda *a: (0, 'main'))
+
+    @patch('subprocess.run')
+    @patch('dev._resolve_pr_context')
+    def test_default_is_draft_true(self, mock_ctx, mock_run):
+        mock_ctx.return_value = self._ctx()
+        mock_run.return_value = type('R', (), {'returncode': 0})()
+        rc = dev.cmd_pr_create(self._make_args(title='T'))
+        self.assertEqual(rc, 0)
+        cmd = mock_run.call_args[0][0]
+        self.assertIn('--draft', cmd)
+        idx = cmd.index('--draft')
+        self.assertEqual(cmd[idx + 1], 'true')
+
+    @patch('subprocess.run')
+    @patch('dev._resolve_pr_context')
+    def test_draft_false_is_active(self, mock_ctx, mock_run):
+        mock_ctx.return_value = self._ctx()
+        mock_run.return_value = type('R', (), {'returncode': 0})()
+        rc = dev.cmd_pr_create(self._make_args(title='T', draft=False))
+        self.assertEqual(rc, 0)
+        cmd = mock_run.call_args[0][0]
+        self.assertIn('--draft', cmd)
+        idx = cmd.index('--draft')
+        self.assertEqual(cmd[idx + 1], 'false')
+
+    @patch('subprocess.run')
+    @patch('dev._resolve_pr_context')
+    def test_existing_pr_short_circuits(self, mock_ctx, mock_run):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feature-branch', 99,
+                                 'az', lambda *a: (0, 'main'))
+        rc = dev.cmd_pr_create(self._make_args(title='T'))
+        self.assertEqual(rc, 0)
+        mock_run.assert_not_called()
+
+
 class TestCmdPrDiff(unittest.TestCase):
 
     def _make_args(self, **kwargs):

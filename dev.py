@@ -1585,8 +1585,26 @@ def _read_description_source(path):
         return None
 
 
+def _parse_bool_arg(value):
+    """Parse a string into a boolean for argparse flags that accept ``--flag [true|false]``."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return True
+    lv = str(value).strip().lower()
+    if lv in ('true', 't', 'yes', 'y', '1'):
+        return True
+    if lv in ('false', 'f', 'no', 'n', '0'):
+        return False
+    raise argparse.ArgumentTypeError(
+        f"expected a boolean value (true/false), got: {value!r}")
+
+
 def cmd_pr_create(args):
-    """Create a draft ADO pull request from the current branch."""
+    """Create an ADO pull request from the current branch.
+
+    Creates a draft PR by default. Pass ``--draft false`` to create as active.
+    """
     description = ''
     if args.description_file:
         description = _read_description_source(args.description_file)
@@ -1612,18 +1630,20 @@ def cmd_pr_create(args):
     if not title:
         _, title = git('log', '-1', '--format=%s')
 
+    is_draft = getattr(args, 'draft', True)
     cmd = [
         az_cmd, 'repos', 'pr', 'create',
-        '--draft',
         '--org', f'https://dev.azure.com/{org}',
         '--project', project,
         '--repository', repo,
         '--source-branch', branch,
         '--target-branch', target,
         '--title', title,
+        '--draft', 'true' if is_draft else 'false',
         '--output', 'table',
     ]
-    print(f"{Colors.CYAN}[>]{Colors.NC} Creating draft PR: {branch} → {target}")
+    label = 'draft' if is_draft else 'active'
+    print(f"{Colors.CYAN}[>]{Colors.NC} Creating {label} PR: {branch} → {target}")
     with _description_as_file_arg(description) as desc_arg:
         if desc_arg:
             cmd += desc_arg
@@ -1809,13 +1829,16 @@ def main():
     pr_parser = subparsers.add_parser('pr', help='Pull request operations')
     pr_sub = pr_parser.add_subparsers(dest='pr_command')
 
-    pr_create_p = pr_sub.add_parser('create', help='Create a draft PR from the current branch')
+    pr_create_p = pr_sub.add_parser('create', help='Create a PR (draft by default) from the current branch')
     pr_create_p.add_argument('--title', '-t', help='PR title (defaults to last commit message)')
     pr_create_p.add_argument('--description-file', '-d',
                              help='Path to a file containing the PR description (use "-" for stdin)')
     pr_create_p.add_argument('--repo', '-r', help='Path to git repository (default: current directory)')
     pr_create_p.add_argument('--branch', '-b', help='Source branch (default: current branch)')
     pr_create_p.add_argument('--id', type=int, help='Existing PR ID (skips creation, prints URL)')
+    pr_create_p.add_argument('--draft', type=_parse_bool_arg, nargs='?', const=True, default=True,
+                             metavar='{true,false}',
+                             help='Create PR as draft (default: true). Use "--draft false" to create as active.')
 
     pr_desc_p = pr_sub.add_parser('desc', help='Show or update PR description')
     pr_desc_p.add_argument('description', nargs='*',
