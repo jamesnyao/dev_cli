@@ -151,7 +151,226 @@ def get_branch_age_days(repo_path):
     except Exception:
         return 0
 
-def check_stale_branch(repo_path, name):
+
+SYNC_STATE_DIR = Path.home() / '.dev' / 'sync-state'
+
+
+def _sync_state_paths(name):
+    safe = name.replace('/', '__').replace('\\', '__')
+    return (
+        SYNC_STATE_DIR / f'{safe}.json',
+        SYNC_STATE_DIR / f'{safe}.log',
+    )
+
+
+def _load_sync_state(name):
+    state_path, _ = _sync_state_paths(name)
+    if not state_path.exists():
+        return None
+    try:
+        with open(state_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _save_sync_state(name, state):
+    state_path, _ = _sync_state_paths(name)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = state_path.with_suffix('.json.tmp')
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, state_path)
+
+
+def _clear_sync_state(name):
+    state_path, log_path = _sync_state_paths(name)
+    for p in (state_path, log_path):
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+
+def _is_pid_alive(pid):
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if sys.platform == 'win32':
+        try:
+            result = subprocess.run(
+                ['tasklist', '/FI', f'PID eq {pid}', '/NH'],
+                capture_output=True, text=True, timeout=5,
+            )
+            return str(pid) in result.stdout
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def _format_duration(seconds):
+    seconds = int(seconds)
+    if seconds < 60:
+        return f'{seconds}s'
+    if seconds < 3600:
+        return f'{seconds // 60}m {seconds % 60}s'
+    return f'{seconds // 3600}h {(seconds % 3600) // 60}m'
+
+
+def _spawn_background_sync(name, repo_path, git_args_list, label):
+    """Spawn a detached background process running git ops; record state."""
+    state_path, log_path = _sync_state_paths(name)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    payload = json.dumps({
+        'name': name,
+        'repo_path': str(repo_path),
+        'git_args_list': git_args_list,
+        'state_path': str(state_path),
+        'log_path': str(log_path),
+    })
+    cmd = [sys.executable, str(SCRIPT_DIR / 'dev.py'), '__bg_sync__', payload]
+
+    popen_kwargs = {
+        'stdin': subprocess.DEVNULL,
+        'stdout': subprocess.DEVNULL,
+        'stderr': subprocess.DEVNULL,
+        'close_fds': True,
+    }
+    if sys.platform == 'win32':
+        popen_kwargs['creationflags'] = (
+            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+    else:
+        popen_kwargs['start_new_session'] = True
+
+    proc = subprocess.Popen(cmd, **popen_kwargs)  # pylint: disable=consider-using-with
+
+    _save_sync_state(name, {
+        'pid': proc.pid,
+        'name': name,
+        'label': label,
+        'started_at': datetime.now(timezone.utc).isoformat(),
+        'status': 'running',
+        'log_path': str(log_path),
+        'git_args_list': git_args_list,
+    })
+    return proc.pid
+
+
+def cmd_bg_sync(args):
+    """Hidden subcommand: run a sequence of git ops, log output, write status.
+
+    Invoked only via ``_spawn_background_sync`` in a detached child process.
+    """
+    payload = json.loads(args.payload)
+    name = payload['name']
+    repo_path = payload['repo_path']
+    git_args_list = payload['git_args_list']
+    state_path = Path(payload['state_path'])
+    log_path = Path(payload['log_path'])
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    final_status = 'succeeded'
+    final_exit = 0
+    try:
+        with open(log_path, 'w', encoding='utf-8') as log:
+            for git_args in git_args_list:
+                cmd = ['git', '-C', repo_path] + list(git_args)
+                log.write(f"$ {' '.join(cmd)}\n")
+                log.flush()
+                result = subprocess.run(
+                    cmd, stdout=log, stderr=subprocess.STDOUT,
+                )
+                if result.returncode != 0:
+                    final_status = 'failed'
+                    final_exit = result.returncode
+                    break
+    except Exception as exc:
+        final_status = 'failed'
+        final_exit = -1
+        try:
+            with open(log_path, 'a', encoding='utf-8') as log:
+                log.write(f"\n[bg-sync] exception: {exc}\n")
+        except Exception:
+            pass
+
+    state = {}
+    if state_path.exists():
+        try:
+            with open(state_path, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+        except Exception:
+            state = {}
+    state.update({
+        'name': name,
+        'status': final_status,
+        'exit_code': final_exit,
+        'finished_at': datetime.now(timezone.utc).isoformat(),
+        'log_path': str(log_path),
+    })
+    try:
+        with open(state_path, 'w', encoding='utf-8') as f:
+            json.dump(state, f, indent=2)
+    except Exception:
+        pass
+    return 0
+
+
+def _report_background_sync_status(name):
+    """Check a repo's background sync state, print status, clean up if done.
+
+    Returns True if a background job is still running (caller should skip
+    further work on this repo).
+    """
+    state = _load_sync_state(name)
+    if not state:
+        return False
+
+    status = state.get('status', 'running')
+    log_path = state.get('log_path', '')
+
+    if status == 'running':
+        pid = state.get('pid')
+        if _is_pid_alive(pid):
+            duration = ''
+            try:
+                started = datetime.fromisoformat(state['started_at'])
+                duration = ' (' + _format_duration(
+                    (datetime.now(timezone.utc) - started).total_seconds()
+                ) + ')'
+            except Exception:
+                pass
+            label = state.get('label', 'sync')
+            print(
+                f"{Colors.CYAN}[BG-RUN]{Colors.NC} {name}: {label} still running"
+                f"{duration} (PID {pid}, log: {log_path})"
+            )
+            return True
+        print(
+            f"{Colors.RED}[BG-X]{Colors.NC} {name}: background job died unexpectedly "
+            f"(PID {pid}, log: {log_path})"
+        )
+        _clear_sync_state(name)
+        return False
+
+    if status == 'succeeded':
+        print(f"{Colors.GREEN}[BG-OK]{Colors.NC} {name}: {state.get('label', 'sync')} completed in background")
+    else:
+        exit_code = state.get('exit_code', '?')
+        print(f"{Colors.RED}[BG-X]{Colors.NC} {name}: background job failed (exit {exit_code}, log: {log_path})")
+    _clear_sync_state(name)
+    return False
+
+
+def check_stale_branch(repo_path, name, slow_sync=False):
     current = get_current_branch(repo_path)
     if not current or current == 'HEAD':
         return
@@ -174,6 +393,22 @@ def check_stale_branch(repo_path, name):
         return
 
     if response == 'y':
+        git_ops = [
+            ['fetch', 'origin'],
+            ['checkout', '-f', default],
+            ['reset', '--hard', f'origin/{default}'],
+        ]
+        if slow_sync:
+            pid = _spawn_background_sync(
+                name, repo_path, git_ops,
+                label=f'switching {current} -> {default}',
+            )
+            _, log_path = _sync_state_paths(name)
+            print(
+                f"{Colors.CYAN}[BG]{Colors.NC} {name} switching to {default} "
+                f"in background (PID {pid}, log: {log_path})"
+            )
+            return
         run_git(repo_path, 'fetch', 'origin')
         run_git(repo_path, 'checkout', '-f', default)
         run_git(repo_path, 'reset', '--hard', f'origin/{default}')
@@ -279,15 +514,20 @@ def cmd_repo_add(args):
     repo_name = compute_repo_name(display_path, base_path)
     config['repos'] = [r for r in config['repos'] if r['path'] != repo_name]
 
-    config['repos'].append({
+    entry = {
         'path': repo_name,
         'remoteUrl': remote_url,
-    })
+    }
+    if getattr(args, 'slow_sync', False):
+        entry['slowSync'] = True
+    config['repos'].append(entry)
 
     save_config(config)
     print(f"{Colors.GREEN}Added repository: {repo_name}{Colors.NC}")
     print(f"  Remote: {Colors.CYAN}{remote_url}{Colors.NC}")
     print(f"  Path: {display_path}")
+    if entry.get('slowSync'):
+        print(f"  {Colors.CYAN}Slow sync: enabled (pull operations run in background){Colors.NC}")
     return 0
 
 def cmd_repo_remove(args):
@@ -534,6 +774,7 @@ def cmd_repo_sync(args):
         name = repo['path']
         url = repo.get('remoteUrl', '')
         link_to = repo.get('pathLinksTo')
+        slow_sync = bool(repo.get('slowSync'))
         # Handle nested paths like platform/src
         link_path = base_path / name.replace('/', os.sep)
 
@@ -555,6 +796,10 @@ def cmd_repo_sync(args):
             skipped += 1
             continue
 
+        if _report_background_sync_status(name):
+            skipped += 1
+            continue
+
         if repo_path.exists():
             if link_to is not None:
                 _ensure_link(link_path, repo_path)
@@ -568,7 +813,7 @@ def cmd_repo_sync(args):
                 print(f"{Colors.GREEN}[OK]{Colors.NC} {name} {Colors.YELLOW}(fixed remote URL){Colors.NC}")
             else:
                 print(f"{Colors.GREEN}[OK]{Colors.NC} {name}")
-            check_stale_branch(repo_path, name)
+            check_stale_branch(repo_path, name, slow_sync=slow_sync)
             skipped += 1
             continue
 
@@ -1795,6 +2040,8 @@ def main():
 
     add_p = repo_sub.add_parser('add', help='Add a repository or file to tracking')
     add_p.add_argument('path', help='Path to a repository or file')
+    add_p.add_argument('--slow-sync', action='store_true',
+                       help='Mark repo for background sync (pull/switch ops run detached)')
 
     remove_p = repo_sub.add_parser('remove', help='Remove a repository or file from tracking')
     remove_p.add_argument('name', help='Name of the repository or file path')
@@ -1862,12 +2109,18 @@ def main():
     # Test command
     subparsers.add_parser('test', help='Run dev.py unit tests')
 
+    # Hidden subcommand: invoked by _spawn_background_sync for detached child
+    bg_p = subparsers.add_parser('__bg_sync__', help=argparse.SUPPRESS)
+    bg_p.add_argument('payload', help='JSON payload')
+
     args = parser.parse_args()
 
     if args.command == 'init':
         return cmd_init(args)
     elif args.command == 'test':
         return cmd_test(args)
+    elif args.command == '__bg_sync__':
+        return cmd_bg_sync(args)
     elif args.command == 'ado':
         cmd_map = {
             'set-pat': cmd_ado_set_pat,

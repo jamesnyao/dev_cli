@@ -1340,6 +1340,159 @@ class TestCmdPrCreate(unittest.TestCase):
         mock_run.assert_not_called()
 
 
+class TestSyncStateHelpers(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp(prefix='dev_sync_state_'))
+        self.patcher = patch.object(dev, 'SYNC_STATE_DIR', self.tmpdir)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_state_paths_safe_for_slashes(self):
+        state_path, log_path = dev._sync_state_paths('platform/src')
+        self.assertEqual(state_path.name, 'edge__src.json')
+        self.assertEqual(log_path.name, 'edge__src.log')
+
+    def test_save_load_clear_roundtrip(self):
+        dev._save_sync_state('platform/src', {'pid': 1234, 'status': 'running'})
+        loaded = dev._load_sync_state('platform/src')
+        self.assertEqual(loaded['pid'], 1234)
+        self.assertEqual(loaded['status'], 'running')
+        dev._clear_sync_state('platform/src')
+        self.assertIsNone(dev._load_sync_state('platform/src'))
+
+    def test_load_returns_none_when_missing(self):
+        self.assertIsNone(dev._load_sync_state('nope'))
+
+    def test_format_duration(self):
+        self.assertEqual(dev._format_duration(5), '5s')
+        self.assertEqual(dev._format_duration(125), '2m 5s')
+        self.assertEqual(dev._format_duration(3725), '1h 2m')
+
+
+class TestReportBackgroundSyncStatus(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp(prefix='dev_sync_state_'))
+        self.patcher = patch.object(dev, 'SYNC_STATE_DIR', self.tmpdir)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_no_state_returns_false(self):
+        self.assertFalse(dev._report_background_sync_status('platform/src'))
+
+    @patch('dev._is_pid_alive', return_value=True)
+    def test_running_alive_returns_true(self, _mock_alive):
+        dev._save_sync_state('platform/src', {
+            'pid': 1234, 'status': 'running', 'label': 'switching',
+            'started_at': datetime.now(timezone.utc).isoformat(),
+            'log_path': 'some/path.log',
+        })
+        self.assertTrue(dev._report_background_sync_status('platform/src'))
+        self.assertIsNotNone(dev._load_sync_state('platform/src'))  # not cleared
+
+    @patch('dev._is_pid_alive', return_value=False)
+    def test_running_dead_clears_state(self, _mock_alive):
+        dev._save_sync_state('platform/src', {
+            'pid': 1234, 'status': 'running', 'label': 'switching',
+            'started_at': datetime.now(timezone.utc).isoformat(),
+            'log_path': 'some/path.log',
+        })
+        self.assertFalse(dev._report_background_sync_status('platform/src'))
+        self.assertIsNone(dev._load_sync_state('platform/src'))
+
+    def test_succeeded_clears_state(self):
+        dev._save_sync_state('platform/src', {
+            'pid': 1234, 'status': 'succeeded', 'label': 'switching',
+            'log_path': 'some/path.log',
+        })
+        self.assertFalse(dev._report_background_sync_status('platform/src'))
+        self.assertIsNone(dev._load_sync_state('platform/src'))
+
+    def test_failed_clears_state(self):
+        dev._save_sync_state('platform/src', {
+            'pid': 1234, 'status': 'failed', 'exit_code': 1,
+            'label': 'switching', 'log_path': 'some/path.log',
+        })
+        self.assertFalse(dev._report_background_sync_status('platform/src'))
+        self.assertIsNone(dev._load_sync_state('platform/src'))
+
+
+class TestCmdBgSync(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp(prefix='dev_bg_sync_'))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _payload(self, git_args_list):
+        return argparse.Namespace(payload=json.dumps({
+            'name': 'test-repo',
+            'repo_path': str(self.tmpdir),
+            'git_args_list': git_args_list,
+            'state_path': str(self.tmpdir / 'state.json'),
+            'log_path': str(self.tmpdir / 'op.log'),
+        }))
+
+    @patch('subprocess.run')
+    def test_success_writes_succeeded_state(self, mock_run):
+        mock_run.return_value = type('R', (), {'returncode': 0})()
+        rc = dev.cmd_bg_sync(self._payload([['fetch', 'origin']]))
+        self.assertEqual(rc, 0)
+        state = json.loads((self.tmpdir / 'state.json').read_text())
+        self.assertEqual(state['status'], 'succeeded')
+        self.assertEqual(state['exit_code'], 0)
+        self.assertIn('finished_at', state)
+
+    @patch('subprocess.run')
+    def test_failure_stops_and_writes_failed_state(self, mock_run):
+        mock_run.side_effect = [
+            type('R', (), {'returncode': 0})(),
+            type('R', (), {'returncode': 1})(),
+        ]
+        rc = dev.cmd_bg_sync(self._payload([
+            ['fetch', 'origin'],
+            ['checkout', '-f', 'main'],
+            ['reset', '--hard', 'origin/main'],
+        ]))
+        self.assertEqual(rc, 0)
+        state = json.loads((self.tmpdir / 'state.json').read_text())
+        self.assertEqual(state['status'], 'failed')
+        self.assertEqual(state['exit_code'], 1)
+        self.assertEqual(mock_run.call_count, 2)
+
+
+class TestCheckStaleBranchSlowSync(unittest.TestCase):
+
+    @patch('dev._spawn_background_sync', return_value=99999)
+    @patch('dev._sync_state_paths', return_value=(Path('s.json'), Path('s.log')))
+    @patch('dev.get_default_branch', return_value='main')
+    @patch('dev.get_branch_age_days', return_value=30)
+    @patch('dev.get_current_branch', return_value='user/x/old')
+    @patch('builtins.input', return_value='y')
+    def test_slow_sync_spawns_bg_and_returns(self, _i, _c, _a, _d, _sp, mock_spawn):
+        with patch('dev.run_git') as mock_run_git:
+            dev.check_stale_branch(Path('/tmp/repo'), 'platform/src', slow_sync=True)
+            mock_run_git.assert_not_called()
+            mock_spawn.assert_called_once()
+
+    @patch('dev.get_default_branch', return_value='main')
+    @patch('dev.get_branch_age_days', return_value=30)
+    @patch('dev.get_current_branch', return_value='user/x/old')
+    @patch('builtins.input', return_value='y')
+    @patch('dev.run_git')
+    def test_no_slow_sync_runs_synchronously(self, mock_run_git, _i, _c, _a, _d):
+        dev.check_stale_branch(Path('/tmp/repo'), 'platform/src', slow_sync=False)
+        self.assertEqual(mock_run_git.call_count, 3)
+
+
 class TestCmdPrDiff(unittest.TestCase):
 
     def _make_args(self, **kwargs):
