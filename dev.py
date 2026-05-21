@@ -224,15 +224,17 @@ def _format_duration(seconds):
     return f'{seconds // 3600}h {(seconds % 3600) // 60}m'
 
 
-def _spawn_background_sync(name, repo_path, git_args_list, label):
-    """Spawn a detached background process running git ops; record state."""
+def _spawn_background_sync(name, ops, label):
+    """Spawn a detached background process running a list of ops; record state.
+
+    Each op is a dict ``{'argv': [...], 'cwd': '...'}``.
+    """
     state_path, log_path = _sync_state_paths(name)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     payload = json.dumps({
         'name': name,
-        'repo_path': str(repo_path),
-        'git_args_list': git_args_list,
+        'ops': ops,
         'state_path': str(state_path),
         'log_path': str(log_path),
     })
@@ -260,20 +262,19 @@ def _spawn_background_sync(name, repo_path, git_args_list, label):
         'started_at': datetime.now(timezone.utc).isoformat(),
         'status': 'running',
         'log_path': str(log_path),
-        'git_args_list': git_args_list,
+        'ops': ops,
     })
     return proc.pid
 
 
 def cmd_bg_sync(args):
-    """Hidden subcommand: run a sequence of git ops, log output, write status.
+    """Hidden subcommand: run a sequence of ops, log output, write status.
 
     Invoked only via ``_spawn_background_sync`` in a detached child process.
     """
     payload = json.loads(args.payload)
     name = payload['name']
-    repo_path = payload['repo_path']
-    git_args_list = payload['git_args_list']
+    ops = payload['ops']
     state_path = Path(payload['state_path'])
     log_path = Path(payload['log_path'])
 
@@ -282,12 +283,16 @@ def cmd_bg_sync(args):
     final_exit = 0
     try:
         with open(log_path, 'w', encoding='utf-8') as log:
-            for git_args in git_args_list:
-                cmd = ['git', '-C', repo_path] + list(git_args)
-                log.write(f"$ {' '.join(cmd)}\n")
+            for op in ops:
+                argv = list(op['argv'])
+                cwd = op.get('cwd') or None
+                log.write(f"$ (cd {cwd}) {' '.join(argv)}\n")
                 log.flush()
+                # Resolve cmd via shell on Windows so .bat/.cmd shims work
+                use_shell = sys.platform == 'win32'
                 result = subprocess.run(
-                    cmd, stdout=log, stderr=subprocess.STDOUT,
+                    argv, stdout=log, stderr=subprocess.STDOUT,
+                    cwd=cwd, shell=use_shell,
                 )
                 if result.returncode != 0:
                     final_status = 'failed'
@@ -370,7 +375,7 @@ def _report_background_sync_status(name):
     return False
 
 
-def check_stale_branch(repo_path, name, slow_sync=False):
+def check_stale_branch(repo_path, name, slow_sync=False, gclient_sync=False):
     current = get_current_branch(repo_path)
     if not current or current == 'HEAD':
         return
@@ -392,27 +397,34 @@ def check_stale_branch(repo_path, name, slow_sync=False):
     except EOFError:
         return
 
-    if response == 'y':
-        git_ops = [
-            ['fetch', 'origin'],
-            ['checkout', '-f', default],
-            ['reset', '--hard', f'origin/{default}'],
-        ]
-        if slow_sync:
-            pid = _spawn_background_sync(
-                name, repo_path, git_ops,
-                label=f'switching {current} -> {default}',
-            )
-            _, log_path = _sync_state_paths(name)
-            print(
-                f"{Colors.CYAN}[BG]{Colors.NC} {name} switching to {default} "
-                f"in background (PID {pid}, log: {log_path})"
-            )
-            return
-        run_git(repo_path, 'fetch', 'origin')
-        run_git(repo_path, 'checkout', '-f', default)
-        run_git(repo_path, 'reset', '--hard', f'origin/{default}')
-        print(f"{Colors.GREEN}[OK] Switched to {default}{Colors.NC}")
+    if response != 'y':
+        return
+
+    repo_path_str = str(repo_path)
+    ops = [
+        {'argv': ['git', '-C', repo_path_str, 'fetch', 'origin'], 'cwd': None},
+        {'argv': ['git', '-C', repo_path_str, 'checkout', '-f', default], 'cwd': None},
+        {'argv': ['git', '-C', repo_path_str, 'reset', '--hard', f'origin/{default}'], 'cwd': None},
+    ]
+    label = f'switching {current} -> {default}'
+    if gclient_sync:
+        gclient_cwd = str(Path(repo_path).parent)
+        ops.append({'argv': ['gclient', 'sync', '-Df'], 'cwd': gclient_cwd})
+        label += ' + gclient sync -Df'
+
+    if slow_sync:
+        pid = _spawn_background_sync(name, ops, label=label)
+        _, log_path = _sync_state_paths(name)
+        print(
+            f"{Colors.CYAN}[BG]{Colors.NC} {name} {label} "
+            f"in background (PID {pid}, log: {log_path})"
+        )
+        return
+
+    use_shell = sys.platform == 'win32'
+    for op in ops:
+        subprocess.run(op['argv'], cwd=op.get('cwd'), check=False, shell=use_shell)
+    print(f"{Colors.GREEN}[OK] Switched to {default}{Colors.NC}")
 
 def get_rcfile_git_timestamp(rel_path):
     """Get the author date of the last commit that modified an rcfile."""
@@ -520,6 +532,8 @@ def cmd_repo_add(args):
     }
     if getattr(args, 'slow_sync', False):
         entry['slowSync'] = True
+    if getattr(args, 'gclient_sync', False):
+        entry['gclientSync'] = True
     config['repos'].append(entry)
 
     save_config(config)
@@ -528,6 +542,8 @@ def cmd_repo_add(args):
     print(f"  Path: {display_path}")
     if entry.get('slowSync'):
         print(f"  {Colors.CYAN}Slow sync: enabled (pull operations run in background){Colors.NC}")
+    if entry.get('gclientSync'):
+        print(f"  {Colors.CYAN}Gclient sync: enabled (runs `gclient sync -Df` after branch switch){Colors.NC}")
     return 0
 
 def cmd_repo_remove(args):
@@ -775,6 +791,7 @@ def cmd_repo_sync(args):
         url = repo.get('remoteUrl', '')
         link_to = repo.get('pathLinksTo')
         slow_sync = bool(repo.get('slowSync'))
+        gclient_sync = bool(repo.get('gclientSync'))
         # Handle nested paths like platform/src
         link_path = base_path / name.replace('/', os.sep)
 
@@ -813,7 +830,7 @@ def cmd_repo_sync(args):
                 print(f"{Colors.GREEN}[OK]{Colors.NC} {name} {Colors.YELLOW}(fixed remote URL){Colors.NC}")
             else:
                 print(f"{Colors.GREEN}[OK]{Colors.NC} {name}")
-            check_stale_branch(repo_path, name, slow_sync=slow_sync)
+            check_stale_branch(repo_path, name, slow_sync=slow_sync, gclient_sync=gclient_sync)
             skipped += 1
             continue
 
@@ -2042,6 +2059,8 @@ def main():
     add_p.add_argument('path', help='Path to a repository or file')
     add_p.add_argument('--slow-sync', action='store_true',
                        help='Mark repo for background sync (pull/switch ops run detached)')
+    add_p.add_argument('--gclient-sync', action='store_true',
+                       help='Run `gclient sync -Df` after a branch switch (uses repo parent as cwd)')
 
     remove_p = repo_sub.add_parser('remove', help='Remove a repository or file from tracking')
     remove_p.add_argument('name', help='Name of the repository or file path')

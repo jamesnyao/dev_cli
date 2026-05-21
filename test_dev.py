@@ -1432,11 +1432,10 @@ class TestCmdBgSync(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _payload(self, git_args_list):
+    def _payload(self, ops):
         return argparse.Namespace(payload=json.dumps({
             'name': 'test-repo',
-            'repo_path': str(self.tmpdir),
-            'git_args_list': git_args_list,
+            'ops': ops,
             'state_path': str(self.tmpdir / 'state.json'),
             'log_path': str(self.tmpdir / 'op.log'),
         }))
@@ -1444,7 +1443,9 @@ class TestCmdBgSync(unittest.TestCase):
     @patch('subprocess.run')
     def test_success_writes_succeeded_state(self, mock_run):
         mock_run.return_value = type('R', (), {'returncode': 0})()
-        rc = dev.cmd_bg_sync(self._payload([['fetch', 'origin']]))
+        rc = dev.cmd_bg_sync(self._payload([
+            {'argv': ['git', 'fetch', 'origin'], 'cwd': str(self.tmpdir)},
+        ]))
         self.assertEqual(rc, 0)
         state = json.loads((self.tmpdir / 'state.json').read_text())
         self.assertEqual(state['status'], 'succeeded')
@@ -1458,15 +1459,29 @@ class TestCmdBgSync(unittest.TestCase):
             type('R', (), {'returncode': 1})(),
         ]
         rc = dev.cmd_bg_sync(self._payload([
-            ['fetch', 'origin'],
-            ['checkout', '-f', 'main'],
-            ['reset', '--hard', 'origin/main'],
+            {'argv': ['git', 'fetch', 'origin'], 'cwd': str(self.tmpdir)},
+            {'argv': ['git', 'checkout', '-f', 'main'], 'cwd': str(self.tmpdir)},
+            {'argv': ['git', 'reset', '--hard', 'origin/main'], 'cwd': str(self.tmpdir)},
         ]))
         self.assertEqual(rc, 0)
         state = json.loads((self.tmpdir / 'state.json').read_text())
         self.assertEqual(state['status'], 'failed')
         self.assertEqual(state['exit_code'], 1)
         self.assertEqual(mock_run.call_count, 2)
+
+    @patch('subprocess.run')
+    def test_mixed_ops_uses_per_op_cwd(self, mock_run):
+        mock_run.return_value = type('R', (), {'returncode': 0})()
+        gclient_cwd = str(self.tmpdir / 'parent')
+        rc = dev.cmd_bg_sync(self._payload([
+            {'argv': ['git', 'fetch', 'origin'], 'cwd': str(self.tmpdir)},
+            {'argv': ['gclient', 'sync', '-Df'], 'cwd': gclient_cwd},
+        ]))
+        self.assertEqual(rc, 0)
+        # Verify second call used gclient cwd
+        second_call = mock_run.call_args_list[1]
+        self.assertEqual(second_call.kwargs.get('cwd'), gclient_cwd)
+        self.assertEqual(second_call.args[0][0], 'gclient')
 
 
 class TestCheckStaleBranchSlowSync(unittest.TestCase):
@@ -1478,19 +1493,53 @@ class TestCheckStaleBranchSlowSync(unittest.TestCase):
     @patch('dev.get_current_branch', return_value='user/x/old')
     @patch('builtins.input', return_value='y')
     def test_slow_sync_spawns_bg_and_returns(self, _i, _c, _a, _d, _sp, mock_spawn):
-        with patch('dev.run_git') as mock_run_git:
+        with patch('subprocess.run') as mock_run:
             dev.check_stale_branch(Path('/tmp/repo'), 'platform/src', slow_sync=True)
-            mock_run_git.assert_not_called()
+            mock_run.assert_not_called()
             mock_spawn.assert_called_once()
+            ops = mock_spawn.call_args[0][1]
+            self.assertEqual(len(ops), 3)
+            # No gclient when flag not set
+            self.assertTrue(all(op['argv'][0] == 'git' for op in ops))
+
+    @patch('dev._spawn_background_sync', return_value=99999)
+    @patch('dev._sync_state_paths', return_value=(Path('s.json'), Path('s.log')))
+    @patch('dev.get_default_branch', return_value='main')
+    @patch('dev.get_branch_age_days', return_value=30)
+    @patch('dev.get_current_branch', return_value='user/x/old')
+    @patch('builtins.input', return_value='y')
+    def test_slow_sync_with_gclient_appends_op(self, _i, _c, _a, _d, _sp, mock_spawn):
+        dev.check_stale_branch(Path('/tmp/repo'), 'platform/src',
+                               slow_sync=True, gclient_sync=True)
+        ops = mock_spawn.call_args[0][1]
+        self.assertEqual(len(ops), 4)
+        self.assertEqual(ops[-1]['argv'][:2], ['gclient', 'sync'])
+        self.assertIn('-Df', ops[-1]['argv'])
+        # cwd should be parent of repo
+        self.assertEqual(ops[-1]['cwd'], str(Path('/tmp/repo').parent))
 
     @patch('dev.get_default_branch', return_value='main')
     @patch('dev.get_branch_age_days', return_value=30)
     @patch('dev.get_current_branch', return_value='user/x/old')
     @patch('builtins.input', return_value='y')
-    @patch('dev.run_git')
-    def test_no_slow_sync_runs_synchronously(self, mock_run_git, _i, _c, _a, _d):
+    @patch('subprocess.run')
+    def test_no_slow_sync_runs_synchronously(self, mock_run, _i, _c, _a, _d):
+        mock_run.return_value = type('R', (), {'returncode': 0})()
         dev.check_stale_branch(Path('/tmp/repo'), 'platform/src', slow_sync=False)
-        self.assertEqual(mock_run_git.call_count, 3)
+        self.assertEqual(mock_run.call_count, 3)
+
+    @patch('dev.get_default_branch', return_value='main')
+    @patch('dev.get_branch_age_days', return_value=30)
+    @patch('dev.get_current_branch', return_value='user/x/old')
+    @patch('builtins.input', return_value='y')
+    @patch('subprocess.run')
+    def test_no_slow_sync_with_gclient_runs_four(self, mock_run, _i, _c, _a, _d):
+        mock_run.return_value = type('R', (), {'returncode': 0})()
+        dev.check_stale_branch(Path('/tmp/repo'), 'platform/src',
+                               slow_sync=False, gclient_sync=True)
+        self.assertEqual(mock_run.call_count, 4)
+        # Last call should be gclient
+        self.assertEqual(mock_run.call_args_list[-1].args[0][0], 'gclient')
 
 
 class TestCmdPrDiff(unittest.TestCase):
