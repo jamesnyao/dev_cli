@@ -1142,22 +1142,27 @@ class TestToolsInstalled(unittest.TestCase):
         try:
             probe = subprocess.run(
                 ['wsl', '-e', 'true'],
-                capture_output=True, timeout=15,
+                capture_output=True, timeout=30,
             )
         except (subprocess.TimeoutExpired, OSError) as e:
             self.skipTest(f'WSL not usable: {e}')
         if probe.returncode != 0:
             self.skipTest('No WSL distro installed/running')
+        # Use a non-interactive bash with PATH augmented to include the typical
+        # per-user install dirs for tools like fzf and zoxide. The user's full
+        # interactive zsh can take minutes to load, which makes that approach
+        # unreliable for a unit test.
+        path_setup = 'export PATH="$HOME/.fzf/bin:$HOME/.local/bin:$PATH"'
         check = ' && '.join(f'command -v {t}' for t in self.WSL_TOOLS)
         result = subprocess.run(
-            ['wsl', '-e', 'zsh', '-ilc', check],
+            ['wsl', '-e', 'bash', '-c', f'{path_setup}; {check}'],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode != 0:
             missing = []
             for t in self.WSL_TOOLS:
                 r = subprocess.run(
-                    ['wsl', '-e', 'zsh', '-ilc', f'command -v {t}'],
+                    ['wsl', '-e', 'bash', '-c', f'{path_setup}; command -v {t}'],
                     capture_output=True, text=True, timeout=15,
                 )
                 if r.returncode != 0:
