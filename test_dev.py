@@ -1699,6 +1699,27 @@ class TestCmdPrComments(unittest.TestCase):
                     'content': 'voted',
                 }],
             },
+            {
+                'id': 400,
+                'comments': [{
+                    'id': 1,
+                    'commentType': 'text',
+                    'author': {'displayName': 'Carol'},
+                    'publishedDate': '2026-06-04T15:00:00Z',
+                    'content': 'No status thread',
+                }],
+            },
+            {
+                'id': 500,
+                'status': 'byDesign',
+                'comments': [{'id': 1, 'commentType': 'text', 'content': 'wontfix'}],
+            },
+            {
+                'id': 600,
+                'status': 'active',
+                'isDeleted': True,
+                'comments': [{'id': 1, 'commentType': 'text', 'content': 'deleted'}],
+            },
         ]
         from io import StringIO
         buf = StringIO()
@@ -1719,9 +1740,17 @@ class TestCmdPrComments(unittest.TestCase):
         self.assertIn('thread 300', out)
         self.assertIn('voted', out)
         self.assertIn('(system)', out)
-        # Non-active threads are still hidden
+        # Threads with null/missing status are treated as open
+        self.assertIn('thread 400', out)
+        self.assertIn('No status thread', out)
+        # Resolved threads are still hidden
         self.assertNotIn('old', out)
         self.assertNotIn('thread 200', out)
+        self.assertNotIn('thread 500', out)
+        self.assertNotIn('wontfix', out)
+        # Deleted threads are hidden
+        self.assertNotIn('thread 600', out)
+        self.assertNotIn('deleted', out)
 
     @patch('dev._fetch_pr_threads')
     @patch('dev._resolve_pr_context')

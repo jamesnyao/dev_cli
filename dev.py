@@ -2088,9 +2088,12 @@ def cmd_pr_comments(args):
     print(f"{Colors.BLUE}PR !{pr_id}{Colors.NC} {Colors.GREY}({org}/{project}/{repo}){Colors.NC}")
     print()
 
+    resolved_statuses = {'fixed', 'wontFix', 'closed', 'byDesign'}
     printed = 0
     for thread in threads:
-        if thread.get('status') != 'active':
+        if thread.get('status') in resolved_statuses:
+            continue
+        if thread.get('isDeleted'):
             continue
         comments = thread.get('comments') or []
         if not comments:
@@ -2106,8 +2109,9 @@ def cmd_pr_comments(args):
             loc = '(PR-level)'
 
         thread_id = thread.get('id')
+        status = thread.get('status') or 'open'
         print(f"{Colors.CYAN}[>]{Colors.NC} {loc}  "
-              f"{Colors.GREY}thread {thread_id}{Colors.NC}")
+              f"{Colors.GREY}thread {thread_id} ({status}){Colors.NC}")
         for comment in comments:
             comment_id = comment.get('id')
             author = (comment.get('author') or {}).get('displayName', 'unknown')
