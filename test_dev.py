@@ -1616,5 +1616,131 @@ class TestCmdPrDiff(unittest.TestCase):
         self.assertIn('--stat', diff_call[-1][0][0])
 
 
+class TestCmdPrComments(unittest.TestCase):
+
+    def _make_args(self, **kwargs):
+        defaults = dict(repo=None, branch=None, id=None)
+        defaults.update(kwargs)
+        return argparse.Namespace(**defaults)
+
+    @patch('dev._resolve_pr_context')
+    def test_returns_error_when_no_context(self, mock_ctx):
+        mock_ctx.return_value = None
+        rc = dev.cmd_pr_comments(self._make_args())
+        self.assertEqual(rc, 1)
+
+    @patch('dev._resolve_pr_context')
+    def test_no_pr_id_returns_error(self, mock_ctx):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', None, 'az', None)
+        rc = dev.cmd_pr_comments(self._make_args())
+        self.assertEqual(rc, 1)
+
+    @patch('dev._fetch_pr_threads', return_value=None)
+    @patch('dev._resolve_pr_context')
+    def test_fetch_failure_returns_error(self, mock_ctx, mock_threads):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        rc = dev.cmd_pr_comments(self._make_args())
+        self.assertEqual(rc, 1)
+
+    @patch('dev._fetch_pr_threads', return_value=[])
+    @patch('dev._resolve_pr_context')
+    def test_no_active_threads_returns_ok(self, mock_ctx, mock_threads):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        from io import StringIO
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            rc = dev.cmd_pr_comments(self._make_args())
+        self.assertEqual(rc, 0)
+        self.assertIn('no active comment threads', buf.getvalue())
+
+    @patch('dev._fetch_pr_threads')
+    @patch('dev._resolve_pr_context')
+    def test_active_threads_include_ids(self, mock_ctx, mock_threads):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        mock_threads.return_value = [
+            {
+                'id': 100,
+                'status': 'active',
+                'threadContext': {
+                    'filePath': '/src/foo.py',
+                    'rightFileStart': {'line': 42, 'offset': 1},
+                },
+                'comments': [
+                    {
+                        'id': 1,
+                        'commentType': 'text',
+                        'author': {'displayName': 'Alice'},
+                        'publishedDate': '2026-06-04T12:34:56.789Z',
+                        'content': 'Nit: rename this var',
+                    },
+                    {
+                        'id': 2,
+                        'parentCommentId': 1,
+                        'commentType': 'text',
+                        'author': {'displayName': 'Bob'},
+                        'publishedDate': '2026-06-04T13:00:00.000Z',
+                        'content': 'Agreed',
+                    },
+                ],
+            },
+            {
+                'id': 200,
+                'status': 'fixed',
+                'comments': [{'id': 9, 'commentType': 'text', 'content': 'old'}],
+            },
+            {
+                'id': 300,
+                'status': 'active',
+                'comments': [{'id': 10, 'commentType': 'system', 'content': 'voted'}],
+            },
+        ]
+        from io import StringIO
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            rc = dev.cmd_pr_comments(self._make_args())
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn('PR !42', out)
+        self.assertIn('thread 100', out)
+        self.assertIn('#1', out)
+        self.assertIn('#2', out)
+        self.assertIn('reply to #1', out)
+        self.assertIn('/src/foo.py:42', out)
+        self.assertIn('Alice', out)
+        self.assertIn('Bob', out)
+        self.assertIn('Nit: rename this var', out)
+        self.assertNotIn('voted', out)
+        self.assertNotIn('old', out)
+        self.assertNotIn('thread 200', out)
+        self.assertNotIn('thread 300', out)
+
+    @patch('dev._fetch_pr_threads')
+    @patch('dev._resolve_pr_context')
+    def test_pr_level_thread_no_file(self, mock_ctx, mock_threads):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        mock_threads.return_value = [{
+            'id': 500,
+            'status': 'active',
+            'comments': [{
+                'id': 7,
+                'commentType': 'text',
+                'author': {'displayName': 'BuildBot'},
+                'publishedDate': '2026-01-01T00:00:00Z',
+                'content': 'Build failed.',
+            }],
+        }]
+        from io import StringIO
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            rc = dev.cmd_pr_comments(self._make_args())
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn('PR-level', out)
+        self.assertIn('thread 500', out)
+        self.assertIn('#7', out)
+        self.assertIn('BuildBot', out)
+        self.assertIn('Build failed.', out)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2, buffer=True)

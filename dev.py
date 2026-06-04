@@ -1732,6 +1732,22 @@ def _fetch_pr(org, project, repo, pr_id):
         return None
 
 
+def _fetch_pr_threads(org, project, repo, pr_id):
+    """Fetch PR comment threads from ADO REST API. Returns list of threads or None."""
+    token = get_ado_token()
+    if not token:
+        return None
+    import urllib.request
+    base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
+    url = f'{base}/{repo}/pullrequests/{pr_id}/threads?api-version=7.1'
+    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read()).get('value', [])
+    except urllib.error.HTTPError:
+        return None
+
+
 def _find_local_repo_path(org, project, repo):
     """Find the local clone path for an ADO repo from config. Returns path or None."""
     try:
@@ -2047,6 +2063,73 @@ def cmd_pr_diff(args):
     return subprocess.run(diff_cmd).returncode
 
 
+def cmd_pr_comments(args):
+    """List active comment threads on the PR (human and bot).
+
+    Skips threads whose only comments are system-generated (vote changes, etc.).
+    Prints PR id, thread id, and comment ids so replies can be issued without
+    further lookups (POST .../pullRequests/{prId}/threads/{threadId}/comments
+    with parentCommentId).
+    """
+    ctx = _resolve_pr_context(args)
+    if not ctx:
+        return 1
+    org, project, repo, _, pr_id, _, _ = ctx
+
+    if not pr_id:
+        print(f"{Colors.RED}[X]{Colors.NC} No active PR found for this branch", file=sys.stderr)
+        return 1
+
+    threads = _fetch_pr_threads(org, project, repo, pr_id)
+    if threads is None:
+        print(f"{Colors.RED}[X]{Colors.NC} Failed to fetch threads for PR !{pr_id}", file=sys.stderr)
+        return 1
+
+    print(f"{Colors.BLUE}PR !{pr_id}{Colors.NC} {Colors.GREY}({org}/{project}/{repo}){Colors.NC}")
+    print()
+
+    printed = 0
+    for thread in threads:
+        if thread.get('status') != 'active':
+            continue
+        comments = [c for c in (thread.get('comments') or [])
+                    if c.get('commentType') != 'system']
+        if not comments:
+            continue
+
+        tc = thread.get('threadContext') or {}
+        file_path = tc.get('filePath')
+        if file_path:
+            anchor = tc.get('rightFileStart') or tc.get('leftFileStart') or {}
+            line = anchor.get('line')
+            loc = f"{file_path}:{line}" if line else file_path
+        else:
+            loc = '(PR-level)'
+
+        thread_id = thread.get('id')
+        print(f"{Colors.CYAN}[>]{Colors.NC} {loc}  "
+              f"{Colors.GREY}thread {thread_id}{Colors.NC}")
+        for comment in comments:
+            comment_id = comment.get('id')
+            author = (comment.get('author') or {}).get('displayName', 'unknown')
+            published = (comment.get('publishedDate') or '')[:19]
+            content = (comment.get('content') or '').rstrip()
+            parent_id = comment.get('parentCommentId')
+            reply_tag = f" {Colors.GREY}(reply to #{parent_id}){Colors.NC}" if parent_id else ''
+            print(f"  {Colors.YELLOW}#{comment_id}{Colors.NC} "
+                  f"{Colors.GREEN}{author}{Colors.NC} "
+                  f"{Colors.GREY}{published}{Colors.NC}{reply_tag}")
+            for line in content.split('\n'):
+                print(f"    {line}")
+        print()
+        printed += 1
+
+    if printed == 0:
+        print(f"{Colors.YELLOW}[!]{Colors.NC} PR !{pr_id} has no active comment threads")
+
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description='Dev CLI - Development workflow tool')
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
@@ -2122,6 +2205,11 @@ def main():
     pr_diff_p.add_argument('diff_args', nargs=argparse.REMAINDER,
                            help='Extra args for git diff (use -- before flags)')
 
+    pr_comments_p = pr_sub.add_parser('comments', help='List active PR comment threads (human and bot)')
+    pr_comments_p.add_argument('--repo', '-r', help='Path to git repository (default: current directory)')
+    pr_comments_p.add_argument('--branch', '-b', help='Source branch (default: current branch)')
+    pr_comments_p.add_argument('--id', type=int, help='PR ID (alternative to --repo/--branch)')
+
     # Init command
     subparsers.add_parser('init', help='Bootstrap shell profile ($PROFILE on Windows, .bashrc→zsh on Linux)')
 
@@ -2157,6 +2245,7 @@ def main():
             'create': cmd_pr_create,
             'desc': cmd_pr_desc,
             'diff': cmd_pr_diff,
+            'comments': cmd_pr_comments,
         }
         if args.pr_command in cmd_map:
             return cmd_map[args.pr_command](args)
