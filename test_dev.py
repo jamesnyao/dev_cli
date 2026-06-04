@@ -1691,7 +1691,13 @@ class TestCmdPrComments(unittest.TestCase):
             {
                 'id': 300,
                 'status': 'active',
-                'comments': [{'id': 10, 'commentType': 'system', 'content': 'voted'}],
+                'comments': [{
+                    'id': 10,
+                    'commentType': 'system',
+                    'author': {'displayName': 'System'},
+                    'publishedDate': '2026-06-04T14:00:00Z',
+                    'content': 'voted',
+                }],
             },
         ]
         from io import StringIO
@@ -1709,10 +1715,13 @@ class TestCmdPrComments(unittest.TestCase):
         self.assertIn('Alice', out)
         self.assertIn('Bob', out)
         self.assertIn('Nit: rename this var', out)
-        self.assertNotIn('voted', out)
+        # System entries in active threads are now shown
+        self.assertIn('thread 300', out)
+        self.assertIn('voted', out)
+        self.assertIn('(system)', out)
+        # Non-active threads are still hidden
         self.assertNotIn('old', out)
         self.assertNotIn('thread 200', out)
-        self.assertNotIn('thread 300', out)
 
     @patch('dev._fetch_pr_threads')
     @patch('dev._resolve_pr_context')

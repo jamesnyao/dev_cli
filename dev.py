@@ -2064,12 +2064,12 @@ def cmd_pr_diff(args):
 
 
 def cmd_pr_comments(args):
-    """List active comment threads on the PR (human and bot).
+    """List active comment threads on the PR (human, bot, and system entries).
 
-    Skips threads whose only comments are system-generated (vote changes, etc.).
-    Prints PR id, thread id, and comment ids so replies can be issued without
-    further lookups (POST .../pullRequests/{prId}/threads/{threadId}/comments
-    with parentCommentId).
+    Shows every comment in active threads. Prints PR id, thread id, and
+    comment ids so replies can be issued without further lookups
+    (POST .../pullRequests/{prId}/threads/{threadId}/comments with
+    parentCommentId).
     """
     ctx = _resolve_pr_context(args)
     if not ctx:
@@ -2092,8 +2092,7 @@ def cmd_pr_comments(args):
     for thread in threads:
         if thread.get('status') != 'active':
             continue
-        comments = [c for c in (thread.get('comments') or [])
-                    if c.get('commentType') != 'system']
+        comments = thread.get('comments') or []
         if not comments:
             continue
 
@@ -2115,10 +2114,16 @@ def cmd_pr_comments(args):
             published = (comment.get('publishedDate') or '')[:19]
             content = (comment.get('content') or '').rstrip()
             parent_id = comment.get('parentCommentId')
-            reply_tag = f" {Colors.GREY}(reply to #{parent_id}){Colors.NC}" if parent_id else ''
+            ctype = comment.get('commentType', 'text')
+            tags = []
+            if parent_id:
+                tags.append(f"reply to #{parent_id}")
+            if ctype and ctype != 'text':
+                tags.append(ctype)
+            tag_str = f" {Colors.GREY}({', '.join(tags)}){Colors.NC}" if tags else ''
             print(f"  {Colors.YELLOW}#{comment_id}{Colors.NC} "
                   f"{Colors.GREEN}{author}{Colors.NC} "
-                  f"{Colors.GREY}{published}{Colors.NC}{reply_tag}")
+                  f"{Colors.GREY}{published}{Colors.NC}{tag_str}")
             for line in content.split('\n'):
                 print(f"    {line}")
         print()
