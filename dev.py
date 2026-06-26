@@ -8,6 +8,7 @@ import base64
 import json
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1597,10 +1598,23 @@ def _ado_host_from_url(url):
 
 def _ado_credential_helper_value():
     """Return the git credential.helper value that invokes `dev ado
-    credential-helper`. The `!` prefix makes git run it as a shell command and
-    resolve `dev` from PATH at auth time, so it's independent of which physical
-    copy of dev_scripts is active and works cross-platform."""
-    return '!dev ado credential-helper'
+    credential-helper`.
+
+    Uses an absolute interpreter + dev.py path rather than relying on `dev`
+    being on PATH: tools that invoke git internally (notably toolchain_tools /
+    gclient) run git with a sanitized PATH that does NOT include dev_scripts,
+    so a bare `!dev ...` helper would silently fail and git would fall back to
+    prompting for a username. We also prefer the canonical home copy
+    (~/dev_scripts/dev.py) over the currently-running script so the helper hits
+    a fast local file instead of a slow Windows-mounted path (/mnt/c/...) when
+    invoked from WSL.
+    """
+    home_copy = Path.home() / 'dev_scripts' / 'dev.py'
+    running = Path(__file__).resolve()
+    dev_py = home_copy if home_copy.exists() else running
+    py = shlex.quote(sys.executable or 'python3')
+    script = shlex.quote(str(dev_py))
+    return f'!{py} {script} ado credential-helper'
 
 
 def _heal_ado_auth(repo_path):
