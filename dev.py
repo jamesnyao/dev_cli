@@ -8,6 +8,7 @@ import base64
 import json
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1595,20 +1596,36 @@ def _ado_host_from_url(url):
     return None
 
 
-def _persist_ado_extraheader(token, repo_path):
-    """Persist a global, host-scoped http.extraheader carrying the ADO bearer
-    token. This heals auth for tools that invoke git internally (e.g. gclient
-    sync, toolchain_tools selfupdate) so they stop prompting for username/password.
+def _ado_credential_helper_value():
+    """Return the git credential.helper value that invokes `dev ado
+    credential-helper`. Uses the running interpreter + dev.py absolute path so
+    git can run it non-interactively (git's own PATH may not include `dev`)."""
+    py = shlex.quote(sys.executable)
+    script = shlex.quote(str(SCRIPT_DIR / 'dev.py'))
+    return f'!{py} {script} ado credential-helper'
 
-    The header is refreshed on every `dev ado git` run, keeping the token fresh.
+
+def _heal_ado_auth(repo_path):
+    """Install a global, host-scoped git credential helper that supplies a fresh
+    ADO bearer token on demand. Unlike a static http.extraheader, this re-fetches
+    the token via `dev ado token` on every auth challenge, so it AUTO-HEALS when
+    the token expires (as long as `az login` is still valid). Tools that invoke
+    git internally (gclient sync, toolchain_tools selfupdate) reuse it transparently.
+
     Returns the host that was healed, or None if the repo has no ADO remote.
     """
     host = _ado_host_from_url(get_remote_url(repo_path))
     if not host:
         return None
-    key = f'http.https://{host}/.extraheader'
-    subprocess.run(['git', 'config', '--global', key,
-                    f'Authorization: Bearer {token}'])
+    base = f'https://{host}'
+    # Remove any stale static header we may have set previously: a forced
+    # extraheader always wins over the credential helper and would send an
+    # expired token, defeating auto-heal.
+    subprocess.run(['git', 'config', '--global', '--unset-all',
+                    f'http.{base}/.extraheader'],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(['git', 'config', '--global',
+                    f'credential.{base}.helper', _ado_credential_helper_value()])
     return host
 
 
@@ -1627,14 +1644,35 @@ def cmd_ado_git(args):
         print(f"{Colors.RED}[X]{Colors.NC} Failed to get ADO token. Run: az login")
         return 1
 
-    host = _persist_ado_extraheader(token, Path(os.getcwd()).resolve())
+    host = _heal_ado_auth(Path(os.getcwd()).resolve())
     if host:
-        print(f"{Colors.GREEN}[ok]{Colors.NC} Persisted ADO auth for {host} "
-              f"(global http.extraheader); gclient/toolchain_tools git will reuse it")
+        print(f"{Colors.GREEN}[ok]{Colors.NC} Installed auto-refreshing ADO auth "
+              f"for {host}; gclient/toolchain_tools git will reuse it and re-heal on expiry")
 
     result = subprocess.run(
         ['git', '-c', f'http.extraheader=Authorization: Bearer {token}'] + git_args)
     return result.returncode
+
+
+def cmd_ado_credential_helper(args):
+    """git credential helper: supply a fresh ADO bearer token on demand.
+
+    Invoked by git (configured via `dev ado git`) as `... credential-helper get`.
+    Only `get` produces output; `store`/`erase` are no-ops. Outputs nothing but
+    the credential protocol fields so git can parse it cleanly.
+    """
+    # Drain git's protocol input on stdin so it doesn't see a broken pipe.
+    try:
+        sys.stdin.read()
+    except Exception:
+        pass
+    if getattr(args, 'op', 'get') != 'get':
+        return 0
+    token = get_ado_token()
+    if not token:
+        return 1
+    sys.stdout.write(f"username=ado\npassword={token}\n")
+    return 0
 
 
 def _decode_jwt_exp(token):
@@ -2220,6 +2258,11 @@ def main():
 
     ado_sub.add_parser('token', help='Get ADO access token (cached)')
 
+    cred_p = ado_sub.add_parser('credential-helper',
+                                help='git credential helper (internal; supplies ADO token)')
+    cred_p.add_argument('op', nargs='?', default='get',
+                        help='git credential operation (get/store/erase)')
+
     # pr subcommand
     pr_parser = subparsers.add_parser('pr', help='Pull request operations')
     pr_sub = pr_parser.add_subparsers(dest='pr_command')
@@ -2281,6 +2324,7 @@ def main():
             'clear-pat': cmd_ado_clear_pat,
             'git': cmd_ado_git,
             'token': cmd_ado_token,
+            'credential-helper': cmd_ado_credential_helper,
         }
         if args.ado_command in cmd_map:
             return cmd_map[args.ado_command](args)
