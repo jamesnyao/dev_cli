@@ -1580,6 +1580,38 @@ def cmd_ado_clear_pat(args):
         print(f"{Colors.YELLOW}No ADO PAT was configured{Colors.NC}")
     return 0
 
+def _ado_host_from_url(url):
+    """Return the ADO host from a git remote URL, or None if not an ADO host."""
+    import re
+    if not url:
+        return None
+    url = _strip_url_credentials(url)
+    m = re.match(r'https://([^/]+)/', url)
+    if not m:
+        return None
+    host = m.group(1).lower()
+    if host == 'dev.azure.com' or host.endswith('.visualstudio.com'):
+        return host
+    return None
+
+
+def _persist_ado_extraheader(token, repo_path):
+    """Persist a global, host-scoped http.extraheader carrying the ADO bearer
+    token. This heals auth for tools that invoke git internally (e.g. gclient
+    sync, toolchain_tools selfupdate) so they stop prompting for username/password.
+
+    The header is refreshed on every `dev ado git` run, keeping the token fresh.
+    Returns the host that was healed, or None if the repo has no ADO remote.
+    """
+    host = _ado_host_from_url(get_remote_url(repo_path))
+    if not host:
+        return None
+    key = f'http.https://{host}/.extraheader'
+    subprocess.run(['git', 'config', '--global', key,
+                    f'Authorization: Bearer {token}'])
+    return host
+
+
 def cmd_ado_git(args):
     """Run a git command with ADO bearer token authentication."""
     git_args = args.git_args
@@ -1594,6 +1626,11 @@ def cmd_ado_git(args):
     if not token:
         print(f"{Colors.RED}[X]{Colors.NC} Failed to get ADO token. Run: az login")
         return 1
+
+    host = _persist_ado_extraheader(token, Path(os.getcwd()).resolve())
+    if host:
+        print(f"{Colors.GREEN}[ok]{Colors.NC} Persisted ADO auth for {host} "
+              f"(global http.extraheader); gclient/toolchain_tools git will reuse it")
 
     result = subprocess.run(
         ['git', '-c', f'http.extraheader=Authorization: Bearer {token}'] + git_args)
