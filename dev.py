@@ -8,7 +8,6 @@ import base64
 import json
 import os
 import platform
-import shlex
 import shutil
 import subprocess
 import sys
@@ -1598,11 +1597,10 @@ def _ado_host_from_url(url):
 
 def _ado_credential_helper_value():
     """Return the git credential.helper value that invokes `dev ado
-    credential-helper`. Uses the running interpreter + dev.py absolute path so
-    git can run it non-interactively (git's own PATH may not include `dev`)."""
-    py = shlex.quote(sys.executable)
-    script = shlex.quote(str(SCRIPT_DIR / 'dev.py'))
-    return f'!{py} {script} ado credential-helper'
+    credential-helper`. The `!` prefix makes git run it as a shell command and
+    resolve `dev` from PATH at auth time, so it's independent of which physical
+    copy of dev_scripts is active and works cross-platform."""
+    return '!dev ado credential-helper'
 
 
 def _heal_ado_auth(repo_path):
@@ -1618,14 +1616,22 @@ def _heal_ado_auth(repo_path):
     if not host:
         return None
     base = f'https://{host}'
+    quiet = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     # Remove any stale static header we may have set previously: a forced
     # extraheader always wins over the credential helper and would send an
     # expired token, defeating auto-heal.
     subprocess.run(['git', 'config', '--global', '--unset-all',
-                    f'http.{base}/.extraheader'],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(['git', 'config', '--global',
-                    f'credential.{base}.helper', _ado_credential_helper_value()])
+                    f'http.{base}/.extraheader'], **quiet)
+    # Reset the helper list for this host. The leading empty entry drops any
+    # inherited global helper (e.g. `store`) so an ephemeral token is never
+    # cached to ~/.git-credentials and served stale later.
+    subprocess.run(['git', 'config', '--global', '--unset-all',
+                    f'credential.{base}.helper'], **quiet)
+    subprocess.run(['git', 'config', '--global', '--add',
+                    f'credential.{base}.helper', ''], **quiet)
+    subprocess.run(['git', 'config', '--global', '--add',
+                    f'credential.{base}.helper', _ado_credential_helper_value()],
+                   **quiet)
     return host
 
 
