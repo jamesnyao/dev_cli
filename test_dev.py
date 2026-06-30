@@ -1651,7 +1651,7 @@ class TestCmdPrComments(unittest.TestCase):
         with patch('sys.stdout', buf):
             rc = dev.cmd_pr_comments(self._make_args())
         self.assertEqual(rc, 0)
-        self.assertIn('no active comment threads', buf.getvalue())
+        self.assertIn('no human or bot comment threads', buf.getvalue())
 
     @patch('dev._fetch_pr_threads')
     @patch('dev._resolve_pr_context')
@@ -1736,18 +1736,18 @@ class TestCmdPrComments(unittest.TestCase):
         self.assertIn('Alice', out)
         self.assertIn('Bob', out)
         self.assertIn('Nit: rename this var', out)
-        # System entries in active threads are now shown
-        self.assertIn('thread 300', out)
-        self.assertIn('voted', out)
-        self.assertIn('(system)', out)
+        # Resolved threads (human/bot) are now shown and labelled resolved
+        self.assertIn('thread 200', out)
+        self.assertIn('old', out)
+        self.assertIn('thread 500', out)
+        self.assertIn('wontfix', out)
+        self.assertIn('resolved', out)
         # Threads with null/missing status are treated as open
         self.assertIn('thread 400', out)
         self.assertIn('No status thread', out)
-        # Resolved threads are still hidden
-        self.assertNotIn('old', out)
-        self.assertNotIn('thread 200', out)
-        self.assertNotIn('thread 500', out)
-        self.assertNotIn('wontfix', out)
+        # Pure system threads (ref updates, votes) are hidden as noise
+        self.assertNotIn('thread 300', out)
+        self.assertNotIn('voted', out)
         # Deleted threads are hidden
         self.assertNotIn('thread 600', out)
         self.assertNotIn('deleted', out)
@@ -1778,6 +1778,42 @@ class TestCmdPrComments(unittest.TestCase):
         self.assertIn('#7', out)
         self.assertIn('BuildBot', out)
         self.assertIn('Build failed.', out)
+
+    @patch('dev._fetch_pr_threads')
+    @patch('dev._resolve_pr_context')
+    def test_mixed_thread_keeps_system_entries(self, mock_ctx, mock_threads):
+        # A thread with at least one human/bot comment is kept, and its
+        # interleaved system entries are shown for context.
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        mock_threads.return_value = [{
+            'id': 700,
+            'status': 'active',
+            'comments': [
+                {
+                    'id': 1,
+                    'commentType': 'text',
+                    'author': {'displayName': 'Dave'},
+                    'publishedDate': '2026-01-01T00:00:00Z',
+                    'content': 'Please fix',
+                },
+                {
+                    'id': 2,
+                    'commentType': 'system',
+                    'author': {'displayName': 'System'},
+                    'publishedDate': '2026-01-01T01:00:00Z',
+                    'content': 'resolved the thread',
+                },
+            ],
+        }]
+        from io import StringIO
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            rc = dev.cmd_pr_comments(self._make_args())
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn('thread 700', out)
+        self.assertIn('Please fix', out)
+        self.assertIn('resolved the thread', out)
 
 
 if __name__ == '__main__':

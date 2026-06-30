@@ -2159,10 +2159,12 @@ def cmd_pr_diff(args):
 
 
 def cmd_pr_comments(args):
-    """List active comment threads on the PR (human, bot, and system entries).
+    """List comment threads on the PR (active and resolved) from humans and bots.
 
-    Shows every comment in active threads. Prints PR id, thread id, and
-    comment ids so replies can be issued without further lookups
+    Shows every comment in each thread. Pure system threads (e.g. "ref was
+    updated" push notices, vote/status-change notices) are skipped so only
+    real human and bot review comments are shown. Prints PR id, thread id,
+    and comment ids so replies can be issued without further lookups
     (POST .../pullRequests/{prId}/threads/{threadId}/comments with
     parentCommentId).
     """
@@ -2186,12 +2188,15 @@ def cmd_pr_comments(args):
     resolved_statuses = {'fixed', 'wontFix', 'closed', 'byDesign'}
     printed = 0
     for thread in threads:
-        if thread.get('status') in resolved_statuses:
-            continue
         if thread.get('isDeleted'):
             continue
         comments = thread.get('comments') or []
         if not comments:
+            continue
+        # Skip pure system threads (ref-update pushes, votes, status changes)
+        # that carry no human or bot review comment. A thread is kept if it
+        # has at least one non-system comment.
+        if all((comment.get('commentType') or 'text') == 'system' for comment in comments):
             continue
 
         tc = thread.get('threadContext') or {}
@@ -2205,8 +2210,9 @@ def cmd_pr_comments(args):
 
         thread_id = thread.get('id')
         status = thread.get('status') or 'open'
+        status_label = f"{status}, resolved" if status in resolved_statuses else status
         print(f"{Colors.CYAN}[>]{Colors.NC} {loc}  "
-              f"{Colors.GREY}thread {thread_id} ({status}){Colors.NC}")
+              f"{Colors.GREY}thread {thread_id} ({status_label}){Colors.NC}")
         for comment in comments:
             comment_id = comment.get('id')
             author = (comment.get('author') or {}).get('displayName', 'unknown')
@@ -2229,7 +2235,7 @@ def cmd_pr_comments(args):
         printed += 1
 
     if printed == 0:
-        print(f"{Colors.YELLOW}[!]{Colors.NC} PR !{pr_id} has no active comment threads")
+        print(f"{Colors.YELLOW}[!]{Colors.NC} PR !{pr_id} has no human or bot comment threads")
 
     return 0
 
@@ -2314,7 +2320,7 @@ def main():
     pr_diff_p.add_argument('diff_args', nargs=argparse.REMAINDER,
                            help='Extra args for git diff (use -- before flags)')
 
-    pr_comments_p = pr_sub.add_parser('comments', help='List active PR comment threads (human and bot)')
+    pr_comments_p = pr_sub.add_parser('comments', help='List PR comment threads, active and resolved (human and bot)')
     pr_comments_p.add_argument('--repo', '-r', help='Path to git repository (default: current directory)')
     pr_comments_p.add_argument('--branch', '-b', help='Source branch (default: current branch)')
     pr_comments_p.add_argument('--id', type=int, help='PR ID (alternative to --repo/--branch)')
