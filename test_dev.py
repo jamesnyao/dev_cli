@@ -1691,12 +1691,24 @@ class TestCmdPrComments(unittest.TestCase):
             {
                 'id': 300,
                 'status': 'active',
+                'properties': {'CodeReviewThreadType': {'$value': 'VoteUpdate'}},
                 'comments': [{
                     'id': 10,
                     'commentType': 'system',
                     'author': {'displayName': 'System'},
                     'publishedDate': '2026-06-04T14:00:00Z',
                     'content': 'voted',
+                }],
+            },
+            {
+                'id': 350,
+                'status': 'fixed',
+                'comments': [{
+                    'id': 11,
+                    'commentType': 'system',
+                    'author': {'displayName': 'GitOps (Git LowPriv)'},
+                    'publishedDate': '2026-06-04T14:30:00Z',
+                    'content': 'PR Assistant bot finding',
                 }],
             },
             {
@@ -1745,9 +1757,12 @@ class TestCmdPrComments(unittest.TestCase):
         # Threads with null/missing status are treated as open
         self.assertIn('thread 400', out)
         self.assertIn('No status thread', out)
-        # Pure system threads (ref updates, votes) are hidden as noise
+        # ADO system-activity threads (CodeReviewThreadType) are hidden as noise
         self.assertNotIn('thread 300', out)
         self.assertNotIn('voted', out)
+        # Bot review comments are shown even when commentType is 'system'
+        self.assertIn('thread 350', out)
+        self.assertIn('PR Assistant bot finding', out)
         # Deleted threads are hidden
         self.assertNotIn('thread 600', out)
         self.assertNotIn('deleted', out)

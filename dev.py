@@ -2161,9 +2161,12 @@ def cmd_pr_diff(args):
 def cmd_pr_comments(args):
     """List comment threads on the PR (active and resolved) from humans and bots.
 
-    Shows every comment in each thread. Pure system threads (e.g. "ref was
-    updated" push notices, vote/status-change notices) are skipped so only
-    real human and bot review comments are shown. Prints PR id, thread id,
+    Shows every comment in each thread. ADO system-activity threads (e.g.
+    "ref was updated" push notices, vote/policy/status-change and "published
+    the PR" notices, identified by the CodeReviewThreadType property) are
+    skipped so only real human and bot review comments are shown. Bot review
+    comments (e.g. PR Assistant) are kept even though their commentType is
+    'system', since they do not carry that property. Prints PR id, thread id,
     and comment ids so replies can be issued without further lookups
     (POST .../pullRequests/{prId}/threads/{threadId}/comments with
     parentCommentId).
@@ -2193,10 +2196,13 @@ def cmd_pr_comments(args):
         comments = thread.get('comments') or []
         if not comments:
             continue
-        # Skip pure system threads (ref-update pushes, votes, status changes)
-        # that carry no human or bot review comment. A thread is kept if it
-        # has at least one non-system comment.
-        if all((comment.get('commentType') or 'text') == 'system' for comment in comments):
+        # Skip ADO system-activity threads (ref-update pushes, votes, policy/
+        # status changes, "published the pull request" notices). ADO stamps a
+        # CodeReviewThreadType property on every auto-generated thread; real
+        # human and bot review comments (e.g. PR Assistant, Ownership Enforcer)
+        # never carry it, so bot comments are still shown even when their
+        # individual commentType is 'system'.
+        if 'CodeReviewThreadType' in (thread.get('properties') or {}):
             continue
 
         tc = thread.get('threadContext') or {}
