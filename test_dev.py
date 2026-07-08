@@ -407,6 +407,50 @@ class TestSyncTrackedFiles(unittest.TestCase):
         rcfile = dev.RCFILES_DIR / 'myconfig.md'
         self.assertEqual(rcfile.read_text(), 'local')
 
+    @patch('dev.rcfile_was_deleted', return_value=True)
+    @patch('dev.get_rcfile_git_timestamp', return_value=None)
+    def test_remote_deletion_propagates_to_home(self, _mock_ts, _mock_del):
+        """Home file present, rcfile deleted in git -> delete the home copy."""
+        self._track_file('docs/foo.md')
+        self._setup_home_file('docs/foo.md', 'stale', self.new_time)
+
+        result = dev.sync_tracked_files(self.home)
+
+        self.assertFalse(result)
+        self.assertFalse((self.home / 'docs' / 'foo.md').exists())
+        self.assertFalse((dev.RCFILES_DIR / 'docs' / 'foo.md').exists())
+
+    @patch('dev.rcfile_was_deleted', return_value=False)
+    @patch('dev.get_rcfile_git_timestamp', return_value=None)
+    def test_new_local_file_not_treated_as_deletion(self, _mock_ts, _mock_del):
+        """Home file with no git history -> pushed to rcfiles, not deleted."""
+        self._track_file('docs/new.md')
+        self._setup_home_file('docs/new.md', 'brand new', self.new_time)
+
+        result = dev.sync_tracked_files(self.home)
+
+        self.assertTrue(result)
+        self.assertTrue((self.home / 'docs' / 'new.md').exists())
+        self.assertEqual((dev.RCFILES_DIR / 'docs' / 'new.md').read_text(), 'brand new')
+
+    @patch('dev.run_git')
+    def test_rcfile_was_deleted_detects_deletion(self, mock_git):
+        """Untracked path with a D commit in history is a deletion."""
+        mock_git.side_effect = [(False, ''), (True, 'deadbeefcafe')]
+        self.assertTrue(dev.rcfile_was_deleted('docs/foo.md'))
+
+    @patch('dev.run_git')
+    def test_rcfile_was_deleted_false_when_tracked(self, mock_git):
+        """A path git still tracks is not a committed deletion."""
+        mock_git.side_effect = [(True, 'repoconfig/rcfiles/docs/foo.md')]
+        self.assertFalse(dev.rcfile_was_deleted('docs/foo.md'))
+
+    @patch('dev.run_git')
+    def test_rcfile_was_deleted_false_when_never_tracked(self, mock_git):
+        """A path with no git history at all is a new file, not a deletion."""
+        mock_git.side_effect = [(False, ''), (True, '')]
+        self.assertFalse(dev.rcfile_was_deleted('docs/brand-new.md'))
+
     # --- Home mtime alignment tests ---
 
     @patch('dev.get_rcfile_git_timestamp')

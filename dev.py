@@ -438,6 +438,23 @@ def get_rcfile_git_timestamp(rel_path):
             return None
     return None
 
+def rcfile_was_deleted(rel_path):
+    """True if this rcfile was tracked in git and is now deleted.
+
+    Distinguishes a genuinely new local file (never in git history) from a file
+    that was deleted on another machine and pulled in via `dev repo sync`. Used
+    by the directory sync so a remote deletion propagates to the home copy
+    instead of the home copy resurrecting the file.
+    """
+    rcfile_rel = str(Path('repoconfig') / 'rcfiles' / rel_path).replace('\\', '/')
+    # If git still tracks the path, it isn't a committed deletion (the on-disk
+    # copy was likely removed without committing) — let normal sync restore it.
+    tracked, _ = run_git(SCRIPT_DIR, 'ls-files', '--error-unmatch', '--', rcfile_rel)
+    if tracked:
+        return False
+    deleted, commit = run_git(SCRIPT_DIR, 'log', '-1', '--diff-filter=D', '--format=%H', '--', rcfile_rel)
+    return bool(deleted and commit)
+
 def get_file_mtime(file_path):
     """Get the modification time of a file as a timezone-aware datetime."""
     try:
@@ -1094,6 +1111,16 @@ def sync_tracked_files(base_path):
         local_ts = get_file_mtime(target_file) if tgt_exists else None
 
         if tgt_exists and not rc_exists:
+            if rcfile_was_deleted(rel_path):
+                # The rcfile was deleted on another machine and pulled in via
+                # git. Propagate the deletion to the home copy instead of
+                # resurrecting it as a "new local file".
+                try:
+                    target_file.unlink()
+                except OSError:
+                    pass
+                print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path} {Colors.CYAN}(deleted remotely){Colors.NC}")
+                continue
             direction = 'local'
         elif rc_exists and not tgt_exists:
             direction = 'remote'
