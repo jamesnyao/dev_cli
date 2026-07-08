@@ -588,10 +588,13 @@ class TestAddTrackedFile(unittest.TestCase):
         self.orig_config_dir = dev.CONFIG_DIR
         self.orig_config_file = dev.CONFIG_FILE
         self.orig_rcfiles_dir = dev.RCFILES_DIR
+        self.orig_home_dir = dev.HOME_DIR
         dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
         dev.CONFIG_DIR.mkdir(parents=True)
         dev.CONFIG_FILE = dev.CONFIG_DIR / 'repos.json'
         dev.RCFILES_DIR = dev.CONFIG_DIR / 'rcfiles'
+        dev.HOME_DIR = Path(self.temp_dir) / 'home'
+        dev.HOME_DIR.mkdir()
 
         self.workspace = Path(self.temp_dir) / 'workspace'
         self.workspace.mkdir()
@@ -603,6 +606,7 @@ class TestAddTrackedFile(unittest.TestCase):
         dev.CONFIG_DIR = self.orig_config_dir
         dev.CONFIG_FILE = self.orig_config_file
         dev.RCFILES_DIR = self.orig_rcfiles_dir
+        dev.HOME_DIR = self.orig_home_dir
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
@@ -652,6 +656,76 @@ class TestAddTrackedFile(unittest.TestCase):
 
         result = dev._add_tracked_file(outside)
         self.assertEqual(result, 1)
+
+    @patch.dict(os.environ, {'DEVCONFIG': 'test'})
+    def test_add_file_under_symlinked_dir(self):
+        """A file under a symlinked workspace subdir stays workspace-relative.
+
+        Regression: the workspace `docs/` is a symlink to a dir outside the
+        workspace; resolving symlinks would push the path outside the root.
+        """
+        external = Path(self.temp_dir) / 'external_docs'
+        external.mkdir()
+        (external / 'note.md').write_text('hi')
+        link = self.workspace / 'docs'
+        try:
+            os.symlink(external, link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest('symlink creation not permitted on this machine')
+
+        result = dev._add_tracked_file(link / 'note.md')
+
+        self.assertEqual(result, 0)
+        config = dev.load_config()
+        self.assertEqual([f['path'] for f in config['files']], ['docs/note.md'])
+
+    @patch.dict(os.environ, {'DEVCONFIG': 'test'})
+    def test_add_directory_tracks_whole_tree(self):
+        """Adding a directory records one entry and copies the tree to rcfiles."""
+        docs = self.workspace / 'docs'
+        (docs / 'sub').mkdir(parents=True)
+        (docs / 'a.md').write_text('a')
+        (docs / 'sub' / 'b.md').write_text('b')
+
+        result = dev._add_tracked_file(docs)
+
+        self.assertEqual(result, 0)
+        config = dev.load_config()
+        self.assertEqual([f['path'] for f in config['files']], ['docs'])
+        self.assertTrue((dev.RCFILES_DIR / 'docs' / 'a.md').exists())
+        self.assertTrue((dev.RCFILES_DIR / 'docs' / 'sub' / 'b.md').exists())
+
+    @patch.dict(os.environ, {'DEVCONFIG': 'test'})
+    def test_directory_entry_expands_loose_files(self):
+        """A tracked directory expands to every loose file, including new ones."""
+        docs = self.workspace / 'docs'
+        docs.mkdir()
+        (docs / 'a.md').write_text('a')
+        dev._add_tracked_file(docs)
+
+        paths = sorted(f['path'] for f in dev._get_all_tracked_files())
+        self.assertEqual(paths, ['docs/a.md'])
+
+        # A file added later (here, straight into rcfiles) is picked up with no re-add.
+        (dev.RCFILES_DIR / 'docs' / 'c.md').write_text('c')
+        paths = sorted(f['path'] for f in dev._get_all_tracked_files())
+        self.assertEqual(paths, ['docs/a.md', 'docs/c.md'])
+
+    @patch.dict(os.environ, {'DEVCONFIG': 'test'})
+    def test_directory_entry_dedupes_explicit_child(self):
+        """An explicit file entry also covered by a tracked dir isn't duplicated."""
+        docs = self.workspace / 'docs'
+        docs.mkdir()
+        (docs / 'a.md').write_text('a')
+        config = dev.load_config()
+        config['files'] = [{'path': 'docs/a.md'}, {'path': 'docs'}]
+        dev.save_config(config)
+        # Mirror into rcfiles so expansion sees the file.
+        (dev.RCFILES_DIR / 'docs').mkdir(parents=True)
+        (dev.RCFILES_DIR / 'docs' / 'a.md').write_text('a')
+
+        paths = [f['path'] for f in dev._get_all_tracked_files()]
+        self.assertEqual(paths, ['docs/a.md'])
 
 
 class TestAdoTokenCache(unittest.TestCase):

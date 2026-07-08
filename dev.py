@@ -472,31 +472,53 @@ def compute_repo_name(repo_path, base_path=None):
 # ============ REPO COMMANDS ============
 
 def _add_tracked_file(file_path):
-    """Add a single file to tracking for cross-machine sync."""
-    base_path = Path(get_base_path()).resolve()
-    file_path = file_path.resolve()
+    """Add a single file (or directory) to tracking for cross-machine sync.
+
+    A directory is tracked as a whole: every loose file under it is synced on
+    each `dev repo sync`, so new files added later are picked up automatically.
+    """
+    base_path = Path(os.path.abspath(get_base_path()))
+    file_path = Path(os.path.abspath(str(file_path)))
 
     try:
         rel_path = file_path.relative_to(base_path)
     except ValueError:
-        print(f"{Colors.RED}[X]{Colors.NC} File must be under workspace root: {base_path}")
+        print(f"{Colors.RED}[X]{Colors.NC} Path must be under workspace root: {base_path}")
         return 1
 
     rel_str = str(rel_path).replace('\\', '/')
+    is_dir = file_path.is_dir()
     config = load_config()
     if 'files' not in config:
         config['files'] = []
-    config['files'] = [f for f in config['files'] if f['path'] != rel_str]
+    # Drop the entry itself and, for a directory, any now-redundant child entries.
+    prefix = rel_str + '/'
+    config['files'] = [
+        f for f in config['files']
+        if f['path'] != rel_str and not (is_dir and f['path'].startswith(prefix))
+    ]
     config['files'].append({
         'path': rel_str,
     })
 
     dest = RCFILES_DIR / rel_str
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(str(file_path), str(dest))
+    if is_dir:
+        for src in sorted(file_path.rglob('*')):
+            if not src.is_file():
+                continue
+            sub = src.relative_to(file_path)
+            if '.git' in sub.parts:
+                continue
+            out = dest / sub
+            out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(src), str(out))
+    else:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(file_path), str(dest))
 
     save_config(config)
-    print(f"{Colors.GREEN}Added file: {rel_str}{Colors.NC}")
+    kind = 'directory' if is_dir else 'file'
+    print(f"{Colors.GREEN}Added {kind}: {rel_str}{Colors.NC}")
     print(f"  Synced to: {dest}")
     return 0
 
@@ -511,12 +533,12 @@ def cmd_repo_add(args):
         return 1
 
     if target_path.is_file():
-        return _add_tracked_file(target_path)
+        return _add_tracked_file(display_path)
 
     git_dir = target_path / '.git'
     if not git_dir.exists():
-        print(f"{Colors.RED}[X]{Colors.NC} Not a git repository: {target_path}")
-        return 1
+        # A non-git directory is tracked as a synced files directory.
+        return _add_tracked_file(display_path)
 
     remote_url = get_remote_url(target_path, normalize=True)
     if not remote_url:
@@ -568,7 +590,9 @@ def cmd_repo_remove(args):
 
     if len(config.get('files', [])) < original_count:
         rcfile = RCFILES_DIR / name
-        if rcfile.exists():
+        if rcfile.is_dir():
+            shutil.rmtree(str(rcfile))
+        elif rcfile.exists():
             rcfile.unlink()
         save_config(config)
         print(f"{Colors.GREEN}Removed file: {name}{Colors.NC}")
@@ -894,10 +918,71 @@ def has_real_conflict_markers(content):
 
 HOME_DIR = Path.home()
 
+def _resolve_tracked_home_path(entry):
+    """Home-side path for a tracked entry, honoring an optional pathLinksTo."""
+    link_to = entry.get('pathLinksTo')
+    if link_to:
+        return Path(os.path.expandvars(os.path.expanduser(link_to)))
+    return HOME_DIR / entry['path'].replace('/', os.sep)
+
+
+def _expand_tracked_dir(entry):
+    """Expand a directory entry into one file entry per file underneath.
+
+    Unions the files present in the home tree and the rcfiles tree so loose
+    files added to a tracked directory (e.g. docs/) on either side are picked
+    up automatically. Returns None when the entry is not a directory (a plain
+    file entry, which the caller keeps as-is).
+    """
+    rel_path = entry['path']
+    link_to = entry.get('pathLinksTo')
+    home_root = _resolve_tracked_home_path(entry)
+    rc_root = RCFILES_DIR / rel_path
+
+    if not home_root.is_dir() and not rc_root.is_dir():
+        return None
+
+    children = []
+    seen = set()
+    for root in (home_root, rc_root):
+        if not root.is_dir():
+            continue
+        for f in sorted(root.rglob('*')):
+            if not f.is_file():
+                continue
+            sub = f.relative_to(root).as_posix()
+            if sub.startswith('.git/') or '/.git/' in f'/{sub}':
+                continue
+            child_rel = f'{rel_path}/{sub}'
+            if child_rel in seen:
+                continue
+            seen.add(child_rel)
+            child = {'path': child_rel}
+            if link_to:
+                child['pathLinksTo'] = f"{link_to.rstrip('/')}/{sub}"
+            children.append(child)
+    return children
+
+
 def _get_all_tracked_files():
-    """Return user-tracked file paths from config."""
+    """Return user-tracked file paths from config.
+
+    Directory entries are expanded into per-file entries so loose files added
+    under a tracked directory (e.g. docs/) are synced automatically. Duplicate
+    paths (e.g. a file also covered by a tracked directory) are collapsed.
+    """
     config = load_config()
-    return config.get('files', [])
+    result = []
+    seen = set()
+    for entry in config.get('files', []):
+        expanded = _expand_tracked_dir(entry)
+        entries = [entry] if expanded is None else expanded
+        for item in entries:
+            if item['path'] in seen:
+                continue
+            seen.add(item['path'])
+            result.append(item)
+    return result
 
 
 def sync_tracked_files(base_path):
