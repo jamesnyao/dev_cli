@@ -727,6 +727,56 @@ class TestAddTrackedFile(unittest.TestCase):
         paths = [f['path'] for f in dev._get_all_tracked_files()]
         self.assertEqual(paths, ['docs/a.md'])
 
+    @patch.dict(os.environ, {'DEVCONFIG': 'test'})
+    @patch('dev.run_git', return_value=(True, ''))
+    def test_delete_removes_both_copies(self, _mock_git):
+        """`delete` removes a dir-covered file from workspace and rcfiles."""
+        dev.HOME_DIR = self.workspace  # workspace/docs stands in for the ~/docs symlink
+        docs = self.workspace / 'docs'
+        docs.mkdir()
+        (docs / 'foo.md').write_text('foo')
+        (dev.RCFILES_DIR / 'docs').mkdir(parents=True)
+        (dev.RCFILES_DIR / 'docs' / 'foo.md').write_text('foo')
+        dev.save_config({'repos': [], 'files': [{'path': 'docs'}],
+                         'workspaceRoots': {'test': str(self.workspace)}})
+
+        args = argparse.Namespace(path='docs/foo.md')
+        result = dev.cmd_repo_delete(args)
+
+        self.assertEqual(result, 0)
+        self.assertFalse((docs / 'foo.md').exists())
+        self.assertFalse((dev.RCFILES_DIR / 'docs' / 'foo.md').exists())
+        # Not resurrected: expansion no longer lists it.
+        self.assertEqual([f['path'] for f in dev._get_all_tracked_files()], [])
+
+    @patch.dict(os.environ, {'DEVCONFIG': 'test'})
+    @patch('dev.run_git', return_value=(True, ''))
+    def test_delete_untracked_file_fails(self, _mock_git):
+        """`delete` refuses a path that isn't a tracked file."""
+        (self.workspace / 'loose.md').write_text('x')
+        result = dev.cmd_repo_delete(argparse.Namespace(path='loose.md'))
+        self.assertEqual(result, 1)
+        self.assertTrue((self.workspace / 'loose.md').exists())
+
+    @patch.dict(os.environ, {'DEVCONFIG': 'test'})
+    @patch('dev.run_git', return_value=(True, ''))
+    def test_delete_drops_explicit_entry(self, _mock_git):
+        """`delete` on an explicitly-tracked file also removes its config entry."""
+        dev.HOME_DIR = self.workspace
+        docs = self.workspace / 'docs'
+        docs.mkdir()
+        (docs / 'foo.md').write_text('foo')
+        (dev.RCFILES_DIR / 'docs').mkdir(parents=True)
+        (dev.RCFILES_DIR / 'docs' / 'foo.md').write_text('foo')
+        dev.save_config({'repos': [], 'files': [{'path': 'docs/foo.md'}],
+                         'workspaceRoots': {'test': str(self.workspace)}})
+
+        result = dev.cmd_repo_delete(argparse.Namespace(path='docs/foo.md'))
+
+        self.assertEqual(result, 0)
+        config = dev.load_config()
+        self.assertEqual(config.get('files', []), [])
+
 
 class TestAdoTokenCache(unittest.TestCase):
     """Tests for the ADO token cache helpers — especially the JWT-aware expiry."""

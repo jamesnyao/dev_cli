@@ -601,6 +601,63 @@ def cmd_repo_remove(args):
     print(f"{Colors.RED}[X]{Colors.NC} '{name}' is not tracked")
     return 1
 
+def cmd_repo_delete(args):
+    """Delete a single tracked file from the workspace and rcfiles.
+
+    Unlike `remove` (which untracks a whole entry), `delete` removes one file
+    that lives under a tracked directory (e.g. docs/foo.md): it deletes both the
+    workspace copy and the rcfiles copy and commits the removal, so the union-
+    based directory sync will not resurrect it on the next `dev repo sync`.
+    """
+    base_path = Path(os.path.abspath(get_base_path()))
+    name = args.path.replace('\\', '/')
+    if name.startswith('./'):
+        name = name[2:]
+    # Accept an absolute or workspace path and make it workspace-relative.
+    candidate = Path(os.path.abspath(args.path))
+    try:
+        name = candidate.relative_to(base_path).as_posix()
+    except ValueError:
+        pass
+
+    workspace_file = base_path / name.replace('/', os.sep)
+    rcfile = RCFILES_DIR / name
+
+    if workspace_file.is_dir() or rcfile.is_dir():
+        print(f"{Colors.RED}[X]{Colors.NC} '{name}' is a directory; use 'dev repo remove' to untrack it")
+        return 1
+
+    tracked = {f['path'] for f in _get_all_tracked_files()}
+    if name not in tracked:
+        print(f"{Colors.RED}[X]{Colors.NC} '{name}' is not a tracked file")
+        return 1
+
+    removed = []
+    if workspace_file.is_file():
+        workspace_file.unlink()
+        removed.append('workspace')
+    if rcfile.is_file():
+        rcfile.unlink()
+        removed.append('rcfiles')
+
+    # If it was tracked as its own explicit entry (not only via a directory),
+    # drop that entry too.
+    config = load_config()
+    before = len(config.get('files', []))
+    config['files'] = [f for f in config.get('files', []) if f['path'] != name]
+    if len(config['files']) != before:
+        save_config(config)
+
+    # Commit the deletion so directory expansion won't re-add the file.
+    run_git(SCRIPT_DIR, 'add', '-A')
+    _, status = run_git(SCRIPT_DIR, 'status', '--porcelain')
+    if status:
+        run_git(SCRIPT_DIR, 'commit', '-m', _build_commit_message())
+
+    print(f"{Colors.GREEN}Deleted:{Colors.NC} {name} ({', '.join(removed) or 'nothing on disk'})")
+    print(f"  {Colors.CYAN}Run 'dev repo sync' to push the deletion.{Colors.NC}")
+    return 0
+
 def cmd_repo_list(args):
     """List all tracked repositories and files."""
     config = load_config()
@@ -2349,6 +2406,10 @@ def main():
     remove_p = repo_sub.add_parser('remove', help='Remove a repository or file from tracking')
     remove_p.add_argument('name', help='Name of the repository or file path')
 
+    delete_p = repo_sub.add_parser('delete',
+                                   help='Delete a single tracked file (workspace + rcfiles) and commit the removal')
+    delete_p.add_argument('path', help='Path to the tracked file (e.g. docs/foo.md)')
+
     repo_sub.add_parser('list', help='List all tracked repositories')
     repo_sub.add_parser('sync', help='Clone missing repositories')
     repo_sub.add_parser('status', help='Show repo status on this machine')
@@ -2462,6 +2523,7 @@ def main():
         cmd_map = {
             'add': cmd_repo_add,
             'remove': cmd_repo_remove,
+            'delete': cmd_repo_delete,
             'list': cmd_repo_list,
             'sync': cmd_repo_sync,
             'status': cmd_repo_status,
