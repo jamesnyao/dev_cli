@@ -1250,7 +1250,7 @@ class TestEnsureLink(unittest.TestCase):
 
         dev._ensure_link(link_path, repo_path)
 
-        self.assertTrue(link_path.is_symlink())
+        self.assertTrue(dev._is_dir_link(link_path))
         self.assertEqual(link_path.resolve(), repo_path.resolve())
 
     def test_no_symlink_when_same_path(self):
@@ -1270,11 +1270,12 @@ class TestEnsureLink(unittest.TestCase):
         new_target.mkdir()
 
         link_path = self.base / 'link'
-        link_path.symlink_to(old_target, target_is_directory=True)
+        dev._ensure_link(link_path, old_target)
+        self.assertEqual(link_path.resolve(), old_target.resolve())
 
         dev._ensure_link(link_path, new_target)
 
-        self.assertTrue(link_path.is_symlink())
+        self.assertTrue(dev._is_dir_link(link_path))
         self.assertEqual(link_path.resolve(), new_target.resolve())
 
     def test_skips_when_real_dir_exists(self):
@@ -1295,11 +1296,11 @@ class TestEnsureLink(unittest.TestCase):
         repo_path = self.base / 'repo'
         repo_path.mkdir()
         link_path = self.base / 'link'
-        link_path.symlink_to(repo_path, target_is_directory=True)
+        dev._ensure_link(link_path, repo_path)
 
         dev._ensure_link(link_path, repo_path)
 
-        self.assertTrue(link_path.is_symlink())
+        self.assertTrue(dev._is_dir_link(link_path))
         self.assertEqual(link_path.resolve(), repo_path.resolve())
 
 

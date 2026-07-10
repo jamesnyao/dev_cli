@@ -788,18 +788,49 @@ def sync_rcfiles_push(pulled=False):
             print(f"{Colors.GREEN}[OK]{Colors.NC} rcfiles up to date")
 
 
+def _is_dir_link(path):
+    """True if path is a symlink or (on Windows) a directory junction."""
+    if path.is_symlink():
+        return True
+    if os.name == 'nt':
+        try:
+            import stat
+            attrs = os.lstat(path).st_file_attributes
+            return bool(attrs & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        except (OSError, AttributeError):
+            return False
+    return False
+
+
 def _ensure_link(link_path, repo_path):
-    """Create a symlink from link_path -> repo_path if needed."""
+    """Create a link from link_path -> repo_path if needed.
+
+    Uses a symlink; on Windows, where symlinks require elevation, falls back
+    to a directory junction (equivalent here and needs no privilege).
+    """
     if link_path == repo_path:
         return
-    if link_path.is_symlink():
+    if _is_dir_link(link_path):
         if link_path.resolve() == repo_path.resolve():
             return
-        link_path.unlink()
+        try:
+            link_path.unlink()
+        except (OSError, PermissionError):
+            link_path.rmdir()
     elif link_path.exists():
         return
     link_path.parent.mkdir(parents=True, exist_ok=True)
-    link_path.symlink_to(repo_path, target_is_directory=True)
+    try:
+        link_path.symlink_to(repo_path, target_is_directory=True)
+    except OSError:
+        if os.name != 'nt':
+            raise
+        result = subprocess.run(
+            ['cmd', '/c', 'mklink', '/J', str(link_path), str(repo_path)],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            raise
 
 
 def _self_update():
