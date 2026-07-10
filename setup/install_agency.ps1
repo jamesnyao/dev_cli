@@ -4,7 +4,9 @@ if ($env:WORK -eq "MSFT") {
     iex "& { $(irm aka.ms/InstallTool.ps1)} agency"
   }
 } else {
-  $env:PATH="C:\Users\example-user\.local\bin;$env:PATH"
+  if (-not ($env:PATH -like "*$env:USERPROFILE\.local\bin*")) {
+    $env:PATH = "$env:USERPROFILE\.local\bin;$env:PATH"
+  }
   if (-not (Get-Command claude.exe -ErrorAction SilentlyContinue)) {
     Write-Host "Installing claude"
     irm https://claude.ai/install.ps1 | iex
