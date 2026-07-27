@@ -2049,6 +2049,73 @@ def _fetch_pr_threads(org, project, repo, pr_id):
         return None
 
 
+# Every comment posted via `dev pr comments` is stamped with this marker so it is
+# clearly attributable to the automated code-review agent rather than a human.
+BOT_COMMENT_PREFIX = 'Code-review-bot:'
+
+
+def _apply_bot_prefix(content):
+    """Prepend BOT_COMMENT_PREFIX to a comment body unless already present."""
+    content = (content or '').strip()
+    if content.startswith(BOT_COMMENT_PREFIX):
+        return content
+    return f'{BOT_COMMENT_PREFIX}\n{content}'
+
+
+def _ado_post_json(url, body):
+    """POST a JSON body to an ADO REST endpoint. Returns parsed response or None."""
+    token = get_ado_token()
+    if not token:
+        return None
+    import urllib.request
+    payload = json.dumps(body).encode('utf-8')
+    req = urllib.request.Request(
+        url, data=payload, method='POST',
+        headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        detail = ''
+        try:
+            detail = e.read().decode('utf-8', 'replace')
+        except OSError:
+            pass
+        print(f"{Colors.RED}[X]{Colors.NC} ADO POST failed ({e.code}): {detail}", file=sys.stderr)
+        return None
+
+
+def _post_pr_thread_reply(org, project, repo, pr_id, thread_id, parent_id, content):
+    """Reply to an existing PR thread. Returns the created comment or None."""
+    base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
+    url = f'{base}/{repo}/pullrequests/{pr_id}/threads/{thread_id}/comments?api-version=7.1'
+    return _ado_post_json(url, {
+        'parentCommentId': parent_id,
+        'content': content,
+        'commentType': 1,
+    })
+
+
+def _post_pr_thread_new(org, project, repo, pr_id, content, file_path=None, line=None):
+    """Create a new PR thread. Anchors to file_path/line when given, else PR-level.
+    Returns the created thread or None."""
+    base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
+    url = f'{base}/{repo}/pullrequests/{pr_id}/threads?api-version=7.1'
+    body = {
+        'comments': [{'parentCommentId': 0, 'content': content, 'commentType': 1}],
+        'status': 1,
+    }
+    if file_path:
+        if not file_path.startswith('/'):
+            file_path = '/' + file_path
+        thread_context = {'filePath': file_path}
+        if line:
+            thread_context['rightFileStart'] = {'line': line, 'offset': 1}
+            thread_context['rightFileEnd'] = {'line': line, 'offset': 1}
+        body['threadContext'] = thread_context
+    return _ado_post_json(url, body)
+
+
 def _find_local_repo_path(org, project, repo):
     """Find the local clone path for an ADO repo from config. Returns path or None."""
     try:
@@ -2364,18 +2431,55 @@ def cmd_pr_diff(args):
     return subprocess.run(diff_cmd).returncode
 
 
-def cmd_pr_comments(args):
-    """List comment threads on the PR (active and resolved) from humans and bots.
+def _post_pr_comment(org, project, repo, pr_id, args, message):
+    """Post a PR comment (reply or new thread). Returns process exit code."""
+    reply_to = getattr(args, 'reply', None)
+    file_path = getattr(args, 'file', None)
+    line = getattr(args, 'line', None)
 
-    Shows every comment in each thread. ADO system-activity threads (e.g.
-    "ref was updated" push notices, vote/policy/status-change and "published
-    the PR" notices, identified by the CodeReviewThreadType property) are
-    skipped so only real human and bot review comments are shown. Bot review
-    comments (e.g. PR Assistant) are kept even though their commentType is
-    'system', since they do not carry that property. Prints PR id, thread id,
-    and comment ids so replies can be issued without further lookups
-    (POST .../pullRequests/{prId}/threads/{threadId}/comments with
-    parentCommentId).
+    if reply_to and (file_path or line):
+        print(f"{Colors.RED}[X]{Colors.NC} --reply cannot be combined with --file/--line", file=sys.stderr)
+        return 1
+    if line and not file_path:
+        print(f"{Colors.RED}[X]{Colors.NC} --line requires --file", file=sys.stderr)
+        return 1
+
+    content = _apply_bot_prefix(message)
+
+    if reply_to:
+        result = _post_pr_thread_reply(org, project, repo, pr_id, reply_to, getattr(args, 'parent', 1) or 1, content)
+        if not result:
+            print(f"{Colors.RED}[X]{Colors.NC} Failed to reply to thread {reply_to} on PR !{pr_id}", file=sys.stderr)
+            return 1
+        print(f"{Colors.GREEN}[+]{Colors.NC} Replied to thread {reply_to} on PR !{pr_id} "
+              f"{Colors.GREY}(comment #{result.get('id')}){Colors.NC}")
+        return 0
+
+    result = _post_pr_thread_new(org, project, repo, pr_id, content, file_path, line)
+    if not result:
+        print(f"{Colors.RED}[X]{Colors.NC} Failed to create thread on PR !{pr_id}", file=sys.stderr)
+        return 1
+    loc = f"{file_path}:{line}" if (file_path and line) else (file_path or '(PR-level)')
+    print(f"{Colors.GREEN}[+]{Colors.NC} Created thread {result.get('id')} on PR !{pr_id} "
+          f"{Colors.GREY}({loc}){Colors.NC}")
+    return 0
+
+
+def cmd_pr_comments(args):
+    """List or post comment threads on the PR.
+
+    With no message, lists comment threads (active and resolved) from humans and
+    bots. ADO system-activity threads (e.g. "ref was updated" push notices,
+    vote/policy/status-change and "published the PR" notices, identified by the
+    CodeReviewThreadType property) are skipped so only real review comments are
+    shown. Prints PR id, thread id, and comment ids so replies can be issued
+    without further lookups.
+
+    With a message, posts a comment. Every posted comment is stamped with the
+    ``Code-review-bot:`` prefix. Use ``--reply <threadId>`` to reply to an
+    existing thread (``--parent`` selects the in-thread parent comment, default
+    1), or ``--file``/``--line`` to open a new file-anchored thread. With neither,
+    a new PR-level thread is created.
     """
     ctx = _resolve_pr_context(args)
     if not ctx:
@@ -2385,6 +2489,10 @@ def cmd_pr_comments(args):
     if not pr_id:
         print(f"{Colors.RED}[X]{Colors.NC} No active PR found for this branch", file=sys.stderr)
         return 1
+
+    message = '\n'.join(getattr(args, 'message', None) or []).strip()
+    if message:
+        return _post_pr_comment(org, project, repo, pr_id, args, message)
 
     threads = _fetch_pr_threads(org, project, repo, pr_id)
     if threads is None:
@@ -2536,10 +2644,15 @@ def main():
     pr_diff_p.add_argument('diff_args', nargs=argparse.REMAINDER,
                            help='Extra args for git diff (use -- before flags)')
 
-    pr_comments_p = pr_sub.add_parser('comments', help='List PR comment threads, active and resolved (human and bot)')
+    pr_comments_p = pr_sub.add_parser('comments', help='List or post PR comment threads (human and bot)')
+    pr_comments_p.add_argument('message', nargs='*', help='Comment text to post; omit to list threads')
     pr_comments_p.add_argument('--repo', '-r', help='Path to git repository (default: current directory)')
     pr_comments_p.add_argument('--branch', '-b', help='Source branch (default: current branch)')
     pr_comments_p.add_argument('--id', type=int, help='PR ID (alternative to --repo/--branch)')
+    pr_comments_p.add_argument('--reply', type=int, metavar='THREAD_ID', help='Reply to this existing thread id')
+    pr_comments_p.add_argument('--parent', type=int, default=1, help='In-thread parent comment id (default: 1)')
+    pr_comments_p.add_argument('--file', help='Anchor a new thread to this repo-relative file path')
+    pr_comments_p.add_argument('--line', type=int, help='Anchor a new thread to this line (requires --file)')
 
     # Init command
     subparsers.add_parser('init', help='Bootstrap shell profile ($PROFILE on Windows, .bashrc→zsh on Linux)')

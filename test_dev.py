@@ -15,6 +15,7 @@ import tempfile
 import unittest
 import argparse
 from datetime import datetime, timezone
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -2011,6 +2012,72 @@ class TestCmdPrComments(unittest.TestCase):
         self.assertIn('thread 700', out)
         self.assertIn('Please fix', out)
         self.assertIn('resolved the thread', out)
+
+
+class TestPrCommentPosting(unittest.TestCase):
+
+    def _make_args(self, **kwargs):
+        defaults = dict(repo=None, branch=None, id=None, message=[],
+                        reply=None, parent=1, file=None, line=None)
+        defaults.update(kwargs)
+        return argparse.Namespace(**defaults)
+
+    def test_apply_bot_prefix_adds_marker(self):
+        out = dev._apply_bot_prefix('hello world')
+        self.assertTrue(out.startswith('Code-review-bot:'))
+        self.assertIn('hello world', out)
+
+    def test_apply_bot_prefix_not_duplicated(self):
+        already = 'Code-review-bot:\nalready stamped'
+        self.assertEqual(dev._apply_bot_prefix(already), already)
+
+    @patch('dev._post_pr_thread_new', return_value={'id': 555})
+    @patch('dev._resolve_pr_context')
+    def test_posting_new_pr_level_thread_stamps_prefix(self, mock_ctx, mock_new):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            rc = dev.cmd_pr_comments(self._make_args(message=['some', 'feedback']))
+        self.assertEqual(rc, 0)
+        content = mock_new.call_args[0][4]
+        self.assertTrue(content.startswith('Code-review-bot:'))
+        self.assertIn('some\nfeedback', content)
+
+    @patch('dev._post_pr_thread_reply', return_value={'id': 9})
+    @patch('dev._resolve_pr_context')
+    def test_posting_reply_uses_thread_and_parent(self, mock_ctx, mock_reply):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            rc = dev.cmd_pr_comments(self._make_args(message=['ack'], reply=700, parent=2))
+        self.assertEqual(rc, 0)
+        pos = mock_reply.call_args[0]
+        self.assertEqual(pos[4], 700)  # thread_id
+        self.assertEqual(pos[5], 2)    # parent_id
+        self.assertTrue(pos[6].startswith('Code-review-bot:'))
+
+    @patch('dev._post_pr_thread_new', return_value={'id': 1})
+    @patch('dev._resolve_pr_context')
+    def test_posting_file_anchored_thread(self, mock_ctx, mock_new):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            rc = dev.cmd_pr_comments(self._make_args(message=['bug here'], file='src/a.cs', line=10))
+        self.assertEqual(rc, 0)
+        self.assertEqual(mock_new.call_args[0][5], 'src/a.cs')
+        self.assertEqual(mock_new.call_args[0][6], 10)
+
+    @patch('dev._resolve_pr_context')
+    def test_line_without_file_errors(self, mock_ctx):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
+        rc = dev.cmd_pr_comments(self._make_args(message=['x'], line=5))
+        self.assertEqual(rc, 1)
+
+    @patch('dev._resolve_pr_context')
+    def test_reply_with_file_errors(self, mock_ctx):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
+        rc = dev.cmd_pr_comments(self._make_args(message=['x'], reply=1, file='src/a.cs'))
+        self.assertEqual(rc, 1)
 
 
 if __name__ == '__main__':

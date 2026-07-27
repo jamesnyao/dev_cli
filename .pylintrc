@@ -10,9 +10,11 @@ disable=
     no-else-return,
     subprocess-run-check,
     too-few-public-methods,
+    too-many-arguments,
     too-many-branches,
     too-many-lines,
     too-many-locals,
+    too-many-positional-arguments,
     too-many-return-statements,
     too-many-statements,
     unused-argument
