@@ -2031,6 +2031,22 @@ class TestPrCommentPosting(unittest.TestCase):
         already = 'Code-review-bot:\nalready stamped'
         self.assertEqual(dev._apply_bot_prefix(already), already)
 
+    def test_apply_bot_prefix_not_duplicated_with_leading_space(self):
+        # A message that already carries the marker (even indented) is not re-stamped.
+        out = dev._apply_bot_prefix('  Code-review-bot: inline note')
+        self.assertEqual(out.count('Code-review-bot:'), 1)
+
+    @patch('dev._post_pr_thread_new', return_value={'id': 1})
+    @patch('dev._resolve_pr_context')
+    def test_posting_pre_prefixed_message_not_doubled(self, mock_ctx, mock_new):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            rc = dev.cmd_pr_comments(self._make_args(message=['Code-review-bot:', 'noted']))
+        self.assertEqual(rc, 0)
+        content = mock_new.call_args[0][4]
+        self.assertEqual(content.count('Code-review-bot:'), 1)
+
     @patch('dev._post_pr_thread_new', return_value={'id': 555})
     @patch('dev._resolve_pr_context')
     def test_posting_new_pr_level_thread_stamps_prefix(self, mock_ctx, mock_new):
