@@ -1836,7 +1836,7 @@ def _heal_ado_auth(repo_path):
     if not host:
         return None
     base = f'https://{host}'
-    quiet = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    quiet = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}
     # Remove any stale static header we may have set previously: a forced
     # extraheader always wins over the credential helper and would send an
     # expired token, defeating auto-heal.
@@ -2085,6 +2085,29 @@ def _ado_post_json(url, body):
         return None
 
 
+def _ado_patch_json(url, body):
+    """PATCH a JSON body to an ADO REST endpoint. Returns parsed response or None."""
+    token = get_ado_token()
+    if not token:
+        return None
+    import urllib.request
+    payload = json.dumps(body).encode('utf-8')
+    req = urllib.request.Request(
+        url, data=payload, method='PATCH',
+        headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        detail = ''
+        try:
+            detail = e.read().decode('utf-8', 'replace')
+        except OSError:
+            pass
+        print(f"{Colors.RED}[X]{Colors.NC} ADO PATCH failed ({e.code}): {detail}", file=sys.stderr)
+        return None
+
+
 def _post_pr_thread_reply(org, project, repo, pr_id, thread_id, parent_id, content):
     """Reply to an existing PR thread. Returns the created comment or None."""
     base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
@@ -2114,6 +2137,13 @@ def _post_pr_thread_new(org, project, repo, pr_id, content, file_path=None, line
             thread_context['rightFileEnd'] = {'line': line, 'offset': 1}
         body['threadContext'] = thread_context
     return _ado_post_json(url, body)
+
+
+def _set_pr_thread_status(org, project, repo, pr_id, thread_id, status='fixed'):
+    """Set a PR thread's status (e.g. 'fixed', 'closed'). Returns updated thread or None."""
+    base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
+    url = f'{base}/{repo}/pullrequests/{pr_id}/threads/{thread_id}?api-version=7.1'
+    return _ado_patch_json(url, {'status': status})
 
 
 def _find_local_repo_path(org, project, repo):
@@ -2146,7 +2176,6 @@ def _resolve_pr_context(args):
             print(f"{Colors.RED}[X]{Colors.NC} Failed to get ADO token", file=sys.stderr)
             return None
 
-        import urllib.request
         repos_to_try = []
         seen = set()
         try:
@@ -2376,7 +2405,7 @@ def cmd_pr_diff(args):
     ctx = _resolve_pr_context(args)
     if not ctx:
         return 1
-    org, project, repo, branch, pr_id, az_cmd, git_fn = ctx
+    org, project, repo, branch, pr_id, _az_cmd, git_fn = ctx
 
     repo_path = getattr(args, 'repo', None) or '.'
 
@@ -2432,10 +2461,14 @@ def cmd_pr_diff(args):
 
 
 def _post_pr_comment(org, project, repo, pr_id, args, message):
-    """Post a PR comment (reply or new thread). Returns process exit code."""
+    """Post a PR comment (reply or new thread), optionally resolving the thread.
+
+    Returns process exit code.
+    """
     reply_to = getattr(args, 'reply', None)
     file_path = getattr(args, 'file', None)
     line = getattr(args, 'line', None)
+    resolve = getattr(args, 'resolve', False)
 
     if reply_to and (file_path or line):
         print(f"{Colors.RED}[X]{Colors.NC} --reply cannot be combined with --file/--line", file=sys.stderr)
@@ -2443,25 +2476,36 @@ def _post_pr_comment(org, project, repo, pr_id, args, message):
     if line and not file_path:
         print(f"{Colors.RED}[X]{Colors.NC} --line requires --file", file=sys.stderr)
         return 1
-
-    content = _apply_bot_prefix(message)
-
-    if reply_to:
-        result = _post_pr_thread_reply(org, project, repo, pr_id, reply_to, getattr(args, 'parent', 1) or 1, content)
-        if not result:
-            print(f"{Colors.RED}[X]{Colors.NC} Failed to reply to thread {reply_to} on PR !{pr_id}", file=sys.stderr)
-            return 1
-        print(f"{Colors.GREEN}[+]{Colors.NC} Replied to thread {reply_to} on PR !{pr_id} "
-              f"{Colors.GREY}(comment #{result.get('id')}){Colors.NC}")
-        return 0
-
-    result = _post_pr_thread_new(org, project, repo, pr_id, content, file_path, line)
-    if not result:
-        print(f"{Colors.RED}[X]{Colors.NC} Failed to create thread on PR !{pr_id}", file=sys.stderr)
+    if resolve and not reply_to:
+        print(f"{Colors.RED}[X]{Colors.NC} --resolve requires --reply <threadId>", file=sys.stderr)
         return 1
-    loc = f"{file_path}:{line}" if (file_path and line) else (file_path or '(PR-level)')
-    print(f"{Colors.GREEN}[+]{Colors.NC} Created thread {result.get('id')} on PR !{pr_id} "
-          f"{Colors.GREY}({loc}){Colors.NC}")
+
+    if message:
+        content = _apply_bot_prefix(message)
+        if reply_to:
+            parent = getattr(args, 'parent', 1) or 1
+            result = _post_pr_thread_reply(org, project, repo, pr_id, reply_to, parent, content)
+            if not result:
+                msg = f"Failed to reply to thread {reply_to} on PR !{pr_id}"
+                print(f"{Colors.RED}[X]{Colors.NC} {msg}", file=sys.stderr)
+                return 1
+            print(f"{Colors.GREEN}[+]{Colors.NC} Replied to thread {reply_to} on PR !{pr_id} "
+                  f"{Colors.GREY}(comment #{result.get('id')}){Colors.NC}")
+        else:
+            result = _post_pr_thread_new(org, project, repo, pr_id, content, file_path, line)
+            if not result:
+                print(f"{Colors.RED}[X]{Colors.NC} Failed to create thread on PR !{pr_id}", file=sys.stderr)
+                return 1
+            loc = f"{file_path}:{line}" if (file_path and line) else (file_path or '(PR-level)')
+            print(f"{Colors.GREEN}[+]{Colors.NC} Created thread {result.get('id')} on PR !{pr_id} "
+                  f"{Colors.GREY}({loc}){Colors.NC}")
+
+    if resolve:
+        if not _set_pr_thread_status(org, project, repo, pr_id, reply_to, 'fixed'):
+            print(f"{Colors.RED}[X]{Colors.NC} Failed to resolve thread {reply_to} on PR !{pr_id}", file=sys.stderr)
+            return 1
+        print(f"{Colors.GREEN}[+]{Colors.NC} Resolved thread {reply_to} on PR !{pr_id} "
+              f"{Colors.GREY}(status: fixed){Colors.NC}")
     return 0
 
 
@@ -2480,6 +2524,10 @@ def cmd_pr_comments(args):
     existing thread (``--parent`` selects the in-thread parent comment, default
     1), or ``--file``/``--line`` to open a new file-anchored thread. With neither,
     a new PR-level thread is created.
+
+    Use ``--resolve`` (requires ``--reply``) to mark the thread ``fixed`` after
+    replying. ``--resolve`` may be used without a message to resolve a thread
+    without posting a reply.
     """
     ctx = _resolve_pr_context(args)
     if not ctx:
@@ -2491,7 +2539,7 @@ def cmd_pr_comments(args):
         return 1
 
     message = '\n'.join(getattr(args, 'message', None) or []).strip()
-    if message:
+    if message or getattr(args, 'resolve', False):
         return _post_pr_comment(org, project, repo, pr_id, args, message)
 
     threads = _fetch_pr_threads(org, project, repo, pr_id)
@@ -2653,6 +2701,8 @@ def main():
     pr_comments_p.add_argument('--parent', type=int, default=1, help='In-thread parent comment id (default: 1)')
     pr_comments_p.add_argument('--file', help='Anchor a new thread to this repo-relative file path')
     pr_comments_p.add_argument('--line', type=int, help='Anchor a new thread to this line (requires --file)')
+    pr_comments_p.add_argument('--resolve', action='store_true',
+                               help='Mark the replied-to thread as fixed (requires --reply)')
 
     # Init command
     subparsers.add_parser('init', help='Bootstrap shell profile ($PROFILE on Windows, .bashrc→zsh on Linux)')

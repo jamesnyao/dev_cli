@@ -2018,7 +2018,7 @@ class TestPrCommentPosting(unittest.TestCase):
 
     def _make_args(self, **kwargs):
         defaults = dict(repo=None, branch=None, id=None, message=[],
-                        reply=None, parent=1, file=None, line=None)
+                        reply=None, parent=1, file=None, line=None, resolve=False)
         defaults.update(kwargs)
         return argparse.Namespace(**defaults)
 
@@ -2093,6 +2093,37 @@ class TestPrCommentPosting(unittest.TestCase):
     def test_reply_with_file_errors(self, mock_ctx):
         mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
         rc = dev.cmd_pr_comments(self._make_args(message=['x'], reply=1, file='src/a.cs'))
+        self.assertEqual(rc, 1)
+
+    @patch('dev._set_pr_thread_status', return_value={'id': 700})
+    @patch('dev._post_pr_thread_reply', return_value={'id': 9})
+    @patch('dev._resolve_pr_context')
+    def test_reply_with_resolve_marks_thread_fixed(self, mock_ctx, mock_reply, mock_status):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            rc = dev.cmd_pr_comments(self._make_args(message=['done'], reply=700, resolve=True))
+        self.assertEqual(rc, 0)
+        mock_reply.assert_called_once()
+        self.assertEqual(mock_status.call_args[0][4], 700)   # thread_id
+        self.assertEqual(mock_status.call_args[0][5], 'fixed')
+
+    @patch('dev._set_pr_thread_status', return_value={'id': 700})
+    @patch('dev._post_pr_thread_reply')
+    @patch('dev._resolve_pr_context')
+    def test_resolve_without_message_skips_reply(self, mock_ctx, mock_reply, mock_status):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            rc = dev.cmd_pr_comments(self._make_args(reply=700, resolve=True))
+        self.assertEqual(rc, 0)
+        mock_reply.assert_not_called()
+        self.assertEqual(mock_status.call_args[0][4], 700)
+
+    @patch('dev._resolve_pr_context')
+    def test_resolve_without_reply_errors(self, mock_ctx):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
+        rc = dev.cmd_pr_comments(self._make_args(message=['x'], resolve=True))
         self.assertEqual(rc, 1)
 
 
