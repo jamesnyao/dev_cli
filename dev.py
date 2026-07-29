@@ -8,11 +8,14 @@ import base64
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -96,7 +99,6 @@ GITHUB_SSH_HOSTS = {
 
 def normalize_github_url(url):
     """Convert GitHub URLs to SSH format with correct host alias."""
-    import re
     https_match = re.match(r'https://github\.com/([^/]+)/(.+?)(?:\.git)?$', url)
     if https_match:
         org, repo = https_match.groups()
@@ -111,12 +113,10 @@ def normalize_github_url(url):
 
 def _strip_url_credentials(url):
     """Strip embedded credentials from a URL for comparison."""
-    import re
     return re.sub(r'https://[^@]+@', 'https://', url)
 
 def _normalize_url_for_comparison(url):
     """Normalize a URL for comparison: strip credentials and resolve GitHub SSH aliases."""
-    import re
     url = _strip_url_credentials(url)
     # Normalize github.com-* aliases back to github.com
     url = re.sub(r'git@github\.com-[^:]+:', 'git@github.com:', url)
@@ -1087,7 +1087,6 @@ def cmd_repo_sync(args):
 
 def has_real_conflict_markers(content):
     """Check for conflict markers outside code blocks and inline code."""
-    import re
     lines = content.split('\n')
     in_code_block = False
 
@@ -1313,28 +1312,11 @@ def cmd_repo_root(args):
     return 0
 
 
-def _parse_ado_remote(remote_url):
-    """Parse an ADO remote URL into (org, project, repo) or None."""
-    import re
-    # https://dev.azure.com/{org}/{project}/_git/{repo}
-    # https://{org}@dev.azure.com/{org}/{project}/_git/{repo}
-    m = re.match(r'https://(?:[^@]+@)?dev\.azure\.com/([^/]+)/([^/]+)/_git/(.+?)(?:\.git)?$', remote_url)
-    if m:
-        return m.group(1), m.group(2), m.group(3)
-    # https://{org}.visualstudio.com/{collection}/{project}/_git/{repo}
-    m = re.match(r'https://([^.]+)\.visualstudio\.com/[^/]+/([^/]+)/_git/(.+?)(?:\.git)?$', remote_url)
-    if m:
-        return m.group(1), m.group(2), m.group(3)
-    return None
-
-
 def _fetch_ado_prs_for_branches(ado_info, branch_names, creator_prefix=None):
     """Fetch ADO PRs for a list of branch names. Returns {branch_name: [pr_dict, ...]}.
 
     If creator_prefix is given, only PRs whose creator uniqueName starts with it are included.
     """
-    import urllib.request
-    import urllib.error
 
     org, project, repo = ado_info
     token = get_ado_token()
@@ -1369,8 +1351,6 @@ def _fetch_ado_prs_for_branches(ado_info, branch_names, creator_prefix=None):
 
 def _delete_ado_branch(ado_info, branch_name, repo_path):
     """Delete a remote branch via the ADO refs API. Returns (ok, error_msg)."""
-    import urllib.request
-    import urllib.error
 
     org, project, repo = ado_info
     token = get_ado_token()
@@ -1411,8 +1391,6 @@ def _delete_ado_branch(ado_info, branch_name, repo_path):
 
 def _abandon_ado_pr(ado_info, pr_id):
     """Abandon an active ADO pull request. Returns True on success."""
-    import urllib.request
-    import urllib.error
 
     org, project, repo = ado_info
     token = get_ado_token()
@@ -1445,8 +1423,6 @@ def _should_skip_branch(name):
 
 def _scan_old_branches_ado(ado_info, creator, cutoff):
     """Scan an ADO repo for old branches owned by creator. Returns list of (branch_ref, commit_date, age_days)."""
-    import urllib.request
-    import urllib.error
 
     org, project, repo = ado_info
     token = get_ado_token()
@@ -1583,7 +1559,6 @@ def _print_old_branches(repo_path, old_branches, creator_prefix=None):
 
 def cmd_repo_old(args):
     """List or delete old branches you pushed."""
-    from datetime import timedelta
 
     prefix = args.prefix or 'user/developer/'
     creator_email = 'developer@example.com'
@@ -1875,7 +1850,6 @@ def cmd_ado_clear_pat(args):
 
 def _ado_host_from_url(url):
     """Return the ADO host from a git remote URL, or None if not an ADO host."""
-    import re
     if not url:
         return None
     url = _strip_url_credentials(url)
@@ -2089,7 +2063,6 @@ def _parse_ado_remote(url):
       git@ssh.dev.azure.com:v3/{org}/{project}/{repo}
     Returns (org, project, repo) or None.
     """
-    import re
     url = re.sub(r'\.git$', '', url)
     m = re.match(r'https://(?:[^@]+@)?dev\.azure\.com/([^/]+)/([^/]+)/_git/(.+)', url)
     if m:
@@ -2108,7 +2081,6 @@ def _fetch_pr(org, project, repo, pr_id):
     token = get_ado_token()
     if not token:
         return None
-    import urllib.request
     base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
     url = f'{base}/{repo}/pullrequests/{pr_id}?api-version=7.1'
     req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
@@ -2124,7 +2096,6 @@ def _fetch_pr_threads(org, project, repo, pr_id):
     token = get_ado_token()
     if not token:
         return None
-    import urllib.request
     base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
     url = f'{base}/{repo}/pullrequests/{pr_id}/threads?api-version=7.1'
     req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
@@ -2153,7 +2124,6 @@ def _ado_post_json(url, body):
     token = get_ado_token()
     if not token:
         return None
-    import urllib.request
     payload = json.dumps(body).encode('utf-8')
     req = urllib.request.Request(
         url, data=payload, method='POST',
@@ -2176,7 +2146,6 @@ def _ado_patch_json(url, body):
     token = get_ado_token()
     if not token:
         return None
-    import urllib.request
     payload = json.dumps(body).encode('utf-8')
     req = urllib.request.Request(
         url, data=payload, method='PATCH',
