@@ -2513,7 +2513,8 @@ def cmd_pr_comments(args):
     """List or post comment threads on the PR.
 
     With no message, lists comment threads (active and resolved) from humans and
-    bots. ADO system-activity threads (e.g. "ref was updated" push notices,
+    bots. Pass ``--active`` to list only active (unresolved) threads. ADO
+    system-activity threads (e.g. "ref was updated" push notices,
     vote/policy/status-change and "published the PR" notices, identified by the
     CodeReviewThreadType property) are skipped so only real review comments are
     shown. Prints PR id, thread id, and comment ids so replies can be issued
@@ -2551,6 +2552,7 @@ def cmd_pr_comments(args):
     print()
 
     resolved_statuses = {'fixed', 'wontFix', 'closed', 'byDesign'}
+    active_only = getattr(args, 'active', False)
     printed = 0
     for thread in threads:
         if thread.get('isDeleted'):
@@ -2567,6 +2569,11 @@ def cmd_pr_comments(args):
         if 'CodeReviewThreadType' in (thread.get('properties') or {}):
             continue
 
+        status = thread.get('status') or 'open'
+        # With --active, list only unresolved threads.
+        if active_only and status in resolved_statuses:
+            continue
+
         tc = thread.get('threadContext') or {}
         file_path = tc.get('filePath')
         if file_path:
@@ -2577,7 +2584,6 @@ def cmd_pr_comments(args):
             loc = '(PR-level)'
 
         thread_id = thread.get('id')
-        status = thread.get('status') or 'open'
         status_label = f"{status}, resolved" if status in resolved_statuses else status
         print(f"{Colors.CYAN}[>]{Colors.NC} {loc}  "
               f"{Colors.GREY}thread {thread_id} ({status_label}){Colors.NC}")
@@ -2603,7 +2609,10 @@ def cmd_pr_comments(args):
         printed += 1
 
     if printed == 0:
-        print(f"{Colors.YELLOW}[!]{Colors.NC} PR !{pr_id} has no human or bot comment threads")
+        if active_only:
+            print(f"{Colors.YELLOW}[!]{Colors.NC} PR !{pr_id} has no active (unresolved) comment threads")
+        else:
+            print(f"{Colors.YELLOW}[!]{Colors.NC} PR !{pr_id} has no human or bot comment threads")
 
     return 0
 
@@ -2703,6 +2712,8 @@ def main():
     pr_comments_p.add_argument('--line', type=int, help='Anchor a new thread to this line (requires --file)')
     pr_comments_p.add_argument('--resolve', action='store_true',
                                help='Mark the replied-to thread as fixed (requires --reply)')
+    pr_comments_p.add_argument('--active', action='store_true',
+                               help='When listing, show only active (unresolved) threads')
 
     # Init command
     subparsers.add_parser('init', help='Bootstrap shell profile ($PROFILE on Windows, .bashrc→zsh on Linux)')

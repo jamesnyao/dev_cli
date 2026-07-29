@@ -1952,6 +1952,79 @@ class TestCmdPrComments(unittest.TestCase):
 
     @patch('dev._fetch_pr_threads')
     @patch('dev._resolve_pr_context')
+    def test_active_flag_hides_resolved_threads(self, mock_ctx, mock_threads):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        mock_threads.return_value = [
+            {
+                'id': 100,
+                'status': 'active',
+                'comments': [{
+                    'id': 1, 'commentType': 'text',
+                    'author': {'displayName': 'Alice'},
+                    'publishedDate': '2026-06-04T12:00:00Z',
+                    'content': 'still open',
+                }],
+            },
+            {
+                'id': 200,
+                'status': 'fixed',
+                'comments': [{
+                    'id': 2, 'commentType': 'text',
+                    'author': {'displayName': 'Bob'},
+                    'publishedDate': '2026-06-04T13:00:00Z',
+                    'content': 'already fixed',
+                }],
+            },
+            {
+                'id': 500,
+                'status': 'byDesign',
+                'comments': [{
+                    'id': 3, 'commentType': 'text',
+                    'author': {'displayName': 'Carol'},
+                    'publishedDate': '2026-06-04T14:00:00Z',
+                    'content': 'by design',
+                }],
+            },
+        ]
+        from io import StringIO
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            rc = dev.cmd_pr_comments(self._make_args(active=True))
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        # Active thread is shown
+        self.assertIn('thread 100', out)
+        self.assertIn('still open', out)
+        # Resolved threads are hidden with --active
+        self.assertNotIn('thread 200', out)
+        self.assertNotIn('already fixed', out)
+        self.assertNotIn('thread 500', out)
+        self.assertNotIn('by design', out)
+
+    @patch('dev._fetch_pr_threads')
+    @patch('dev._resolve_pr_context')
+    def test_active_flag_no_active_threads_message(self, mock_ctx, mock_threads):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        mock_threads.return_value = [{
+            'id': 200,
+            'status': 'fixed',
+            'comments': [{
+                'id': 2, 'commentType': 'text',
+                'author': {'displayName': 'Bob'},
+                'publishedDate': '2026-06-04T13:00:00Z',
+                'content': 'already fixed',
+            }],
+        }]
+        from io import StringIO
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            rc = dev.cmd_pr_comments(self._make_args(active=True))
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn('no active (unresolved) comment threads', out)
+
+    @patch('dev._fetch_pr_threads')
+    @patch('dev._resolve_pr_context')
     def test_pr_level_thread_no_file(self, mock_ctx, mock_threads):
         mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
         mock_threads.return_value = [{
