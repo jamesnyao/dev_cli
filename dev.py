@@ -28,19 +28,77 @@ for _stream in (sys.stdout, sys.stderr):
         except Exception:
             pass
 
-# Colors (ANSI escape codes, disabled on Windows cmd)
+__version__ = '2.0.0'
+
+
+# Colors (ANSI escape codes). The enabled state is resolved once at startup from
+# NO_COLOR/FORCE_COLOR, the host console, and whether stdout is a TTY, and can be
+# forced off at runtime via `--no-color`.
 class Colors:
+    RED = YELLOW = GREEN = BLUE = CYAN = PURPLE = GREY = NC = ''
+    _PALETTE = {
+        'RED': '\033[0;31m',
+        'YELLOW': '\033[1;33m',
+        'GREEN': '\033[0;32m',
+        'BLUE': '\033[0;34m',
+        'CYAN': '\033[0;36m',
+        'PURPLE': '\033[0;35m',
+        'GREY': '\033[0;90m',
+        'NC': '\033[0m',
+    }
+
+    @classmethod
+    def configure(cls, enabled):
+        """Enable or disable ANSI color output across every helper."""
+        for name, code in cls._PALETTE.items():
+            setattr(cls, name, code if enabled else '')
+
+
+def _color_default_enabled():
+    """Decide whether ANSI colors are on by default for this process."""
+    if os.environ.get('NO_COLOR') is not None:
+        return False
+    if os.environ.get('FORCE_COLOR'):
+        return True
+    # Legacy Windows consoles (cmd.exe / PowerShell 5) lack VT processing unless
+    # running under Windows Terminal.
     if sys.platform == 'win32' and 'WT_SESSION' not in os.environ:
-        RED = YELLOW = GREEN = BLUE = CYAN = PURPLE = GREY = NC = ''
-    else:
-        RED = '\033[0;31m'
-        YELLOW = '\033[1;33m'
-        GREEN = '\033[0;32m'
-        BLUE = '\033[0;34m'
-        CYAN = '\033[0;36m'
-        PURPLE = '\033[0;35m'
-        GREY = '\033[0;90m'
-        NC = '\033[0m'
+        return False
+    # Suppress escape codes when stdout is redirected or piped.
+    return bool(getattr(sys.stdout, 'isatty', lambda: False)())
+
+
+Colors.configure(_color_default_enabled())
+
+
+def _emit(tag, color, msg, stream):
+    """Print a `[TAG] message` status line with a colored marker."""
+    print(f"{color}[{tag}]{Colors.NC} {msg}", file=stream)
+
+
+def emit_ok(msg):
+    """Report a successful step to stdout ([OK])."""
+    _emit('OK', Colors.GREEN, msg, sys.stdout)
+
+
+def emit_info(msg):
+    """Report neutral progress to stdout ([INFO])."""
+    _emit('INFO', Colors.BLUE, msg, sys.stdout)
+
+
+def emit_skip(msg):
+    """Report a skipped step to stdout ([SKIP])."""
+    _emit('SKIP', Colors.GREY, msg, sys.stdout)
+
+
+def emit_warn(msg):
+    """Report a non-fatal warning to stderr ([WARN])."""
+    _emit('WARN', Colors.YELLOW, msg, sys.stderr)
+
+
+def emit_error(msg):
+    """Report a failure to stderr ([X])."""
+    _emit('X', Colors.RED, msg, sys.stderr)
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 CONFIG_DIR = SCRIPT_DIR / 'repoconfig'
@@ -49,6 +107,7 @@ ADO_PAT_FILE = CONFIG_DIR / 'ado_pat.txt'
 ADO_TOKEN_CACHE_FILE = CONFIG_DIR / 'ado_token_cache.json'
 ADO_TOKEN_CACHE_SECONDS = 2400  # 40 minute fallback when JWT exp can't be parsed
 ADO_TOKEN_EXPIRY_BUFFER = 60  # Treat token as expired this many seconds before its real exp
+ADO_API_VERSION = '7.1'  # ADO REST API version used for all requests
 RCFILES_DIR = CONFIG_DIR / 'rcfiles'
 
 def get_os_type():
@@ -425,7 +484,7 @@ def check_stale_branch(repo_path, name, slow_sync=False, gclient_sync=False):
     use_shell = sys.platform == 'win32'
     for op in ops:
         subprocess.run(op['argv'], cwd=op.get('cwd'), check=False, shell=use_shell)
-    print(f"{Colors.GREEN}[OK] Switched to {default}{Colors.NC}")
+    emit_ok(f"Switched to {default}")
 
 
 def _sync_repo_latest(repo_path):
@@ -554,7 +613,7 @@ def _add_tracked_file(file_path):
     try:
         rel_path = file_path.relative_to(base_path)
     except ValueError:
-        print(f"{Colors.RED}[X]{Colors.NC} Path must be under workspace root: {base_path}")
+        emit_error(f"Path must be under workspace root: {base_path}")
         return 1
 
     rel_str = str(rel_path).replace('\\', '/')
@@ -600,7 +659,7 @@ def cmd_repo_add(args):
     display_path = Path(os.path.abspath(args.path))
 
     if not target_path.exists():
-        print(f"{Colors.RED}[X]{Colors.NC} Path does not exist: {target_path}")
+        emit_error(f"Path does not exist: {target_path}")
         return 1
 
     if target_path.is_file():
@@ -613,7 +672,7 @@ def cmd_repo_add(args):
 
     remote_url = get_remote_url(target_path, normalize=True)
     if not remote_url:
-        print(f"{Colors.YELLOW}[WARN]{Colors.NC} No 'origin' remote found")
+        emit_warn("No 'origin' remote found")
 
     config = load_config()
     base_path = get_base_path()
@@ -669,7 +728,7 @@ def cmd_repo_remove(args):
         print(f"{Colors.GREEN}Removed file: {name}{Colors.NC}")
         return 0
 
-    print(f"{Colors.RED}[X]{Colors.NC} '{name}' is not tracked")
+    emit_error(f"'{name}' is not tracked")
     return 1
 
 def cmd_repo_delete(args):
@@ -695,12 +754,12 @@ def cmd_repo_delete(args):
     rcfile = RCFILES_DIR / name
 
     if workspace_file.is_dir() or rcfile.is_dir():
-        print(f"{Colors.RED}[X]{Colors.NC} '{name}' is a directory; use 'dev repo remove' to untrack it")
+        emit_error(f"'{name}' is a directory; use 'dev repo remove' to untrack it")
         return 1
 
     tracked = {f['path'] for f in _get_all_tracked_files()}
     if name not in tracked:
-        print(f"{Colors.RED}[X]{Colors.NC} '{name}' is not a tracked file")
+        emit_error(f"'{name}' is not a tracked file")
         return 1
 
     removed = []
@@ -835,14 +894,14 @@ def sync_rcfiles_push(pulled=False):
         if success:
             log_range = f'origin/{default_branch}~{ahead}..origin/{default_branch}'
             _, log = run_git(SCRIPT_DIR, 'log', log_range, '--oneline')
-            print(f"{Colors.GREEN}[OK]{Colors.NC} rcfiles pushed ({ahead} commits)")
+            emit_ok(f"rcfiles pushed ({ahead} commits)")
             for line in log.strip().splitlines():
                 print(f"     {line}")
         else:
-            print(f"{Colors.RED}[X]{Colors.NC} Failed to push rcfiles: {output}")
+            emit_error(f"Failed to push rcfiles: {output}")
     else:
         if not pulled:
-            print(f"{Colors.GREEN}[OK]{Colors.NC} rcfiles up to date")
+            emit_ok("rcfiles up to date")
 
 
 def _is_dir_link(path):
@@ -918,7 +977,7 @@ def _self_update():
         success, _ = run_git(SCRIPT_DIR, 'rebase', f'origin/{default_branch}')
         if not success:
             run_git(SCRIPT_DIR, 'rebase', '--abort')
-            print(f"{Colors.RED}[X]{Colors.NC} Rebase conflict in dev_scripts. Please resolve manually.")
+            emit_error("Rebase conflict in dev_scripts. Please resolve manually.")
             return
 
     _, new_hash = run_git(SCRIPT_DIR, 'rev-parse', 'HEAD')
@@ -946,7 +1005,7 @@ def cmd_repo_sync(args):
     pulled_log = os.environ.pop('_DEV_PULLED_RCFILES', None)
     if pulled_log:
         pulled = True
-        print(f"{Colors.GREEN}[OK]{Colors.NC} rcfiles updated from remote:")
+        emit_ok("rcfiles updated from remote:")
         for line in pulled_log.strip().splitlines():
             print(f"     {Colors.YELLOW}{line}{Colors.NC}")
     sync_rcfiles_push(pulled=pulled)
@@ -1328,7 +1387,7 @@ def _fetch_ado_prs_for_branches(ado_info, branch_names, creator_prefix=None):
         ref = f'refs/heads/{branch_name}'
         url = (f'https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo}'
                f'/pullrequests?searchCriteria.sourceRefName={ref}'
-               f'&searchCriteria.status=all&api-version=7.0')
+               f'&searchCriteria.status=all&api-version={ADO_API_VERSION}')
         req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
@@ -1366,7 +1425,7 @@ def _delete_ado_branch(ado_info, branch_name, repo_path):
     old_object_id = result.stdout.strip()
 
     url = (f'https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo}'
-           f'/refs?api-version=7.0')
+           f'/refs?api-version={ADO_API_VERSION}')
     body = json.dumps([{
         'name': f'refs/heads/{branch_name}',
         'oldObjectId': old_object_id,
@@ -1398,7 +1457,7 @@ def _abandon_ado_pr(ado_info, pr_id):
         return False
 
     url = (f'https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo}'
-           f'/pullrequests/{pr_id}?api-version=7.0')
+           f'/pullrequests/{pr_id}?api-version={ADO_API_VERSION}')
     body = json.dumps({'status': 'abandoned'}).encode('utf-8')
     req = urllib.request.Request(url, data=body, method='PATCH',
                                 headers={'Authorization': f'Bearer {token}',
@@ -1425,34 +1484,25 @@ def _scan_old_branches_ado(ado_info, creator, cutoff):
     """Scan an ADO repo for old branches owned by creator. Returns list of (branch_ref, commit_date, age_days)."""
 
     org, project, repo = ado_info
-    token = get_ado_token()
-    if not token:
-        return []
 
     # stats/branches returns commit dates inline — single API call
     url = (f'https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo}'
-           f'/stats/branches?api-version=7.1')
-    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read())
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
+           f'/stats/branches?api-version={ADO_API_VERSION}')
+    data = _ado_get_json(url, timeout=30)
+    if data is None:
         return []
 
     # Also get refs to check creator (stats API doesn't include pusher)
     refs_url = (f'https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo}'
-                f'/refs?filter=heads/&api-version=7.1')
-    refs_req = urllib.request.Request(refs_url, headers={'Authorization': f'Bearer {token}'})
-    creator_branches = set()
-    try:
-        with urllib.request.urlopen(refs_req, timeout=30) as resp:
-            refs_data = json.loads(resp.read())
-            for ref in refs_data.get('value', []):
-                ref_creator = ref.get('creator', {}).get('uniqueName', '')
-                if creator in ref_creator:
-                    creator_branches.add(ref['name'].replace('refs/heads/', ''))
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
+                f'/refs?filter=heads/&api-version={ADO_API_VERSION}')
+    refs_data = _ado_get_json(refs_url, timeout=30)
+    if refs_data is None:
         return []
+    creator_branches = set()
+    for ref in refs_data.get('value', []):
+        ref_creator = ref.get('creator', {}).get('uniqueName', '')
+        if creator in ref_creator:
+            creator_branches.add(ref['name'].replace('refs/heads/', ''))
 
     old_branches = []
     for branch_stat in data.get('value', []):
@@ -1712,7 +1762,7 @@ def _init_windows():
         ['powershell', '-NoProfile', '-Command', '$PROFILE'],
         capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"{Colors.RED}[X]{Colors.NC} Could not determine $PROFILE path")
+        emit_error("Could not determine $PROFILE path")
         return 1
 
     profile_path = Path(result.stdout.strip())
@@ -1720,12 +1770,12 @@ def _init_windows():
     if profile_path.exists():
         content = profile_path.read_text(encoding='utf-8')
         if '.psrc.ps1' in content:
-            print(f"{Colors.GREEN}[OK]{Colors.NC} $PROFILE already sources .psrc.ps1")
+            emit_ok("$PROFILE already sources .psrc.ps1")
             return 0
 
     profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(PSRC_CONTENT, encoding='utf-8')
-    print(f"{Colors.GREEN}[OK]{Colors.NC} Wrote $PROFILE -> .psrc.ps1 ({profile_path})")
+    emit_ok(f"Wrote $PROFILE -> .psrc.ps1 ({profile_path})")
     return 0
 
 
@@ -1734,7 +1784,7 @@ def _init_unix():
     shell = os.environ.get('SHELL', '')
 
     if 'zsh' in shell:
-        print(f"{Colors.GREEN}[OK]{Colors.NC} zsh is the default shell")
+        emit_ok("zsh is the default shell")
         return 0
 
     if get_os_type() == 'linux' and not shutil.which('zsh'):
@@ -1743,24 +1793,24 @@ def _init_unix():
             ['sudo', 'apt-get', 'install', '-y', 'zsh'],
             capture_output=True, text=True)
         if result.returncode != 0:
-            print(f"{Colors.RED}[X]{Colors.NC} Failed to install zsh: {result.stderr}")
+            emit_error(f"Failed to install zsh: {result.stderr}")
             return 1
-        print(f"{Colors.GREEN}[OK]{Colors.NC} zsh installed")
+        emit_ok("zsh installed")
 
     bashrc = Path.home() / '.bashrc'
     if not bashrc.exists():
         bashrc.write_text(f"{BASHRC_SOURCE_LINE}\n", encoding='utf-8')
-        print(f"{Colors.GREEN}[OK]{Colors.NC} Created .bashrc with zsh exec")
+        emit_ok("Created .bashrc with zsh exec")
         return 0
 
     content = bashrc.read_text(encoding='utf-8')
     if BASHRC_SOURCE_LINE in content:
-        print(f"{Colors.GREEN}[OK]{Colors.NC} .bashrc already execs into zsh")
+        emit_ok(".bashrc already execs into zsh")
         return 0
 
     with open(bashrc, 'a', encoding='utf-8') as f:
         f.write(f"\n{BASHRC_SOURCE_LINE}\n")
-    print(f"{Colors.GREEN}[OK]{Colors.NC} Added zsh exec to .bashrc")
+    emit_ok("Added zsh exec to .bashrc")
     return 0
 
 
@@ -1775,7 +1825,7 @@ def cmd_test(args):
     """Run dev.py unit tests"""
     test_file = SCRIPT_DIR / 'test_dev.py'
     if not test_file.exists():
-        print(f"{Colors.RED}[X]{Colors.NC} test_dev.py not found")
+        emit_error("test_dev.py not found")
         return 1
 
     print(f"{Colors.BLUE}Running tests...{Colors.NC}", flush=True)
@@ -1811,11 +1861,11 @@ def cmd_ado_set_pat(args):
             import getpass
             pat = getpass.getpass("Enter your Azure DevOps PAT: ").strip()
         except EOFError:
-            print(f"{Colors.RED}[X]{Colors.NC} No PAT provided")
+            emit_error("No PAT provided")
             return 1
 
     if not pat:
-        print(f"{Colors.RED}[X]{Colors.NC} PAT cannot be empty")
+        emit_error("PAT cannot be empty")
         return 1
 
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -1823,7 +1873,7 @@ def cmd_ado_set_pat(args):
     if sys.platform != 'win32':
         os.chmod(ADO_PAT_FILE, 0o600)
 
-    print(f"{Colors.GREEN}[OK] ADO PAT saved to {ADO_PAT_FILE}{Colors.NC}")
+    emit_ok(f"ADO PAT saved to {ADO_PAT_FILE}")
     print(f"     {Colors.YELLOW}Note: Keep this file secure and do not commit it.{Colors.NC}")
     return 0
 
@@ -1832,7 +1882,7 @@ def cmd_ado_show_pat(args):
     pat = get_ado_pat()
     if pat:
         masked = pat[:4] + '*' * (len(pat) - 8) + pat[-4:] if len(pat) > 8 else '****'
-        print(f"{Colors.GREEN}[OK] ADO PAT is configured: {masked}{Colors.NC}")
+        emit_ok(f"ADO PAT is configured: {masked}")
         print(f"     Stored at: {ADO_PAT_FILE}")
     else:
         print(f"{Colors.YELLOW}ADO PAT is not configured{Colors.NC}")
@@ -1843,7 +1893,7 @@ def cmd_ado_clear_pat(args):
     """Clear the stored ADO PAT."""
     if ADO_PAT_FILE.exists():
         ADO_PAT_FILE.unlink()
-        print(f"{Colors.GREEN}[OK] ADO PAT cleared{Colors.NC}")
+        emit_ok("ADO PAT cleared")
     else:
         print(f"{Colors.YELLOW}No ADO PAT was configured{Colors.NC}")
     return 0
@@ -1927,13 +1977,13 @@ def cmd_ado_git(args):
 
     token = get_ado_token()
     if not token:
-        print(f"{Colors.RED}[X]{Colors.NC} Failed to get ADO token. Run: az login")
+        emit_error("Failed to get ADO token. Run: az login")
         return 1
 
     host = _heal_ado_auth(Path(os.getcwd()).resolve())
     if host:
-        print(f"{Colors.GREEN}[ok]{Colors.NC} Installed auto-refreshing ADO auth "
-              f"for {host}; gclient/toolchain_tools git will reuse it and re-heal on expiry")
+        emit_ok(f"Installed auto-refreshing ADO auth for {host}; "
+                "gclient/toolchain_tools git will reuse it and re-heal on expiry")
 
     result = subprocess.run(
         ['git', '-c', f'http.extraheader=Authorization: Bearer {token}'] + git_args)
@@ -2046,7 +2096,7 @@ def cmd_ado_token(args):
     """Get an ADO access token (cached)."""
     token = get_ado_token()
     if not token:
-        print(f"{Colors.RED}[X]{Colors.NC} Failed to get ADO token. Run: az login", file=sys.stderr)
+        emit_error("Failed to get ADO token. Run: az login")
         return 1
     print(token)
     return 0
@@ -2076,34 +2126,34 @@ def _parse_ado_remote(url):
     return None
 
 
-def _fetch_pr(org, project, repo, pr_id):
-    """Fetch PR details from ADO REST API. Returns the PR dict or None."""
+def _ado_get_json(url, timeout=None):
+    """GET JSON from an ADO REST endpoint. Returns the parsed body or None.
+
+    Handles auth, network, and decode failures uniformly so callers can treat a
+    None result as "unavailable" without repeating boilerplate.
+    """
     token = get_ado_token()
     if not token:
         return None
-    base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
-    url = f'{base}/{repo}/pullrequests/{pr_id}?api-version=7.1'
     req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
-    except urllib.error.HTTPError:
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
         return None
+
+
+def _fetch_pr(org, project, repo, pr_id):
+    """Fetch PR details from ADO REST API. Returns the PR dict or None."""
+    base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
+    return _ado_get_json(f'{base}/{repo}/pullrequests/{pr_id}?api-version={ADO_API_VERSION}')
 
 
 def _fetch_pr_threads(org, project, repo, pr_id):
     """Fetch PR comment threads from ADO REST API. Returns list of threads or None."""
-    token = get_ado_token()
-    if not token:
-        return None
     base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
-    url = f'{base}/{repo}/pullrequests/{pr_id}/threads?api-version=7.1'
-    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
-    try:
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read()).get('value', [])
-    except urllib.error.HTTPError:
-        return None
+    data = _ado_get_json(f'{base}/{repo}/pullrequests/{pr_id}/threads?api-version={ADO_API_VERSION}')
+    return None if data is None else data.get('value', [])
 
 
 # Every comment posted via `dev pr comments` is stamped with this marker so it is
@@ -2137,7 +2187,7 @@ def _ado_post_json(url, body):
             detail = e.read().decode('utf-8', 'replace')
         except OSError:
             pass
-        print(f"{Colors.RED}[X]{Colors.NC} ADO POST failed ({e.code}): {detail}", file=sys.stderr)
+        emit_error(f"ADO POST failed ({e.code}): {detail}")
         return None
 
 
@@ -2159,14 +2209,14 @@ def _ado_patch_json(url, body):
             detail = e.read().decode('utf-8', 'replace')
         except OSError:
             pass
-        print(f"{Colors.RED}[X]{Colors.NC} ADO PATCH failed ({e.code}): {detail}", file=sys.stderr)
+        emit_error(f"ADO PATCH failed ({e.code}): {detail}")
         return None
 
 
 def _post_pr_thread_reply(org, project, repo, pr_id, thread_id, parent_id, content):
     """Reply to an existing PR thread. Returns the created comment or None."""
     base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
-    url = f'{base}/{repo}/pullrequests/{pr_id}/threads/{thread_id}/comments?api-version=7.1'
+    url = f'{base}/{repo}/pullrequests/{pr_id}/threads/{thread_id}/comments?api-version={ADO_API_VERSION}'
     return _ado_post_json(url, {
         'parentCommentId': parent_id,
         'content': content,
@@ -2178,7 +2228,7 @@ def _post_pr_thread_new(org, project, repo, pr_id, content, file_path=None, line
     """Create a new PR thread. Anchors to file_path/line when given, else PR-level.
     Returns the created thread or None."""
     base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
-    url = f'{base}/{repo}/pullrequests/{pr_id}/threads?api-version=7.1'
+    url = f'{base}/{repo}/pullrequests/{pr_id}/threads?api-version={ADO_API_VERSION}'
     body = {
         'comments': [{'parentCommentId': 0, 'content': content, 'commentType': 1}],
         'status': 1,
@@ -2197,7 +2247,7 @@ def _post_pr_thread_new(org, project, repo, pr_id, content, file_path=None, line
 def _set_pr_thread_status(org, project, repo, pr_id, thread_id, status='fixed'):
     """Set a PR thread's status (e.g. 'fixed', 'closed'). Returns updated thread or None."""
     base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
-    url = f'{base}/{repo}/pullrequests/{pr_id}/threads/{thread_id}?api-version=7.1'
+    url = f'{base}/{repo}/pullrequests/{pr_id}/threads/{thread_id}?api-version={ADO_API_VERSION}'
     return _ado_patch_json(url, {'status': status})
 
 
@@ -2228,7 +2278,7 @@ def _resolve_pr_context(args):
         pr_id = args.id
         token = get_ado_token()
         if not token:
-            print(f"{Colors.RED}[X]{Colors.NC} Failed to get ADO token", file=sys.stderr)
+            emit_error("Failed to get ADO token")
             return None
 
         repos_to_try = []
@@ -2246,9 +2296,12 @@ def _resolve_pr_context(args):
             pr = _fetch_pr(org, project, repo, pr_id)
             if pr:
                 branch = pr['sourceRefName'].replace('refs/heads/', '')
+                # Stash the fetched PR so callers (e.g. cmd_pr_diff) can reuse it
+                # instead of issuing a second identical GET.
+                args.resolved_pr = pr
                 return org, project, repo, branch, pr_id, az_cmd, None
 
-        print(f"{Colors.RED}[X]{Colors.NC} PR !{pr_id} not found in known repos", file=sys.stderr)
+        emit_error(f"PR !{pr_id} not found in known repos")
         return None
 
     repo_path = args.repo or '.'
@@ -2263,17 +2316,17 @@ def _resolve_pr_context(args):
     if not branch:
         rc, branch = git('branch', '--show-current')
         if rc != 0 or not branch:
-            print(f"{Colors.RED}[X]{Colors.NC} Not on a branch", file=sys.stderr)
+            emit_error("Not on a branch")
             return None
 
     rc, remote_url = git('remote', 'get-url', 'origin')
     if rc != 0 or not remote_url:
-        print(f"{Colors.RED}[X]{Colors.NC} No origin remote found", file=sys.stderr)
+        emit_error("No origin remote found")
         return None
 
     parsed = _parse_ado_remote(remote_url)
     if not parsed:
-        print(f"{Colors.RED}[X]{Colors.NC} Could not parse ADO remote: {remote_url}", file=sys.stderr)
+        emit_error(f"Could not parse ADO remote: {remote_url}")
         return None
     org, project, repo = parsed
 
@@ -2311,7 +2364,7 @@ def _read_description_source(path):
     try:
         return Path(path).read_text(encoding='utf-8')
     except OSError as e:
-        print(f"{Colors.RED}[X]{Colors.NC} Failed to read {path}: {e}", file=sys.stderr)
+        emit_error(f"Failed to read {path}: {e}")
         return None
 
 
@@ -2384,7 +2437,7 @@ def _print_pr_description(org, project, repo, pr_id):
     """Fetch and print the current PR description."""
     pr = _fetch_pr(org, project, repo, pr_id)
     if not pr:
-        print(f"{Colors.RED}[X]{Colors.NC} Failed to fetch PR !{pr_id}", file=sys.stderr)
+        emit_error(f"Failed to fetch PR !{pr_id}")
         return 1
     desc = pr.get('description', '')
     if desc:
@@ -2402,7 +2455,7 @@ def cmd_pr_desc(args):
     org, project, repo, _, pr_id, _, _ = ctx
 
     if not pr_id:
-        print(f"{Colors.RED}[X]{Colors.NC} No active PR found for this branch", file=sys.stderr)
+        emit_error("No active PR found for this branch")
         return 1
 
     if not args.description:
@@ -2477,7 +2530,8 @@ def cmd_pr_diff(args):
     # Determine target branch from PR API or fall back to default
     target = None
     if pr_id:
-        pr_data = _fetch_pr(org, project, repo, pr_id)
+        # Reuse the PR object already fetched by _resolve_pr_context when present.
+        pr_data = getattr(args, 'resolved_pr', None) or _fetch_pr(org, project, repo, pr_id)
         if pr_data:
             target = pr_data.get('targetRefName', '').replace('refs/heads/', '')
 
@@ -2526,13 +2580,13 @@ def _post_pr_comment(org, project, repo, pr_id, args, message):
     resolve = getattr(args, 'resolve', False)
 
     if reply_to and (file_path or line):
-        print(f"{Colors.RED}[X]{Colors.NC} --reply cannot be combined with --file/--line", file=sys.stderr)
+        emit_error("--reply cannot be combined with --file/--line")
         return 1
     if line and not file_path:
-        print(f"{Colors.RED}[X]{Colors.NC} --line requires --file", file=sys.stderr)
+        emit_error("--line requires --file")
         return 1
     if resolve and not reply_to:
-        print(f"{Colors.RED}[X]{Colors.NC} --resolve requires --reply <threadId>", file=sys.stderr)
+        emit_error("--resolve requires --reply <threadId>")
         return 1
 
     if message:
@@ -2542,14 +2596,14 @@ def _post_pr_comment(org, project, repo, pr_id, args, message):
             result = _post_pr_thread_reply(org, project, repo, pr_id, reply_to, parent, content)
             if not result:
                 msg = f"Failed to reply to thread {reply_to} on PR !{pr_id}"
-                print(f"{Colors.RED}[X]{Colors.NC} {msg}", file=sys.stderr)
+                emit_error(f"{msg}")
                 return 1
             print(f"{Colors.GREEN}[+]{Colors.NC} Replied to thread {reply_to} on PR !{pr_id} "
                   f"{Colors.GREY}(comment #{result.get('id')}){Colors.NC}")
         else:
             result = _post_pr_thread_new(org, project, repo, pr_id, content, file_path, line)
             if not result:
-                print(f"{Colors.RED}[X]{Colors.NC} Failed to create thread on PR !{pr_id}", file=sys.stderr)
+                emit_error(f"Failed to create thread on PR !{pr_id}")
                 return 1
             loc = f"{file_path}:{line}" if (file_path and line) else (file_path or '(PR-level)')
             print(f"{Colors.GREEN}[+]{Colors.NC} Created thread {result.get('id')} on PR !{pr_id} "
@@ -2557,7 +2611,7 @@ def _post_pr_comment(org, project, repo, pr_id, args, message):
 
     if resolve:
         if not _set_pr_thread_status(org, project, repo, pr_id, reply_to, 'fixed'):
-            print(f"{Colors.RED}[X]{Colors.NC} Failed to resolve thread {reply_to} on PR !{pr_id}", file=sys.stderr)
+            emit_error(f"Failed to resolve thread {reply_to} on PR !{pr_id}")
             return 1
         print(f"{Colors.GREEN}[+]{Colors.NC} Resolved thread {reply_to} on PR !{pr_id} "
               f"{Colors.GREY}(status: fixed){Colors.NC}")
@@ -2591,7 +2645,7 @@ def cmd_pr_comments(args):
     org, project, repo, _, pr_id, _, _ = ctx
 
     if not pr_id:
-        print(f"{Colors.RED}[X]{Colors.NC} No active PR found for this branch", file=sys.stderr)
+        emit_error("No active PR found for this branch")
         return 1
 
     message = '\n'.join(getattr(args, 'message', None) or []).strip()
@@ -2600,7 +2654,7 @@ def cmd_pr_comments(args):
 
     threads = _fetch_pr_threads(org, project, repo, pr_id)
     if threads is None:
-        print(f"{Colors.RED}[X]{Colors.NC} Failed to fetch threads for PR !{pr_id}", file=sys.stderr)
+        emit_error(f"Failed to fetch threads for PR !{pr_id}")
         return 1
 
     print(f"{Colors.BLUE}PR !{pr_id}{Colors.NC} {Colors.GREY}({org}/{project}/{repo}){Colors.NC}")
@@ -2673,7 +2727,25 @@ def cmd_pr_comments(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Dev CLI - Development workflow tool')
+    parser = argparse.ArgumentParser(
+        prog='dev',
+        description='Dev CLI - cross-platform development workflow tool.',
+        epilog=(
+            'Examples:\n'
+            '  dev repo sync                 Clone/refresh every tracked repo to origin HEAD\n'
+            '  dev repo status               Show which tracked repos/files exist here\n'
+            '  dev repo old --days 30        List stale user branches (add --delete to prune)\n'
+            '  dev pr create -t "Title"      Open a draft PR from the current branch\n'
+            '  dev pr diff --id 12345        Show a PR diff by id\n'
+            '  dev pr comments --active      List only unresolved PR threads\n'
+            '  dev ado token                 Print a cached Azure DevOps access token\n'
+            '\n'
+            'Run `dev <command> -h` for command-specific help.'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument('--version', '-V', action='version', version=f'dev {__version__}')
+    parser.add_argument('--no-color', action='store_true', help='Disable colored output')
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
 
     # repo subcommand
@@ -2781,6 +2853,9 @@ def main():
     bg_p.add_argument('payload', help='JSON payload')
 
     args = parser.parse_args()
+
+    if getattr(args, 'no_color', False):
+        Colors.configure(False)
 
     if args.command == 'init':
         return cmd_init(args)

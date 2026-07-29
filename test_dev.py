@@ -1883,6 +1883,21 @@ class TestCmdPrDiff(unittest.TestCase):
         self.assertIn('--stat', diff_call[-1][0][0])
 
 
+    @patch('dev._fetch_pr')
+    @patch('subprocess.run')
+    @patch('dev._resolve_pr_context')
+    def test_reuses_resolved_pr_without_refetch(self, mock_ctx, mock_run, mock_fetch):
+        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
+        mock_run.return_value = subprocess.CompletedProcess([], 0, stdout='origin/master\n', stderr='')
+        args = self._make_args(resolved_pr={'targetRefName': 'refs/heads/main'})
+        rc = dev.cmd_pr_diff(args)
+        self.assertEqual(rc, 0)
+        mock_fetch.assert_not_called()
+        diff_call = [c for c in mock_run.call_args_list if 'diff' in c[0][0]]
+        self.assertTrue(len(diff_call) > 0)
+        self.assertIn('origin/main...origin/feat', ' '.join(diff_call[-1][0][0]))
+
+
 class TestCmdPrComments(unittest.TestCase):
 
     def _make_args(self, **kwargs):
@@ -2282,6 +2297,59 @@ class TestPrCommentPosting(unittest.TestCase):
         mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
         rc = dev.cmd_pr_comments(self._make_args(message=['x'], resolve=True))
         self.assertEqual(rc, 1)
+
+
+class TestAdoGetJson(unittest.TestCase):
+
+    @patch('dev.get_ado_token', return_value='tok')
+    def test_returns_parsed_json(self, _tok):
+        payload = json.dumps({'a': 1}).encode()
+        resp = type('R', (), {
+            'read': lambda self: payload,
+            '__enter__': lambda self: self,
+            '__exit__': lambda *a: None,
+        })()
+        with patch('urllib.request.urlopen', return_value=resp):
+            self.assertEqual(dev._ado_get_json('http://x'), {'a': 1})
+
+    @patch('dev.get_ado_token', return_value='tok')
+    def test_returns_none_on_httperror(self, _tok):
+        import urllib.error
+        err = urllib.error.HTTPError('http://x', 404, 'nf', {}, None)
+        with patch('urllib.request.urlopen', side_effect=err):
+            self.assertIsNone(dev._ado_get_json('http://x'))
+
+    @patch('dev.get_ado_token', return_value=None)
+    def test_returns_none_without_token(self, _tok):
+        self.assertIsNone(dev._ado_get_json('http://x'))
+
+
+class TestColorsAndEmit(unittest.TestCase):
+
+    def tearDown(self):
+        dev.Colors.configure(dev._color_default_enabled())
+
+    def test_configure_toggles_codes(self):
+        dev.Colors.configure(True)
+        self.assertTrue(dev.Colors.RED)
+        dev.Colors.configure(False)
+        self.assertEqual(dev.Colors.RED, '')
+        self.assertEqual(dev.Colors.NC, '')
+
+    def test_emit_helpers_route_to_expected_streams(self):
+        dev.Colors.configure(False)
+        out, err = StringIO(), StringIO()
+        with patch('sys.stdout', out), patch('sys.stderr', err):
+            dev.emit_ok('good')
+            dev.emit_error('bad')
+            dev.emit_warn('careful')
+        self.assertIn('[OK] good', out.getvalue())
+        self.assertIn('[X] bad', err.getvalue())
+        self.assertIn('[WARN] careful', err.getvalue())
+        self.assertNotIn('bad', out.getvalue())
+
+    def test_version_is_semver(self):
+        self.assertRegex(dev.__version__, r'^\d+\.\d+\.\d+$')
 
 
 if __name__ == '__main__':
