@@ -1730,6 +1730,90 @@ class TestCheckStaleBranchSlowSync(unittest.TestCase):
         self.assertEqual(mock_run.call_args_list[-1].args[0][0], 'gclient')
 
 
+class TestSyncRepoLatest(unittest.TestCase):
+    """Test _sync_repo_latest: safe fetch + default-branch update."""
+
+    @staticmethod
+    def _subproc(fetch=0, reset=0, ff=0):
+        def se(cmd, *a, **k):
+            argv = cmd
+            if 'reset' in argv:
+                rc = reset
+            elif '--prune' in argv:
+                rc = fetch
+            else:  # refspec fetch (default:default)
+                rc = ff
+            return type('R', (), {'returncode': rc, 'stdout': '', 'stderr': ''})()
+        return se
+
+    @staticmethod
+    def _rungit(origin_sha='aaa', local_sha='aaa', dirty='', local_ok=True):
+        def se(repo, *args):
+            if args and args[0] == 'rev-parse':
+                ref = args[1]
+                if ref.startswith('origin/'):
+                    return (True, origin_sha)
+                return (local_ok, local_sha)
+            if args and args[0] == 'status':
+                return (True, dirty)
+            return (True, '')
+        return se
+
+    @patch('dev.get_current_branch', return_value='main')
+    @patch('dev.get_default_branch', return_value='main')
+    def test_on_default_clean_behind_resets(self, _d, _c):
+        with patch('subprocess.run', side_effect=self._subproc()), \
+             patch('dev.run_git', side_effect=self._rungit(origin_sha='aaa', local_sha='bbb', dirty='')):
+            status, default = dev._sync_repo_latest(Path('/tmp/repo'))
+        self.assertEqual((status, default), ('updated', 'main'))
+
+    @patch('dev.get_current_branch', return_value='main')
+    @patch('dev.get_default_branch', return_value='main')
+    def test_on_default_up_to_date_is_current(self, _d, _c):
+        with patch('subprocess.run', side_effect=self._subproc()), \
+             patch('dev.run_git', side_effect=self._rungit(origin_sha='aaa', local_sha='aaa')):
+            status, default = dev._sync_repo_latest(Path('/tmp/repo'))
+        self.assertEqual((status, default), ('current', 'main'))
+
+    @patch('dev.get_current_branch', return_value='main')
+    @patch('dev.get_default_branch', return_value='main')
+    def test_on_default_dirty_is_not_reset(self, _d, _c):
+        reset_called = {'n': 0}
+
+        def se(cmd, *a, **k):
+            if 'reset' in cmd:
+                reset_called['n'] += 1
+            return type('R', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
+
+        with patch('subprocess.run', side_effect=se), \
+             patch('dev.run_git', side_effect=self._rungit(origin_sha='aaa', local_sha='bbb', dirty=' M f.py')):
+            status, default = dev._sync_repo_latest(Path('/tmp/repo'))
+        self.assertEqual((status, default), ('dirty', 'main'))
+        self.assertEqual(reset_called['n'], 0)
+
+    @patch('dev.get_current_branch', return_value='user/x/feat')
+    @patch('dev.get_default_branch', return_value='main')
+    def test_on_feature_fastforwards_default(self, _d, _c):
+        with patch('subprocess.run', side_effect=self._subproc(ff=0)), \
+             patch('dev.run_git', side_effect=self._rungit(origin_sha='aaa', local_sha='bbb')):
+            status, default = dev._sync_repo_latest(Path('/tmp/repo'))
+        self.assertEqual((status, default), ('updated', 'main'))
+
+    @patch('dev.get_current_branch', return_value='user/x/feat')
+    @patch('dev.get_default_branch', return_value='main')
+    def test_on_feature_nonff_is_diverged(self, _d, _c):
+        with patch('subprocess.run', side_effect=self._subproc(ff=1)), \
+             patch('dev.run_git', side_effect=self._rungit(origin_sha='aaa', local_sha='bbb')):
+            status, default = dev._sync_repo_latest(Path('/tmp/repo'))
+        self.assertEqual((status, default), ('diverged', 'main'))
+
+    @patch('dev.get_default_branch', return_value='main')
+    def test_fetch_failure_is_failed(self, _d):
+        with patch('subprocess.run', side_effect=self._subproc(fetch=1)):
+            status, default = dev._sync_repo_latest(Path('/tmp/repo'))
+        self.assertEqual(status, 'failed')
+
+
 class TestCmdPrDiff(unittest.TestCase):
 
     def _make_args(self, **kwargs):

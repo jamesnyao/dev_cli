@@ -427,6 +427,63 @@ def check_stale_branch(repo_path, name, slow_sync=False, gclient_sync=False):
         subprocess.run(op['argv'], cwd=op.get('cwd'), check=False, shell=use_shell)
     print(f"{Colors.GREEN}[OK] Switched to {default}{Colors.NC}")
 
+
+def _sync_repo_latest(repo_path):
+    """Fetch origin and bring the local default branch up to origin's HEAD.
+
+    Safe by design (never destroys work): the current branch and working tree are
+    only ever touched when the repo is already sitting on a clean default branch,
+    in which case it is hard-reset to ``origin/<default>``. On a feature branch or
+    a dirty tree the current branch is left alone and only the local default ref is
+    fast-forwarded to origin. Returns ``(status, default_branch)`` where status is
+    one of: ``updated`` (advanced to origin), ``current`` (already up to date),
+    ``dirty`` (on default with uncommitted changes, not reset), ``diverged``
+    (local default has commits origin doesn't, left as-is), or ``failed``.
+    """
+    repo_path_str = str(repo_path)
+
+    def _git(*argv, timeout=None):
+        return subprocess.run(
+            ['git', '-C', repo_path_str, *argv],
+            capture_output=True, text=True, timeout=timeout,
+        )
+
+    try:
+        if _git('fetch', '--prune', 'origin').returncode != 0:
+            return 'failed', None
+    except Exception:
+        return 'failed', None
+
+    default = get_default_branch(repo_path)
+    if not default:
+        return 'failed', None
+
+    ok_remote, remote_sha = run_git(repo_path, 'rev-parse', f'origin/{default}')
+    if not ok_remote:
+        return 'failed', default
+    ok_local, local_sha = run_git(repo_path, 'rev-parse', default)
+
+    current = get_current_branch(repo_path)
+    if current == default:
+        if ok_local and local_sha == remote_sha:
+            return 'current', default
+        # Uncommitted changes: never blow them away with a hard reset.
+        if run_git(repo_path, 'status', '--porcelain')[1]:
+            return 'dirty', default
+        if _git('reset', '--hard', f'origin/{default}').returncode == 0:
+            return 'updated', default
+        return 'failed', default
+
+    # On a feature branch or detached HEAD: fast-forward the local default ref only,
+    # without checkout, so the current branch and working tree are untouched.
+    if ok_local and local_sha == remote_sha:
+        return 'current', default
+    # A refspec fetch fast-forwards refs/heads/<default>; git refuses a non
+    # fast-forward, so a diverged local default is preserved rather than rewritten.
+    if _git('fetch', 'origin', f'{default}:{default}').returncode == 0:
+        return 'updated', default
+    return 'diverged', default
+
 def get_rcfile_git_timestamp(rel_path):
     """Get the author date of the last commit that modified an rcfile."""
     rcfile_rel = str(Path('repoconfig') / 'rcfiles' / rel_path).replace('\\', '/')
@@ -948,17 +1005,46 @@ def cmd_repo_sync(args):
             if link_to is not None:
                 _ensure_link(link_path, repo_path)
             actual_url = get_remote_url(repo_path)
+            fixed_remote = False
             if (url and actual_url and _parse_ado_remote(url)
                     and _normalize_url_for_comparison(actual_url) != _normalize_url_for_comparison(url)):
                 subprocess.run(
                     ['git', '-C', str(repo_path), 'remote', 'set-url', 'origin', url],
                     capture_output=True, text=True
                 )
-                print(f"{Colors.GREEN}[OK]{Colors.NC} {name} {Colors.YELLOW}(fixed remote URL){Colors.NC}")
-            else:
-                print(f"{Colors.GREEN}[OK]{Colors.NC} {name}")
+                fixed_remote = True
+            suffix = f" {Colors.YELLOW}(fixed remote URL){Colors.NC}" if fixed_remote else ''
+
+            # Slow-sync repos (huge enlistments like bigrepo) are never fetched
+            # inline; their background sync / stale-branch prompt handles updates.
+            if slow_sync:
+                print(f"{Colors.GREEN}[OK]{Colors.NC} {name}{suffix}")
+                check_stale_branch(repo_path, name, slow_sync=slow_sync, gclient_sync=gclient_sync)
+                skipped += 1
+                continue
+
+            status, default = _sync_repo_latest(repo_path)
+            if status == 'updated':
+                print(f"{Colors.GREEN}[OK]{Colors.NC} {name} "
+                      f"{Colors.YELLOW}(synced to origin/{default}){Colors.NC}{suffix}")
+                synced += 1
+            elif status == 'current':
+                print(f"{Colors.GREEN}[OK]{Colors.NC} {name}{suffix}")
+                synced += 1
+            elif status == 'dirty':
+                print(f"{Colors.YELLOW}[WARN]{Colors.NC} {name} "
+                      f"{Colors.YELLOW}(uncommitted changes; default not reset){Colors.NC}{suffix}")
+                skipped += 1
+            elif status == 'diverged':
+                print(f"{Colors.YELLOW}[WARN]{Colors.NC} {name} "
+                      f"{Colors.YELLOW}(local {default} diverged from origin; not updated){Colors.NC}{suffix}")
+                skipped += 1
+            else:  # failed
+                print(f"{Colors.RED}[X]{Colors.NC} {name} "
+                      f"{Colors.YELLOW}(fetch/update failed){Colors.NC}{suffix}")
+                failed += 1
+
             check_stale_branch(repo_path, name, slow_sync=slow_sync, gclient_sync=gclient_sync)
-            skipped += 1
             continue
 
         # Prompt user before cloning a new repo
