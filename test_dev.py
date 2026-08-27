@@ -23,6 +23,31 @@ sys.path.insert(0, str(Path(__file__).parent))
 import dev
 
 
+def _sanitize_environment():
+    """Drop env vars that cannot survive a patch.dict round-trip on Windows.
+
+    unittest.mock.patch.dict always restores by clearing the dict and re-adding
+    the saved items, even without clear=True. On Windows an empty-valued var is
+    written back into os.environ but removed from the native environment block,
+    so every subprocess started after the first patch.dict loses it. toolchain_tools
+    exports GIT_CONFIG_VALUE_2='' (core.fsmonitor), which leaves GIT_CONFIG_COUNT
+    pointing at a missing value and makes every later git call fail with
+    "missing config value GIT_CONFIG_VALUE_2".
+
+    The GIT_CONFIG_* injection is dropped as a set so the count stays consistent.
+    """
+    if any(os.environ.get(f'GIT_CONFIG_VALUE_{i}', None) == ''
+           for i in range(int(os.environ.get('GIT_CONFIG_COUNT') or 0))):
+        for key in [k for k in os.environ if k.startswith('GIT_CONFIG_')]:
+            del os.environ[key]
+
+    for key in [k for k, v in os.environ.items() if v == '']:
+        del os.environ[key]
+
+
+_sanitize_environment()
+
+
 class TestGetOsType(unittest.TestCase):
     """Test OS type detection"""
     
@@ -124,24 +149,29 @@ class TestHasRealConflictMarkers(unittest.TestCase):
 
 class TestGetBasePath(unittest.TestCase):
     """Test base path resolution"""
-    
-    @patch.dict(os.environ, {}, clear=True)
+
+    # Patch only the keys get_base_path reads. Clearing the whole environment
+    # drops empty-valued vars from the native process env on Windows (they are
+    # restored into os.environ but not into the real environment block), which
+    # breaks every later subprocess -- notably git, whose toolchain_tools wrapper
+    # sets GIT_CONFIG_VALUE_2 to an empty string.
+    @patch.dict(os.environ, {'DEVCONFIG': ''})
     def test_missing_devconfig_raises(self):
         with self.assertRaises(ValueError):
             dev.get_base_path(config={})
 
-    @patch.dict(os.environ, {'DEVCONFIG': 'unknown-machine'}, clear=True)
+    @patch.dict(os.environ, {'DEVCONFIG': 'unknown-machine'})
     def test_unknown_devconfig_raises(self):
         config = {'workspaceRoots': {'mac-devbox': '/Users/test'}}
         with self.assertRaises(ValueError):
             dev.get_base_path(config=config)
 
-    @patch.dict(os.environ, {'DEVCONFIG': 'mac-devbox'}, clear=True)
+    @patch.dict(os.environ, {'DEVCONFIG': 'mac-devbox'})
     def test_uses_workspace_root_from_config(self):
         config = {'workspaceRoots': {'mac-devbox': '/Users/test'}}
         self.assertEqual(dev.get_base_path(config=config), '/Users/test')
 
-    @patch.dict(os.environ, {'DEVCONFIG': 'mac-devbox', 'DEV': '/fallback'}, clear=True)
+    @patch.dict(os.environ, {'DEVCONFIG': 'mac-devbox', 'DEV': '/fallback'})
     def test_config_takes_priority_over_dev_env(self):
         config = {'workspaceRoots': {'mac-devbox': '/from-config'}}
         self.assertEqual(dev.get_base_path(config=config), '/from-config')
