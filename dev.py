@@ -224,6 +224,51 @@ def get_branch_age_days(repo_path):
         return 0
 
 
+# Age at which local work is considered abandoned: a stale branch is offered up for
+# switching, and stale uncommitted changes on a default branch are stashed and reset.
+STALE_DAYS = 14
+
+
+def get_dirty_age_days(repo_path):
+    """Age in days of the newest uncommitted change in the working tree.
+
+    Measured from file mtimes rather than commit dates: a default branch that tracks
+    origin has a recent last commit even when the local edit sitting on top of it is
+    months old, so ``get_branch_age_days`` cannot answer this. Returns ``None`` when
+    the tree is clean, or when no listed path can be stat'd (deletions only), which
+    callers should treat as "do not touch".
+    """
+    success, porcelain = run_git(repo_path, 'status', '--porcelain')
+    if not success or not porcelain:
+        return None
+
+    newest = None
+    for line in porcelain.splitlines():
+        # ``run_git`` strips its output, so the first line arrives as "M path" while
+        # the rest keep the leading status column (" M path"). Match the status codes
+        # instead of slicing at a fixed offset.
+        match = re.match(r'^\s*[MADRCU?!]{1,2}\s+(.*)$', line)
+        if not match:
+            continue
+        path = match.group(1).strip()
+        if ' -> ' in path:  # rename/copy: the destination is the live file
+            path = path.split(' -> ', 1)[1]
+        path = path.strip().strip('"')
+        if not path:
+            continue
+        try:
+            mtime = (Path(repo_path) / path).stat().st_mtime
+        except OSError:
+            continue
+        if newest is None or mtime > newest:
+            newest = mtime
+
+    if newest is None:
+        return None
+    changed_at = datetime.fromtimestamp(newest, tz=timezone.utc)
+    return (datetime.now(timezone.utc) - changed_at).days
+
+
 SYNC_STATE_DIR = Path.home() / '.dev' / 'sync-state'
 
 
@@ -457,7 +502,7 @@ def check_stale_branch(repo_path, name, slow_sync=False, gclient_sync=False, def
         return
 
     age_days = get_branch_age_days(repo_path)
-    if age_days < 14:
+    if age_days < STALE_DAYS:
         return
 
     if not default or current == default:
@@ -502,15 +547,17 @@ def check_stale_branch(repo_path, name, slow_sync=False, gclient_sync=False, def
 def _sync_repo_latest(repo_path, default_branch=None):
     """Fetch origin and bring the local default branch up to origin's HEAD.
 
-    Safe by design (never destroys work): the current branch and working tree are
-    only ever touched when the repo is already sitting on a clean default branch,
-    in which case it is hard-reset to ``origin/<default>``. On a feature branch or
-    a dirty tree the current branch is left alone and only the local default ref is
-    fast-forwarded to origin. ``default_branch`` is the repo's configured
+    Work is never destroyed without a recovery path. On a clean default branch the
+    repo is hard-reset to ``origin/<default>``. On a default branch with uncommitted
+    changes, the changes are left alone until they are ``STALE_DAYS`` old, after which
+    they are stashed (recoverable via ``git stash list``) and the branch is reset. On a
+    feature branch the current branch and working tree are untouched and only the local
+    default ref is fast-forwarded. ``default_branch`` is the repo's configured
     ``defaultBranch``, if any. Returns ``(status, default_branch)`` where status is
     one of: ``updated`` (advanced to origin), ``current`` (already up to date),
-    ``dirty`` (on default with uncommitted changes, not reset), ``diverged``
-    (local default has commits origin doesn't, left as-is), or ``failed``.
+    ``reset`` (stale changes stashed, branch reset to origin), ``dirty`` (recent
+    uncommitted changes, left as-is), ``diverged`` (local default has commits origin
+    doesn't, left as-is), or ``failed``.
     """
     repo_path_str = str(repo_path)
 
@@ -537,11 +584,22 @@ def _sync_repo_latest(repo_path, default_branch=None):
 
     current = get_current_branch(repo_path)
     if current == default:
+        if run_git(repo_path, 'status', '--porcelain')[1]:
+            # Recent work is left alone; only changes abandoned for STALE_DAYS are
+            # cleared, and they are stashed first so the reset stays recoverable.
+            age = get_dirty_age_days(repo_path)
+            if age is None or age < STALE_DAYS:
+                return 'dirty', default
+            label = f'dev-sync {default} {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
+            if _git('stash', 'push', '--include-untracked', '-m', label).returncode != 0:
+                return 'dirty', default
+            if ok_local and local_sha == remote_sha:
+                return 'reset', default
+            if _git('reset', '--hard', f'origin/{default}').returncode == 0:
+                return 'reset', default
+            return 'failed', default
         if ok_local and local_sha == remote_sha:
             return 'current', default
-        # Uncommitted changes: never blow them away with a hard reset.
-        if run_git(repo_path, 'status', '--porcelain')[1]:
-            return 'dirty', default
         if _git('reset', '--hard', f'origin/{default}').returncode == 0:
             return 'updated', default
         return 'failed', default
@@ -1109,9 +1167,14 @@ def cmd_repo_sync(args):
             elif status == 'current':
                 print(f"{Colors.GREEN}[OK]{Colors.NC} {name}{suffix}")
                 synced += 1
+            elif status == 'reset':
+                print(f"{Colors.GREEN}[OK]{Colors.NC} {name} "
+                      f"{Colors.YELLOW}(stale local changes stashed; reset to origin/{default}){Colors.NC}{suffix}")
+                synced += 1
             elif status == 'dirty':
                 print(f"{Colors.YELLOW}[WARN]{Colors.NC} {name} "
-                      f"{Colors.YELLOW}(uncommitted changes; default not reset){Colors.NC}{suffix}")
+                      f"{Colors.YELLOW}(uncommitted changes newer than {STALE_DAYS}d; "
+                      f"default not reset){Colors.NC}{suffix}")
                 skipped += 1
             elif status == 'diverged':
                 print(f"{Colors.YELLOW}[WARN]{Colors.NC} {name} "
