@@ -1778,7 +1778,11 @@ class TestSyncRepoLatest(unittest.TestCase):
         return se
 
     @staticmethod
-    def _rungit(origin_sha='aaa', local_sha='aaa', dirty='', local_ok=True):
+    def _rungit(origin_sha='aaa', local_sha='aaa', dirty='', local_ok=True, dirty_after=''):
+        """Fake run_git. ``dirty`` is the first status result, ``dirty_after`` every
+        later one, so a stash that does or does not clean the tree can be modelled."""
+        state = {'status_calls': 0}
+
         def se(repo, *args):
             if args and args[0] == 'rev-parse':
                 ref = args[1]
@@ -1786,7 +1790,8 @@ class TestSyncRepoLatest(unittest.TestCase):
                     return (True, origin_sha)
                 return (local_ok, local_sha)
             if args and args[0] == 'status':
-                return (True, dirty)
+                state['status_calls'] += 1
+                return (True, dirty if state['status_calls'] == 1 else dirty_after)
             return (True, '')
         return se
 
@@ -1860,6 +1865,38 @@ class TestSyncRepoLatest(unittest.TestCase):
             status, default = dev._sync_repo_latest(Path('/tmp/repo'))
         self.assertEqual((status, default), ('reset', 'main'))
         self.assertEqual(len([c for c in calls if 'stash' in c]), 1)
+        self.assertEqual(len([c for c in calls if 'reset' in c]), 0)
+
+    @patch('dev.get_current_branch', return_value='main')
+    @patch('dev.get_default_branch', return_value='main')
+    def test_stash_that_does_not_clean_tree_is_dropped(self, _d, _c):
+        # A file whose committed blob violates .gitattributes normalization is
+        # reported modified again the moment it is written back, so stashing never
+        # cleans the tree. Sync must undo its own stash instead of making one per run.
+        calls = []
+
+        def se(cmd, *a, **k):
+            calls.append(cmd)
+            return type('R', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
+
+        def rungit(repo, *args):
+            if args and args[0] == 'status':
+                return (True, ' M eol.cs')  # still dirty, even after the stash
+            if args and args[0] == 'stash':
+                return (True, 'stash@{0}: On main: dev-sync main 2026-01-01 00:00:00')
+            if args and args[0] == 'rev-parse':
+                return (True, 'aaa' if args[1].startswith('origin/') else 'bbb')
+            return (True, '')
+
+        with patch('subprocess.run', side_effect=se), \
+             patch('dev.get_dirty_age_days', return_value=99), \
+             patch('dev.run_git', side_effect=rungit), \
+             patch('dev.datetime') as mock_dt:
+            mock_dt.now.return_value.strftime.return_value = '2026-01-01 00:00:00'
+            status, default = dev._sync_repo_latest(Path('/tmp/repo'))
+
+        self.assertEqual((status, default), ('dirty', 'main'))
+        self.assertEqual(len([c for c in calls if 'drop' in c]), 1)
         self.assertEqual(len([c for c in calls if 'reset' in c]), 0)
 
     @patch('dev.get_current_branch', return_value='main')

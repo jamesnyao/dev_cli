@@ -593,6 +593,16 @@ def _sync_repo_latest(repo_path, default_branch=None):
             label = f'dev-sync {default} {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
             if _git('stash', 'push', '--include-untracked', '-m', label).returncode != 0:
                 return 'dirty', default
+            if run_git(repo_path, 'status', '--porcelain')[1]:
+                # The tree is still dirty right after stashing, so the diff is not
+                # real content: it is a renormalization artifact (.gitattributes
+                # demands an eol normalization the committed blob does not have), and
+                # it reappears the instant the file is written back. Stashing it on
+                # every sync would pile up junk entries forever, so undo and skip.
+                top = run_git(repo_path, 'stash', 'list', '-1')[1]
+                if label in top:
+                    _git('stash', 'drop', 'stash@{0}')
+                return 'dirty', default
             if ok_local and local_sha == remote_sha:
                 return 'reset', default
             if _git('reset', '--hard', f'origin/{default}').returncode == 0:
