@@ -191,7 +191,19 @@ def get_current_branch(repo_path):
     success, branch = run_git(repo_path, 'rev-parse', '--abbrev-ref', 'HEAD')
     return branch if success else None
 
-def get_default_branch(repo_path):
+def get_default_branch(repo_path, configured=None):
+    """Resolve a repo's default branch.
+
+    ``configured`` is the optional per-repo ``defaultBranch`` from repos.json. It
+    wins over origin/HEAD when the branch actually exists on origin, so a repo can
+    be pinned to a working default (e.g. ``mirror/main``) that is not the remote's
+    own HEAD.
+    """
+    if configured:
+        success, _ = run_git(repo_path, 'show-ref', '--verify', '--quiet',
+                             f'refs/remotes/origin/{configured}')
+        if success:
+            return configured
     success, ref = run_git(repo_path, 'symbolic-ref', 'refs/remotes/origin/HEAD')
     if success and ref:
         return ref.replace('refs/remotes/origin/', '')
@@ -435,19 +447,19 @@ def _report_background_sync_status(name):
     return False
 
 
-def check_stale_branch(repo_path, name, slow_sync=False, gclient_sync=False):
+def check_stale_branch(repo_path, name, slow_sync=False, gclient_sync=False, default_branch=None):
     current = get_current_branch(repo_path)
     if not current or current == 'HEAD':
         return
 
-    if current.startswith('mirror/'):
+    default = get_default_branch(repo_path, default_branch)
+    if current.startswith('mirror/') and current != default:
         return
 
     age_days = get_branch_age_days(repo_path)
     if age_days < 14:
         return
 
-    default = get_default_branch(repo_path)
     if not default or current == default:
         return
 
@@ -487,14 +499,15 @@ def check_stale_branch(repo_path, name, slow_sync=False, gclient_sync=False):
     emit_ok(f"Switched to {default}")
 
 
-def _sync_repo_latest(repo_path):
+def _sync_repo_latest(repo_path, default_branch=None):
     """Fetch origin and bring the local default branch up to origin's HEAD.
 
     Safe by design (never destroys work): the current branch and working tree are
     only ever touched when the repo is already sitting on a clean default branch,
     in which case it is hard-reset to ``origin/<default>``. On a feature branch or
     a dirty tree the current branch is left alone and only the local default ref is
-    fast-forwarded to origin. Returns ``(status, default_branch)`` where status is
+    fast-forwarded to origin. ``default_branch`` is the repo's configured
+    ``defaultBranch``, if any. Returns ``(status, default_branch)`` where status is
     one of: ``updated`` (advanced to origin), ``current`` (already up to date),
     ``dirty`` (on default with uncommitted changes, not reset), ``diverged``
     (local default has commits origin doesn't, left as-is), or ``failed``.
@@ -513,7 +526,7 @@ def _sync_repo_latest(repo_path):
     except Exception:
         return 'failed', None
 
-    default = get_default_branch(repo_path)
+    default = get_default_branch(repo_path, default_branch)
     if not default:
         return 'failed', None
 
@@ -687,12 +700,16 @@ def cmd_repo_add(args):
         entry['slowSync'] = True
     if getattr(args, 'gclient_sync', False):
         entry['gclientSync'] = True
+    if getattr(args, 'default_branch', None):
+        entry['defaultBranch'] = args.default_branch
     config['repos'].append(entry)
 
     save_config(config)
     print(f"{Colors.GREEN}Added repository: {repo_name}{Colors.NC}")
     print(f"  Remote: {Colors.CYAN}{remote_url}{Colors.NC}")
     print(f"  Path: {display_path}")
+    if entry.get('defaultBranch'):
+        print(f"  {Colors.CYAN}Default branch: {entry['defaultBranch']} (synced instead of origin/HEAD){Colors.NC}")
     if entry.get('slowSync'):
         print(f"  {Colors.CYAN}Slow sync: enabled (pull operations run in background){Colors.NC}")
     if entry.get('gclientSync'):
@@ -1035,6 +1052,7 @@ def cmd_repo_sync(args):
         link_to = repo.get('pathLinksTo')
         slow_sync = bool(repo.get('slowSync'))
         gclient_sync = bool(repo.get('gclientSync'))
+        default_branch = repo.get('defaultBranch')
         # Handle nested paths like platform/src
         link_path = base_path / name.replace('/', os.sep)
 
@@ -1078,11 +1096,12 @@ def cmd_repo_sync(args):
             # inline; their background sync / stale-branch prompt handles updates.
             if slow_sync:
                 print(f"{Colors.GREEN}[OK]{Colors.NC} {name}{suffix}")
-                check_stale_branch(repo_path, name, slow_sync=slow_sync, gclient_sync=gclient_sync)
+                check_stale_branch(repo_path, name, slow_sync=slow_sync, gclient_sync=gclient_sync,
+                                   default_branch=default_branch)
                 skipped += 1
                 continue
 
-            status, default = _sync_repo_latest(repo_path)
+            status, default = _sync_repo_latest(repo_path, default_branch)
             if status == 'updated':
                 print(f"{Colors.GREEN}[OK]{Colors.NC} {name} "
                       f"{Colors.YELLOW}(synced to origin/{default}){Colors.NC}{suffix}")
@@ -1103,7 +1122,8 @@ def cmd_repo_sync(args):
                       f"{Colors.YELLOW}(fetch/update failed){Colors.NC}{suffix}")
                 failed += 1
 
-            check_stale_branch(repo_path, name, slow_sync=slow_sync, gclient_sync=gclient_sync)
+            check_stale_branch(repo_path, name, slow_sync=slow_sync, gclient_sync=gclient_sync,
+                               default_branch=default_branch)
             continue
 
         # Prompt user before cloning a new repo
@@ -1123,7 +1143,11 @@ def cmd_repo_sync(args):
         repo_path.parent.mkdir(parents=True, exist_ok=True)
 
         print(f"{Colors.BLUE}[DOWN] Cloning {name}...{Colors.NC}")
-        result = subprocess.run(['git', 'clone', url, str(repo_path)])
+        clone_argv = ['git', 'clone']
+        if default_branch:
+            clone_argv += ['--branch', default_branch]
+        clone_argv += [url, str(repo_path)]
+        result = subprocess.run(clone_argv)
         if result.returncode == 0:
             _ensure_link(link_path, repo_path)
             print(f"{Colors.GREEN}[OK] Cloned {name}{Colors.NC}")
@@ -2758,6 +2782,8 @@ def main():
                        help='Mark repo for background sync (pull/switch ops run detached)')
     add_p.add_argument('--gclient-sync', action='store_true',
                        help='Run `gclient sync -Df` after a branch switch (uses repo parent as cwd)')
+    add_p.add_argument('--default-branch', metavar='BRANCH',
+                       help="Branch to sync instead of origin/HEAD (e.g. 'mirror/main')")
 
     remove_p = repo_sub.add_parser('remove', help='Remove a repository or file from tracking')
     remove_p.add_argument('name', help='Name of the repository or file path')

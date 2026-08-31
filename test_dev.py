@@ -1843,6 +1843,82 @@ class TestSyncRepoLatest(unittest.TestCase):
             status, default = dev._sync_repo_latest(Path('/tmp/repo'))
         self.assertEqual(status, 'failed')
 
+    @patch('dev.get_current_branch', return_value='mirror/main')
+    def test_configured_default_is_passed_through(self, _c):
+        with patch('subprocess.run', side_effect=self._subproc()), \
+             patch('dev.run_git', side_effect=self._rungit(origin_sha='aaa', local_sha='bbb')), \
+             patch('dev.get_default_branch', return_value='mirror/main') as mock_default:
+            status, default = dev._sync_repo_latest(Path('/tmp/repo'), 'mirror/main')
+        self.assertEqual((status, default), ('updated', 'mirror/main'))
+        self.assertEqual(mock_default.call_args[0][1], 'mirror/main')
+
+
+class TestGetDefaultBranch(unittest.TestCase):
+    """A configured defaultBranch wins over origin/HEAD when it exists on origin."""
+
+    @staticmethod
+    def _rungit(existing_remote_branches, origin_head='refs/remotes/origin/master'):
+        def se(repo, *args):
+            if args and args[0] == 'show-ref':
+                ref = args[-1]
+                return (ref.split('refs/remotes/origin/')[-1] in existing_remote_branches, '')
+            if args and args[0] == 'symbolic-ref':
+                return (bool(origin_head), origin_head)
+            return (True, '')
+        return se
+
+    def test_configured_branch_wins_over_origin_head(self):
+        with patch('dev.run_git', side_effect=self._rungit({'master', 'main', 'mirror/main'})):
+            self.assertEqual(dev.get_default_branch(Path('/tmp/repo'), 'mirror/main'), 'mirror/main')
+
+    def test_missing_configured_branch_falls_back_to_origin_head(self):
+        with patch('dev.run_git', side_effect=self._rungit({'master'})):
+            self.assertEqual(dev.get_default_branch(Path('/tmp/repo'), 'mirror/main'), 'master')
+
+    def test_no_configured_branch_uses_origin_head(self):
+        with patch('dev.run_git', side_effect=self._rungit({'master'})):
+            self.assertEqual(dev.get_default_branch(Path('/tmp/repo')), 'master')
+
+    def test_falls_back_to_main_when_no_origin_head(self):
+        with patch('dev.run_git', side_effect=self._rungit({'main'}, origin_head='')):
+            self.assertEqual(dev.get_default_branch(Path('/tmp/repo')), 'main')
+
+
+class TestCheckStaleBranchConfiguredDefault(unittest.TestCase):
+    """A mirror/* branch is only exempt from the stale prompt when it is not the default."""
+
+    @patch('dev.get_branch_age_days', return_value=365)
+    @patch('dev.get_current_branch', return_value='mirror/main')
+    @patch('builtins.input', return_value='y')
+    @patch('subprocess.run')
+    def test_configured_mirror_default_is_not_prompted(self, mock_run, _i, _c, _a):
+        with patch('dev.get_default_branch', return_value='mirror/main'):
+            dev.check_stale_branch(Path('/tmp/repo'), 'bigrepo.infra.build',
+                                   default_branch='mirror/main')
+        mock_run.assert_not_called()
+
+    @patch('dev.get_branch_age_days', return_value=365)
+    @patch('dev.get_current_branch', return_value='mirror/old')
+    @patch('builtins.input', return_value='y')
+    @patch('subprocess.run')
+    def test_other_mirror_branch_still_exempt(self, mock_run, _i, _c, _a):
+        with patch('dev.get_default_branch', return_value='mirror/main'):
+            dev.check_stale_branch(Path('/tmp/repo'), 'bigrepo.infra.build',
+                                   default_branch='mirror/main')
+        mock_run.assert_not_called()
+
+    @patch('dev.get_branch_age_days', return_value=365)
+    @patch('dev.get_current_branch', return_value='user/x/old')
+    @patch('builtins.input', return_value='y')
+    @patch('subprocess.run')
+    def test_feature_branch_switches_to_configured_default(self, mock_run, _i, _c, _a):
+        mock_run.return_value = type('R', (), {'returncode': 0})()
+        with patch('dev.get_default_branch', return_value='mirror/main'):
+            dev.check_stale_branch(Path('/tmp/repo'), 'bigrepo.infra.build',
+                                   default_branch='mirror/main')
+        self.assertEqual(mock_run.call_count, 3)
+        self.assertIn('mirror/main', mock_run.call_args_list[1].args[0])
+
 
 class TestCmdPrDiff(unittest.TestCase):
 
