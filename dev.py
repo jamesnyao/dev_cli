@@ -526,24 +526,31 @@ def _clear_pinned_index_bits(repo_path):
     if not success or not listing:
         return []
 
-    pinned = []
+    skip_worktree, assume_unchanged = [], []
     for line in listing.splitlines():
         if len(line) < 3 or line[1] != ' ':
             continue
-        tag = line[0]
-        # Lowercase tags mark assume-unchanged; 'S' marks skip-worktree.
-        if tag == 'S' or tag.islower():
-            pinned.append(line[2:].strip())
+        tag, path = line[0], line[2:].strip()
+        if tag == 'S':
+            skip_worktree.append(path)
+        elif tag.islower():  # lowercase tags mark assume-unchanged
+            assume_unchanged.append(path)
 
-    if not pinned:
-        return []
-
-    result = subprocess.run(
-        ['git', '-C', str(repo_path), 'update-index',
-         '--no-skip-worktree', '--no-assume-unchanged', '--', *pinned],
-        capture_output=True, text=True, check=False,
-    )
-    return pinned if result.returncode == 0 else []
+    cleared = []
+    # One flag per invocation: git accepts `--no-skip-worktree --no-assume-unchanged`
+    # together and exits 0, but only the last flag takes effect, silently leaving the
+    # other bit set.
+    for flag, paths in (('--no-skip-worktree', skip_worktree),
+                        ('--no-assume-unchanged', assume_unchanged)):
+        if not paths:
+            continue
+        result = subprocess.run(
+            ['git', '-C', str(repo_path), 'update-index', flag, '--', *paths],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode == 0:
+            cleared.extend(paths)
+    return cleared
 
 
 def _stash_before_switch(repo_path, branch):

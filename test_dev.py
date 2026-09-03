@@ -1865,11 +1865,22 @@ class TestClearPinnedIndexBits(unittest.TestCase):
              patch('subprocess.run') as mock_run:
             mock_run.return_value = type('R', (), {'returncode': 0})()
             cleared = dev._clear_pinned_index_bits(Path('/tmp/repo'))
-        self.assertEqual(cleared, ['pinned/skip.ts', 'assumed.props'])
-        argv = mock_run.call_args[0][0]
-        self.assertIn('--no-skip-worktree', argv)
-        self.assertIn('--no-assume-unchanged', argv)
-        self.assertEqual(argv[-2:], ['pinned/skip.ts', 'assumed.props'])
+        self.assertEqual(sorted(cleared), ['assumed.props', 'pinned/skip.ts'])
+        # Each bit needs its own invocation; git honors only the last flag when both
+        # are passed together, silently leaving the other bit set.
+        self.assertEqual(mock_run.call_count, 2)
+        first, second = (call.args[0] for call in mock_run.call_args_list)
+        self.assertEqual(first[-3:], ['--no-skip-worktree', '--', 'pinned/skip.ts'])
+        self.assertEqual(second[-3:], ['--no-assume-unchanged', '--', 'assumed.props'])
+
+    def test_only_skip_worktree_runs_one_command(self):
+        with patch('dev.run_git', return_value=(True, 'H a.txt\nS b.ts\n')), \
+             patch('subprocess.run') as mock_run:
+            mock_run.return_value = type('R', (), {'returncode': 0})()
+            cleared = dev._clear_pinned_index_bits(Path('/tmp/repo'))
+        self.assertEqual(cleared, ['b.ts'])
+        self.assertEqual(mock_run.call_count, 1)
+        self.assertIn('--no-skip-worktree', mock_run.call_args[0][0])
 
     def test_no_pinned_files_runs_nothing(self):
         with patch('dev.run_git', return_value=(True, 'H a.txt\nH b.txt\n')), \
