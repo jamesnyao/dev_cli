@@ -558,7 +558,11 @@ def check_stale_branch(repo_path, name, slow_sync=False, gclient_sync=False, def
 
     use_shell = sys.platform == 'win32'
     for op in ops:
-        subprocess.run(op['argv'], cwd=op.get('cwd'), check=False, shell=use_shell)
+        result = subprocess.run(op['argv'], cwd=op.get('cwd'), check=False, shell=use_shell)
+        if result.returncode != 0:
+            emit_error(f"{name}: switch to {default} failed at "
+                       f"`{' '.join(op['argv'])}`; still on {current}")
+            return
     emit_ok(f"Switched to {default}")
 
 

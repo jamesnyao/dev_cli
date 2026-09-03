@@ -1808,6 +1808,20 @@ class TestCheckStaleBranchForce(unittest.TestCase):
         dev.check_stale_branch(Path('/tmp/repo'), 'platform/src')
         mock_run.assert_not_called()
 
+    @patch('dev.emit_ok')
+    @patch('dev.emit_error')
+    @patch('dev.get_default_branch', return_value='main')
+    @patch('dev.get_branch_age_days', return_value=30)
+    @patch('dev.get_current_branch', return_value='user/x/old')
+    @patch('subprocess.run')
+    def test_failed_op_reports_error_and_stops(self, mock_run, _c, _a, _d, mock_err, mock_ok):
+        mock_run.return_value = type('R', (), {'returncode': 1})()
+        dev.check_stale_branch(Path('/tmp/repo'), 'platform/src', assume_yes=True)
+        self.assertEqual(mock_run.call_count, 1)
+        mock_ok.assert_not_called()
+        mock_err.assert_called_once()
+        self.assertIn('user/x/old', mock_err.call_args[0][0])
+
 
 class TestSyncRepoLatest(unittest.TestCase):
     """Test _sync_repo_latest: safe fetch + default-branch update."""
