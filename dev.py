@@ -514,6 +514,53 @@ def _report_background_sync_status(name):
     return False
 
 
+def _clear_pinned_index_bits(repo_path):
+    """Clear ``skip-worktree`` / ``assume-unchanged`` bits, returning the cleared paths.
+
+    Those bits make git refuse a branch switch ("Entry '<path>' not uptodate. Cannot
+    merge.") because it will not overwrite a file it was told to ignore. The pin is
+    local index state, not content, so clearing it destroys nothing: the file's own
+    changes become visible to git again and are stashed by the caller.
+    """
+    success, listing = run_git(repo_path, 'ls-files', '-v')
+    if not success or not listing:
+        return []
+
+    pinned = []
+    for line in listing.splitlines():
+        if len(line) < 3 or line[1] != ' ':
+            continue
+        tag = line[0]
+        # Lowercase tags mark assume-unchanged; 'S' marks skip-worktree.
+        if tag == 'S' or tag.islower():
+            pinned.append(line[2:].strip())
+
+    if not pinned:
+        return []
+
+    result = subprocess.run(
+        ['git', '-C', str(repo_path), 'update-index',
+         '--no-skip-worktree', '--no-assume-unchanged', '--', *pinned],
+        capture_output=True, text=True, check=False,
+    )
+    return pinned if result.returncode == 0 else []
+
+
+def _stash_before_switch(repo_path, branch):
+    """Stash uncommitted work so a forced checkout stays recoverable.
+
+    Returns the stash label if something was stashed, otherwise None.
+    """
+    if not run_git(repo_path, 'status', '--porcelain')[1]:
+        return None
+    label = f'dev-sync {branch} {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
+    result = subprocess.run(
+        ['git', '-C', str(repo_path), 'stash', 'push', '--include-untracked', '-m', label],
+        capture_output=True, text=True, check=False,
+    )
+    return label if result.returncode == 0 else None
+
+
 def check_stale_branch(repo_path, name, slow_sync=False, gclient_sync=False, default_branch=None,
                        assume_yes=False):
     current = get_current_branch(repo_path)
@@ -534,6 +581,19 @@ def check_stale_branch(repo_path, name, slow_sync=False, gclient_sync=False, def
     print(f"{Colors.YELLOW}[WARN]{Colors.NC} {name}: branch '{current}' is {age_days} days old")
     if not confirm(f"  Switch to '{default}'? [Y/n] ", default_yes=True, assume_yes=assume_yes):
         return
+
+    # The switch below is a forced checkout + hard reset, so clear anything that
+    # blocks it and park the working tree in a stash first. Both steps are
+    # recoverable; without them the switch either fails outright on a pinned file
+    # or silently discards uncommitted work.
+    unpinned = _clear_pinned_index_bits(repo_path)
+    if unpinned:
+        print(f"  {Colors.YELLOW}unpinned{Colors.NC} {len(unpinned)} file(s) "
+              f"(skip-worktree/assume-unchanged): {', '.join(unpinned)}")
+    stashed = _stash_before_switch(repo_path, current)
+    if stashed:
+        print(f"  {Colors.YELLOW}stashed{Colors.NC} local changes as \"{stashed}\" "
+              f"(recover with git stash list)")
 
     repo_path_str = str(repo_path)
     ops = [

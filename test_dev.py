@@ -1704,6 +1704,14 @@ class TestCmdBgSync(unittest.TestCase):
 
 
 class TestCheckStaleBranchSlowSync(unittest.TestCase):
+    """Op composition; the unblock helpers are covered by their own tests."""
+
+    def setUp(self):
+        for target, value in (('dev._clear_pinned_index_bits', []),
+                              ('dev._stash_before_switch', None)):
+            patcher = patch(target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     @patch('dev._spawn_background_sync', return_value=99999)
     @patch('dev._sync_state_paths', return_value=(Path('s.json'), Path('s.log')))
@@ -1789,6 +1797,13 @@ class TestConfirm(unittest.TestCase):
 class TestCheckStaleBranchForce(unittest.TestCase):
     """Test check_stale_branch honors assume_yes (dev repo sync -f)."""
 
+    def setUp(self):
+        for target, value in (('dev._clear_pinned_index_bits', []),
+                              ('dev._stash_before_switch', None)):
+            patcher = patch(target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     @patch('dev.get_default_branch', return_value='main')
     @patch('dev.get_branch_age_days', return_value=30)
     @patch('dev.get_current_branch', return_value='user/x/old')
@@ -1821,6 +1836,79 @@ class TestCheckStaleBranchForce(unittest.TestCase):
         mock_ok.assert_not_called()
         mock_err.assert_called_once()
         self.assertIn('user/x/old', mock_err.call_args[0][0])
+
+    @patch('dev._stash_before_switch', return_value='dev-sync user/x/old 2026-01-01 00:00:00')
+    @patch('dev._clear_pinned_index_bits', return_value=['pinned/skip.ts'])
+    @patch('dev.get_default_branch', return_value='main')
+    @patch('dev.get_branch_age_days', return_value=30)
+    @patch('dev.get_current_branch', return_value='user/x/old')
+    @patch('subprocess.run')
+    def test_unblocks_before_switching(self, mock_run, _c, _a, _d, mock_clear, mock_stash):
+        mock_run.return_value = type('R', (), {'returncode': 0})()
+        dev.check_stale_branch(Path('/tmp/repo'), 'pump.ui', assume_yes=True)
+        mock_clear.assert_called_once()
+        mock_stash.assert_called_once()
+        # Unpin + stash happen before the checkout, never after it.
+        self.assertEqual(mock_run.call_count, 3)
+        self.assertIn('checkout', mock_run.call_args_list[1].args[0])
+
+
+class TestClearPinnedIndexBits(unittest.TestCase):
+    """skip-worktree / assume-unchanged bits are what block a branch switch."""
+
+    def test_parses_skip_worktree_and_assume_unchanged(self):
+        listing = ('H normal.txt\n'
+                   'S pinned/skip.ts\n'
+                   'h assumed.props\n'
+                   'H other.txt\n')
+        with patch('dev.run_git', return_value=(True, listing)), \
+             patch('subprocess.run') as mock_run:
+            mock_run.return_value = type('R', (), {'returncode': 0})()
+            cleared = dev._clear_pinned_index_bits(Path('/tmp/repo'))
+        self.assertEqual(cleared, ['pinned/skip.ts', 'assumed.props'])
+        argv = mock_run.call_args[0][0]
+        self.assertIn('--no-skip-worktree', argv)
+        self.assertIn('--no-assume-unchanged', argv)
+        self.assertEqual(argv[-2:], ['pinned/skip.ts', 'assumed.props'])
+
+    def test_no_pinned_files_runs_nothing(self):
+        with patch('dev.run_git', return_value=(True, 'H a.txt\nH b.txt\n')), \
+             patch('subprocess.run') as mock_run:
+            self.assertEqual(dev._clear_pinned_index_bits(Path('/tmp/repo')), [])
+            mock_run.assert_not_called()
+
+    def test_failed_update_index_reports_nothing_cleared(self):
+        with patch('dev.run_git', return_value=(True, 'S a.txt\n')), \
+             patch('subprocess.run') as mock_run:
+            mock_run.return_value = type('R', (), {'returncode': 1})()
+            self.assertEqual(dev._clear_pinned_index_bits(Path('/tmp/repo')), [])
+
+
+class TestStashBeforeSwitch(unittest.TestCase):
+    """A forced checkout must park uncommitted work first."""
+
+    def test_clean_tree_stashes_nothing(self):
+        with patch('dev.run_git', return_value=(True, '')), \
+             patch('subprocess.run') as mock_run:
+            self.assertIsNone(dev._stash_before_switch(Path('/tmp/repo'), 'user/x/old'))
+            mock_run.assert_not_called()
+
+    def test_dirty_tree_is_stashed_with_label(self):
+        with patch('dev.run_git', return_value=(True, ' M a.txt')), \
+             patch('subprocess.run') as mock_run:
+            mock_run.return_value = type('R', (), {'returncode': 0})()
+            label = dev._stash_before_switch(Path('/tmp/repo'), 'user/x/old')
+        self.assertIsNotNone(label)
+        self.assertTrue(label.startswith('dev-sync user/x/old '))
+        argv = mock_run.call_args[0][0]
+        self.assertIn('stash', argv)
+        self.assertIn('--include-untracked', argv)
+
+    def test_failed_stash_returns_none(self):
+        with patch('dev.run_git', return_value=(True, ' M a.txt')), \
+             patch('subprocess.run') as mock_run:
+            mock_run.return_value = type('R', (), {'returncode': 1})()
+            self.assertIsNone(dev._stash_before_switch(Path('/tmp/repo'), 'user/x/old'))
 
 
 class TestSyncRepoLatest(unittest.TestCase):
@@ -2113,6 +2201,13 @@ class TestGetDefaultBranch(unittest.TestCase):
 
 class TestCheckStaleBranchConfiguredDefault(unittest.TestCase):
     """A mirror/* branch is only exempt from the stale prompt when it is not the default."""
+
+    def setUp(self):
+        for target, value in (('dev._clear_pinned_index_bits', []),
+                              ('dev._stash_before_switch', None)):
+            patcher = patch(target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     @patch('dev.get_branch_age_days', return_value=365)
     @patch('dev.get_current_branch', return_value='mirror/main')
