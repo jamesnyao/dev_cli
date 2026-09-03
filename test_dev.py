@@ -1761,6 +1761,54 @@ class TestCheckStaleBranchSlowSync(unittest.TestCase):
         self.assertEqual(mock_run.call_args_list[-1].args[0][0], 'gclient')
 
 
+class TestConfirm(unittest.TestCase):
+    """Test confirm(): prompt answers and --force auto-yes."""
+
+    @patch('builtins.input', return_value='')
+    def test_empty_takes_default(self, _i):
+        self.assertTrue(dev.confirm('q? ', default_yes=True))
+        self.assertFalse(dev.confirm('q? ', default_yes=False))
+
+    @patch('builtins.input', return_value='N')
+    def test_explicit_no(self, _i):
+        self.assertFalse(dev.confirm('q? ', default_yes=True))
+
+    @patch('builtins.input', return_value='Y')
+    def test_explicit_yes(self, _i):
+        self.assertTrue(dev.confirm('q? ', default_yes=False))
+
+    @patch('builtins.input', side_effect=EOFError)
+    def test_eof_is_no(self, _i):
+        self.assertFalse(dev.confirm('q? ', default_yes=True))
+
+    @patch('builtins.input', side_effect=AssertionError('should not prompt'))
+    def test_assume_yes_skips_prompt(self, _i):
+        self.assertTrue(dev.confirm('q? ', default_yes=False, assume_yes=True))
+
+
+class TestCheckStaleBranchForce(unittest.TestCase):
+    """Test check_stale_branch honors assume_yes (dev repo sync -f)."""
+
+    @patch('dev.get_default_branch', return_value='main')
+    @patch('dev.get_branch_age_days', return_value=30)
+    @patch('dev.get_current_branch', return_value='user/x/old')
+    @patch('builtins.input', side_effect=AssertionError('should not prompt'))
+    @patch('subprocess.run')
+    def test_assume_yes_switches_without_prompt(self, mock_run, _i, _c, _a, _d):
+        mock_run.return_value = type('R', (), {'returncode': 0})()
+        dev.check_stale_branch(Path('/tmp/repo'), 'platform/src', assume_yes=True)
+        self.assertEqual(mock_run.call_count, 3)
+
+    @patch('dev.get_default_branch', return_value='main')
+    @patch('dev.get_branch_age_days', return_value=30)
+    @patch('dev.get_current_branch', return_value='user/x/old')
+    @patch('builtins.input', side_effect=EOFError)
+    @patch('subprocess.run')
+    def test_without_force_eof_does_not_switch(self, mock_run, _i, _c, _a, _d):
+        dev.check_stale_branch(Path('/tmp/repo'), 'platform/src')
+        mock_run.assert_not_called()
+
+
 class TestSyncRepoLatest(unittest.TestCase):
     """Test _sync_repo_latest: safe fetch + default-branch update."""
 

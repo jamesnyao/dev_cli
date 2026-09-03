@@ -13,6 +13,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -99,6 +100,26 @@ def emit_warn(msg):
 def emit_error(msg):
     """Report a failure to stderr ([X])."""
     _emit('X', Colors.RED, msg, sys.stderr)
+
+
+def confirm(prompt, default_yes=True, assume_yes=False):
+    """Ask a yes/no question and return the answer.
+
+    ``assume_yes`` answers 'y' without prompting (``--force``); the prompt is
+    still echoed so the transcript shows what was auto-answered. An empty answer
+    takes ``default_yes``; a closed stdin is always a no.
+    """
+    if assume_yes:
+        print(f"{prompt}y")
+        return True
+    try:
+        response = input(prompt).strip().lower()
+    except EOFError:
+        return False
+    if not response:
+        return default_yes
+    return response == 'y'
+
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 CONFIG_DIR = SCRIPT_DIR / 'repoconfig'
@@ -265,8 +286,9 @@ def get_dirty_age_days(repo_path):
 
     if newest is None:
         return None
-    changed_at = datetime.fromtimestamp(newest, tz=timezone.utc)
-    return (datetime.now(timezone.utc) - changed_at).days
+    # Compare epoch floats: datetime.now() truncates to microseconds, which rounds an
+    # exactly-N-day-old mtime down to N-1.
+    return int((time.time() - newest) // 86400)
 
 
 SYNC_STATE_DIR = Path.home() / '.dev' / 'sync-state'
@@ -492,7 +514,8 @@ def _report_background_sync_status(name):
     return False
 
 
-def check_stale_branch(repo_path, name, slow_sync=False, gclient_sync=False, default_branch=None):
+def check_stale_branch(repo_path, name, slow_sync=False, gclient_sync=False, default_branch=None,
+                       assume_yes=False):
     current = get_current_branch(repo_path)
     if not current or current == 'HEAD':
         return
@@ -509,12 +532,7 @@ def check_stale_branch(repo_path, name, slow_sync=False, gclient_sync=False, def
         return
 
     print(f"{Colors.YELLOW}[WARN]{Colors.NC} {name}: branch '{current}' is {age_days} days old")
-    try:
-        response = input(f"  Switch to '{default}'? [Y/n] ").strip().lower() or 'y'
-    except EOFError:
-        return
-
-    if response != 'y':
+    if not confirm(f"  Switch to '{default}'? [Y/n] ", default_yes=True, assume_yes=assume_yes):
         return
 
     repo_path_str = str(repo_path)
@@ -1082,6 +1100,7 @@ def cmd_repo_sync(args):
     """Clone missing repositories and sync tracked files."""
     _self_update()
 
+    assume_yes = getattr(args, 'force', False)
     config = load_config()
     base_path = Path(get_base_path())
 
@@ -1165,7 +1184,7 @@ def cmd_repo_sync(args):
             if slow_sync:
                 print(f"{Colors.GREEN}[OK]{Colors.NC} {name}{suffix}")
                 check_stale_branch(repo_path, name, slow_sync=slow_sync, gclient_sync=gclient_sync,
-                                   default_branch=default_branch)
+                                   default_branch=default_branch, assume_yes=assume_yes)
                 skipped += 1
                 continue
 
@@ -1196,16 +1215,12 @@ def cmd_repo_sync(args):
                 failed += 1
 
             check_stale_branch(repo_path, name, slow_sync=slow_sync, gclient_sync=gclient_sync,
-                               default_branch=default_branch)
+                               default_branch=default_branch, assume_yes=assume_yes)
             continue
 
         # Prompt user before cloning a new repo
-        try:
-            response = input(f"{Colors.YELLOW}[NEW]{Colors.NC} {name} is not set up. Clone it? [y/N] ").strip().lower()
-        except EOFError:
-            response = 'n'
-
-        if response != 'y':
+        if not confirm(f"{Colors.YELLOW}[NEW]{Colors.NC} {name} is not set up. Clone it? [y/N] ",
+                       default_yes=False, assume_yes=assume_yes):
             if devconfig:
                 repo.setdefault('skipOn', []).append(devconfig)
                 config_changed = True
@@ -1793,8 +1808,8 @@ def cmd_repo_old(args):
 
     print(f"\n{Colors.RED}WARNING: This will delete {total} remote branch(es)"
           f" and abandon {active_pr_count} active PR(s)!{Colors.NC}")
-    confirm = input("Type 'yes' to confirm: ")
-    if confirm.lower() != 'yes':
+    response = input("Type 'yes' to confirm: ")
+    if response.lower() != 'yes':
         print("Aborted.")
         return 0
 
@@ -2866,7 +2881,9 @@ def main():
     delete_p.add_argument('path', help='Path to the tracked file (e.g. docs/foo.md)')
 
     repo_sub.add_parser('list', help='List all tracked repositories')
-    repo_sub.add_parser('sync', help='Clone missing repositories')
+    sync_p = repo_sub.add_parser('sync', help='Clone missing repositories')
+    sync_p.add_argument('-f', '--force', action='store_true',
+                        help="Answer 'y' to every prompt (switch stale branches, clone missing repos)")
     repo_sub.add_parser('status', help='Show repo status on this machine')
     repo_sub.add_parser('root', help='Print workspace root for this machine')
 
