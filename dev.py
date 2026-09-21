@@ -250,33 +250,78 @@ def get_branch_age_days(repo_path):
 STALE_DAYS = 14
 
 
-def get_dirty_age_days(repo_path):
+def get_dirty_paths(repo_path):
+    """Return real local changes, excluding byte-identical normalization artifacts.
+
+    None means inspection failed; callers must not reset the working tree.
+    """
+    try:
+        result = subprocess.run(
+            ['git', '-C', str(repo_path), 'status', '--porcelain=v2', '-z',
+             '--untracked-files=all', '--ignore-submodules=none'],
+            capture_output=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        emit_error(f"Cannot inspect local changes in {repo_path}: {exc}")
+        return None
+    if result.returncode != 0:
+        emit_error(f"Cannot inspect local changes in {repo_path}: {os.fsdecode(result.stderr).strip()}")
+        return None
+    if not result.stdout:
+        return []
+    success, root_prefix = run_git(repo_path, 'rev-parse', '--show-cdup')
+    if not success:
+        emit_error(f"Cannot locate repository root for {repo_path}")
+        return None
+
+    paths = []
+    records = iter(os.fsdecode(result.stdout).split('\0'))
+    for record in records:
+        if not record or record.startswith('#'):
+            continue
+        if record.startswith('? '):
+            paths.append(root_prefix + record[2:])
+            continue
+        field_count = {'1': 8, '2': 9, 'u': 10}.get(record[0])
+        if field_count is None:
+            emit_error(f"Unexpected git status record in {repo_path}: {record!r}")
+            return None
+        fields = record.split(' ', field_count)
+        if len(fields) != field_count + 1:
+            emit_error(f"Incomplete git status record in {repo_path}: {record!r}")
+            return None
+        path = root_prefix + fields[-1]
+        if fields[0] == '2':
+            next(records, None)  # The rename source is a separate NUL-delimited record.
+        if (fields[0] == '1' and fields[1:3] == ['.M', 'N...']
+                and fields[3] in ('100644', '100755')
+                and fields[3] == fields[4] == fields[5] and fields[6] == fields[7]):
+            success, raw_sha = run_git(repo_path, 'hash-object', '--no-filters', '--', path)
+            if not success:
+                emit_error(f"Cannot hash local file {path!r} in {repo_path}")
+                return None
+            if raw_sha == fields[7]:
+                continue
+        paths.append(path)
+    return paths
+
+
+def get_dirty_age_days(repo_path, paths=None):
     """Age in days of the newest uncommitted change in the working tree.
 
     Measured from file mtimes rather than commit dates: a default branch that tracks
     origin has a recent last commit even when the local edit sitting on top of it is
-    months old, so ``get_branch_age_days`` cannot answer this. Returns ``None`` when
-    the tree is clean, or when no listed path can be stat'd (deletions only), which
-    callers should treat as "do not touch".
+    months old, so ``get_branch_age_days`` cannot answer this. Normalization
+    artifacts are excluded. Returns ``None`` when no real change can be dated,
+    which callers should treat as "do not touch".
     """
-    success, porcelain = run_git(repo_path, 'status', '--porcelain')
-    if not success or not porcelain:
+    if paths is None:
+        paths = get_dirty_paths(repo_path)
+    if not paths:
         return None
 
     newest = None
-    for line in porcelain.splitlines():
-        # ``run_git`` strips its output, so the first line arrives as "M path" while
-        # the rest keep the leading status column (" M path"). Match the status codes
-        # instead of slicing at a fixed offset.
-        match = re.match(r'^\s*[MADRCU?!]{1,2}\s+(.*)$', line)
-        if not match:
-            continue
-        path = match.group(1).strip()
-        if ' -> ' in path:  # rename/copy: the destination is the live file
-            path = path.split(' -> ', 1)[1]
-        path = path.strip().strip('"')
-        if not path:
-            continue
+    for path in paths:
         try:
             mtime = (Path(repo_path) / path).stat().st_mtime
         except OSError:
@@ -645,8 +690,10 @@ def _sync_repo_latest(repo_path, default_branch=None):
     ``defaultBranch``, if any. Returns ``(status, default_branch)`` where status is
     one of: ``updated`` (advanced to origin), ``current`` (already up to date),
     ``reset`` (stale changes stashed, branch reset to origin), ``dirty`` (recent
-    uncommitted changes, left as-is), ``diverged`` (local default has commits origin
-    doesn't, left as-is), or ``failed``.
+    uncommitted changes, left as-is), ``dirty-unknown`` (age unavailable),
+    ``stash-failed`` or ``stash-incomplete`` (local work could not be cleared),
+    ``diverged`` (local default has commits origin doesn't, left as-is), or ``failed``.
+    Byte-identical normalization artifacts do not block an update.
     """
     repo_path_str = str(repo_path)
 
@@ -673,25 +720,26 @@ def _sync_repo_latest(repo_path, default_branch=None):
 
     current = get_current_branch(repo_path)
     if current == default:
-        if run_git(repo_path, 'status', '--porcelain')[1]:
+        dirty_paths = get_dirty_paths(repo_path)
+        if dirty_paths is None:
+            return 'failed', default
+        if dirty_paths:
             # Recent work is left alone; only changes abandoned for STALE_DAYS are
             # cleared, and they are stashed first so the reset stays recoverable.
-            age = get_dirty_age_days(repo_path)
-            if age is None or age < STALE_DAYS:
+            age = get_dirty_age_days(repo_path, dirty_paths)
+            if age is None:
+                return 'dirty-unknown', default
+            if age < STALE_DAYS:
                 return 'dirty', default
             label = f'dev-sync {default} {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
             if _git('stash', 'push', '--include-untracked', '-m', label).returncode != 0:
-                return 'dirty', default
-            if run_git(repo_path, 'status', '--porcelain')[1]:
-                # The tree is still dirty right after stashing, so the diff is not
-                # real content: it is a renormalization artifact (.gitattributes
-                # demands an eol normalization the committed blob does not have), and
-                # it reappears the instant the file is written back. Stashing it on
-                # every sync would pile up junk entries forever, so undo and skip.
-                top = run_git(repo_path, 'stash', 'list', '-1')[1]
-                if label in top:
-                    _git('stash', 'drop', 'stash@{0}')
-                return 'dirty', default
+                return 'stash-failed', default
+            remaining = get_dirty_paths(repo_path)
+            if remaining is None:
+                return 'failed', default
+            if remaining:
+                # A stash can contain real work even if some files remain dirty.
+                return 'stash-incomplete', default
             if ok_local and local_sha == remote_sha:
                 return 'reset', default
             if _git('reset', '--hard', f'origin/{default}').returncode == 0:
@@ -1275,6 +1323,15 @@ def cmd_repo_sync(args):
                 print(f"{Colors.YELLOW}[WARN]{Colors.NC} {name} "
                       f"{Colors.YELLOW}(uncommitted changes newer than {STALE_DAYS}d; "
                       f"default not reset){Colors.NC}{suffix}")
+                skipped += 1
+            elif status in ('dirty-unknown', 'stash-failed', 'stash-incomplete'):
+                reason = {
+                    'dirty-unknown': 'uncommitted change age unknown',
+                    'stash-failed': 'could not stash local changes',
+                    'stash-incomplete': 'local changes remain after stashing; stash preserved',
+                }[status]
+                print(f"{Colors.YELLOW}[WARN]{Colors.NC} {name} "
+                      f"{Colors.YELLOW}({reason}; default not reset){Colors.NC}{suffix}")
                 skipped += 1
             elif status == 'diverged':
                 print(f"{Colors.YELLOW}[WARN]{Colors.NC} {name} "

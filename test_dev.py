@@ -1925,6 +1925,11 @@ class TestStashBeforeSwitch(unittest.TestCase):
 class TestSyncRepoLatest(unittest.TestCase):
     """Test _sync_repo_latest: safe fetch + default-branch update."""
 
+    def setUp(self):
+        changes = patch('dev.get_dirty_paths', return_value=[])
+        self.changes = changes.start()
+        self.addCleanup(changes.stop)
+
     @staticmethod
     def _subproc(fetch=0, reset=0, ff=0):
         def se(cmd, *a, **k):
@@ -1939,20 +1944,13 @@ class TestSyncRepoLatest(unittest.TestCase):
         return se
 
     @staticmethod
-    def _rungit(origin_sha='aaa', local_sha='aaa', dirty='', local_ok=True, dirty_after=''):
-        """Fake run_git. ``dirty`` is the first status result, ``dirty_after`` every
-        later one, so a stash that does or does not clean the tree can be modelled."""
-        state = {'status_calls': 0}
-
+    def _rungit(origin_sha='aaa', local_sha='aaa', local_ok=True):
         def se(repo, *args):
             if args and args[0] == 'rev-parse':
                 ref = args[1]
                 if ref.startswith('origin/'):
                     return (True, origin_sha)
                 return (local_ok, local_sha)
-            if args and args[0] == 'status':
-                state['status_calls'] += 1
-                return (True, dirty if state['status_calls'] == 1 else dirty_after)
             return (True, '')
         return se
 
@@ -1960,7 +1958,7 @@ class TestSyncRepoLatest(unittest.TestCase):
     @patch('dev.get_default_branch', return_value='main')
     def test_on_default_clean_behind_resets(self, _d, _c):
         with patch('subprocess.run', side_effect=self._subproc()), \
-             patch('dev.run_git', side_effect=self._rungit(origin_sha='aaa', local_sha='bbb', dirty='')):
+             patch('dev.run_git', side_effect=self._rungit(origin_sha='aaa', local_sha='bbb')):
             status, default = dev._sync_repo_latest(Path('/tmp/repo'))
         self.assertEqual((status, default), ('updated', 'main'))
 
@@ -1975,6 +1973,7 @@ class TestSyncRepoLatest(unittest.TestCase):
     @patch('dev.get_current_branch', return_value='main')
     @patch('dev.get_default_branch', return_value='main')
     def test_on_default_dirty_is_not_reset(self, _d, _c):
+        self.changes.return_value = ['f.py']
         reset_called = {'n': 0}
 
         def se(cmd, *a, **k):
@@ -1984,7 +1983,7 @@ class TestSyncRepoLatest(unittest.TestCase):
 
         with patch('subprocess.run', side_effect=se), \
              patch('dev.get_dirty_age_days', return_value=1), \
-             patch('dev.run_git', side_effect=self._rungit(origin_sha='aaa', local_sha='bbb', dirty=' M f.py')):
+             patch('dev.run_git', side_effect=self._rungit(origin_sha='aaa', local_sha='bbb')):
             status, default = dev._sync_repo_latest(Path('/tmp/repo'))
         self.assertEqual((status, default), ('dirty', 'main'))
         self.assertEqual(reset_called['n'], 0)
@@ -1992,6 +1991,7 @@ class TestSyncRepoLatest(unittest.TestCase):
     @patch('dev.get_current_branch', return_value='main')
     @patch('dev.get_default_branch', return_value='main')
     def test_on_default_stale_dirty_is_stashed_then_reset(self, _d, _c):
+        self.changes.side_effect = [['f.py'], []]
         calls = []
 
         def se(cmd, *a, **k):
@@ -2000,7 +2000,7 @@ class TestSyncRepoLatest(unittest.TestCase):
 
         with patch('subprocess.run', side_effect=se), \
              patch('dev.get_dirty_age_days', return_value=dev.STALE_DAYS), \
-             patch('dev.run_git', side_effect=self._rungit(origin_sha='aaa', local_sha='bbb', dirty=' M f.py')):
+             patch('dev.run_git', side_effect=self._rungit(origin_sha='aaa', local_sha='bbb')):
             status, default = dev._sync_repo_latest(Path('/tmp/repo'))
         self.assertEqual((status, default), ('reset', 'main'))
         stash = [c for c in calls if 'stash' in c]
@@ -2014,6 +2014,7 @@ class TestSyncRepoLatest(unittest.TestCase):
     @patch('dev.get_current_branch', return_value='main')
     @patch('dev.get_default_branch', return_value='main')
     def test_stale_dirty_at_origin_sha_is_stashed_without_reset(self, _d, _c):
+        self.changes.side_effect = [['f.py'], []]
         calls = []
 
         def se(cmd, *a, **k):
@@ -2022,7 +2023,7 @@ class TestSyncRepoLatest(unittest.TestCase):
 
         with patch('subprocess.run', side_effect=se), \
              patch('dev.get_dirty_age_days', return_value=99), \
-             patch('dev.run_git', side_effect=self._rungit(origin_sha='aaa', local_sha='aaa', dirty=' M f.py')):
+             patch('dev.run_git', side_effect=self._rungit(origin_sha='aaa', local_sha='aaa')):
             status, default = dev._sync_repo_latest(Path('/tmp/repo'))
         self.assertEqual((status, default), ('reset', 'main'))
         self.assertEqual(len([c for c in calls if 'stash' in c]), 1)
@@ -2030,39 +2031,41 @@ class TestSyncRepoLatest(unittest.TestCase):
 
     @patch('dev.get_current_branch', return_value='main')
     @patch('dev.get_default_branch', return_value='main')
-    def test_stash_that_does_not_clean_tree_is_dropped(self, _d, _c):
-        # A file whose committed blob violates .gitattributes normalization is
-        # reported modified again the moment it is written back, so stashing never
-        # cleans the tree. Sync must undo its own stash instead of making one per run.
+    def test_stash_that_does_not_clean_tree_is_preserved(self, _d, _c):
+        self.changes.side_effect = [['f.py'], ['still-dirty.py']]
         calls = []
 
         def se(cmd, *a, **k):
             calls.append(cmd)
             return type('R', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
 
-        def rungit(repo, *args):
-            if args and args[0] == 'status':
-                return (True, ' M eol.cs')  # still dirty, even after the stash
-            if args and args[0] == 'stash':
-                return (True, 'stash@{0}: On main: dev-sync main 2026-01-01 00:00:00')
-            if args and args[0] == 'rev-parse':
-                return (True, 'aaa' if args[1].startswith('origin/') else 'bbb')
-            return (True, '')
-
         with patch('subprocess.run', side_effect=se), \
              patch('dev.get_dirty_age_days', return_value=99), \
-             patch('dev.run_git', side_effect=rungit), \
-             patch('dev.datetime') as mock_dt:
-            mock_dt.now.return_value.strftime.return_value = '2026-01-01 00:00:00'
+             patch('dev.run_git', side_effect=self._rungit(origin_sha='aaa', local_sha='bbb')):
             status, default = dev._sync_repo_latest(Path('/tmp/repo'))
 
-        self.assertEqual((status, default), ('dirty', 'main'))
-        self.assertEqual(len([c for c in calls if 'drop' in c]), 1)
+        self.assertEqual((status, default), ('stash-incomplete', 'main'))
+        self.assertEqual(len([c for c in calls if 'stash' in c]), 1)
+        self.assertEqual(len([c for c in calls if 'drop' in c]), 0)
         self.assertEqual(len([c for c in calls if 'reset' in c]), 0)
 
     @patch('dev.get_current_branch', return_value='main')
     @patch('dev.get_default_branch', return_value='main')
+    def test_failed_inspection_never_resets_or_drops_stash(self, _d, _c):
+        for changes in ([None], [['f.py'], None]):
+            with self.subTest(changes=changes), \
+                 patch('subprocess.run', side_effect=self._subproc()) as mock_run, \
+                 patch('dev.get_dirty_age_days', return_value=99), \
+                 patch('dev.run_git', side_effect=self._rungit()):
+                self.changes.side_effect = changes
+                self.assertEqual(dev._sync_repo_latest(Path('/tmp/repo')), ('failed', 'main'))
+                self.assertFalse(any('reset' in c.args[0] or 'drop' in c.args[0]
+                                     for c in mock_run.call_args_list))
+
+    @patch('dev.get_current_branch', return_value='main')
+    @patch('dev.get_default_branch', return_value='main')
     def test_failed_stash_does_not_reset(self, _d, _c):
+        self.changes.return_value = ['f.py']
         calls = []
 
         def se(cmd, *a, **k):
@@ -2072,14 +2075,15 @@ class TestSyncRepoLatest(unittest.TestCase):
 
         with patch('subprocess.run', side_effect=se), \
              patch('dev.get_dirty_age_days', return_value=99), \
-             patch('dev.run_git', side_effect=self._rungit(origin_sha='aaa', local_sha='bbb', dirty=' M f.py')):
+             patch('dev.run_git', side_effect=self._rungit(origin_sha='aaa', local_sha='bbb')):
             status, default = dev._sync_repo_latest(Path('/tmp/repo'))
-        self.assertEqual((status, default), ('dirty', 'main'))
+        self.assertEqual((status, default), ('stash-failed', 'main'))
         self.assertEqual(len([c for c in calls if 'reset' in c]), 0)
 
     @patch('dev.get_current_branch', return_value='main')
     @patch('dev.get_default_branch', return_value='main')
     def test_undatable_dirty_tree_is_not_reset(self, _d, _c):
+        self.changes.return_value = ['gone.py']
         calls = []
 
         def se(cmd, *a, **k):
@@ -2088,9 +2092,9 @@ class TestSyncRepoLatest(unittest.TestCase):
 
         with patch('subprocess.run', side_effect=se), \
              patch('dev.get_dirty_age_days', return_value=None), \
-             patch('dev.run_git', side_effect=self._rungit(origin_sha='aaa', local_sha='bbb', dirty=' D f.py')):
+             patch('dev.run_git', side_effect=self._rungit(origin_sha='aaa', local_sha='bbb')):
             status, default = dev._sync_repo_latest(Path('/tmp/repo'))
-        self.assertEqual((status, default), ('dirty', 'main'))
+        self.assertEqual((status, default), ('dirty-unknown', 'main'))
         self.assertEqual(len([c for c in calls if 'reset' in c or 'stash' in c]), 0)
 
     @patch('dev.get_current_branch', return_value='user/x/feat')
@@ -2125,6 +2129,207 @@ class TestSyncRepoLatest(unittest.TestCase):
         self.assertEqual(mock_default.call_args[0][1], 'mirror/main')
 
 
+class TestGetDirtyPaths(unittest.TestCase):
+    def _inspect(self, status, raw_sha='abc'):
+        result = subprocess.CompletedProcess([], 0, os.fsencode(status), b'')
+        with patch('subprocess.run', return_value=result), \
+             patch('dev.run_git', side_effect=lambda repo, *args:
+                   (True, '' if args[0] == 'rev-parse' else raw_sha)):
+            return dev.get_dirty_paths(Path('/tmp/repo'))
+
+    def test_clean_and_byte_identical_files_are_excluded(self):
+        self.assertEqual(self._inspect(''), [])
+        self.assertEqual(self._inspect(
+            '1 .M N... 100644 100644 100644 abc abc file.cs\0'), [])
+
+    def test_real_changes_are_not_excluded(self):
+        records = [
+            '1 .M N... 100644 100644 100644 abc abc file.cs',
+            '1 M. N... 100644 100644 100644 old abc file.cs',
+            '1 MM N... 100644 100644 100644 old abc file.cs',
+            '1 .M N... 100644 100644 100755 abc abc file.cs',
+            '1 .M N... 120000 120000 120000 abc abc file.cs',
+            '1 .M S.M. 160000 160000 160000 abc abc file.cs',
+            '1 .D N... 100644 100644 000000 abc abc file.cs',
+            'u UU N... 100644 100644 100644 100644 abc def ghi file.cs',
+            '? file.cs',
+        ]
+        for record in records:
+            with self.subTest(record=record):
+                self.assertEqual(self._inspect(record + '\0', raw_sha='changed'), ['file.cs'])
+        for record in records[1:]:
+            with self.subTest(same_bytes=record):
+                self.assertEqual(self._inspect(record + '\0'), ['file.cs'])
+
+    def test_rename_consumes_source_and_preserves_unusual_paths(self):
+        path = ' leading -> path"\n.cs '
+        status = (f'2 R. N... 100644 100644 100644 abc abc R100 {path}\0old.cs\0'
+                  '? untracked/file.cs\0')
+        self.assertEqual(self._inspect(status), [path, 'untracked/file.cs'])
+
+    def test_raw_hash_receives_exact_path(self):
+        path = ' leading -> path"\n.cs '
+        result = subprocess.CompletedProcess(
+            [], 0, os.fsencode(f'1 .M N... 100644 100644 100644 abc abc {path}\0'), b'')
+        with patch('subprocess.run', return_value=result), \
+             patch('dev.run_git', side_effect=[(True, ''), (True, 'abc')]) as mock_git:
+            self.assertEqual(dev.get_dirty_paths(Path('/tmp/repo')), [])
+        mock_git.assert_any_call(
+            Path('/tmp/repo'), 'hash-object', '--no-filters', '--', path)
+
+    def test_inspection_errors_fail_closed(self):
+        failures = [
+            subprocess.CompletedProcess([], 1, b'', b'git failed'),
+            subprocess.CompletedProcess([], 0, b'1 incomplete\0', b''),
+            subprocess.CompletedProcess([], 0, b'unexpected\0', b''),
+        ]
+        for result in failures:
+            with self.subTest(result=result), patch('subprocess.run', return_value=result), \
+                 patch('dev.run_git', return_value=(True, '')), \
+                 patch('sys.stderr', new_callable=StringIO) as output:
+                self.assertIsNone(dev.get_dirty_paths(Path('/tmp/repo')))
+                self.assertIn('[X]', output.getvalue())
+        for error in (OSError('cannot run git'), subprocess.TimeoutExpired('git', 30)):
+            with self.subTest(error=error), patch('subprocess.run', side_effect=error), \
+                 patch('sys.stderr', new_callable=StringIO):
+                self.assertIsNone(dev.get_dirty_paths(Path('/tmp/repo')))
+
+    def test_hash_failure_is_not_treated_as_clean(self):
+        result = subprocess.CompletedProcess(
+            [], 0, b'1 .M N... 100644 100644 100644 abc abc file.cs\0', b'')
+        with patch('subprocess.run', return_value=result), \
+             patch('dev.run_git', side_effect=[(True, ''), (False, '')]), \
+             patch('sys.stderr', new_callable=StringIO):
+            self.assertIsNone(dev.get_dirty_paths(Path('/tmp/repo')))
+
+
+class TestNormalizationSync(unittest.TestCase):
+    """Exercise normalization artifacts against real, isolated Git repositories."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix='dev-normalization-')
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.upstream = self.root / 'upstream'
+        self.repo = self.root / 'repo'
+        environment = patch.dict(os.environ, {
+            'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1',
+            'GIT_CONFIG_COUNT': '0',
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.upstream.mkdir()
+        self._git(self.upstream, 'init', '--template=', '-b', 'main')
+        self._git(self.upstream, 'config', 'user.email', 'test@example.invalid')
+        self._git(self.upstream, 'config', 'user.name', 'Test')
+        self._git(self.upstream, 'config', 'core.autocrlf', 'false')
+        (self.upstream / '.gitattributes').write_bytes(b'* -text\n')
+        (self.upstream / 'sample.cs').write_bytes(b'class Sample {}\r\n')
+        (self.upstream / 'notes.txt').write_bytes(b'original\n')
+        self._git(self.upstream, 'add', '.')
+        self._git(self.upstream, 'commit', '-qm', 'Initial files')
+        (self.upstream / '.gitattributes').write_bytes(b'* -text\n*.cs text eol=crlf\n')
+        self._git(self.upstream, 'add', '.gitattributes')
+        self._git(self.upstream, 'commit', '-qm', 'Require normalization')
+        self._git(self.root, 'clone', '--quiet', '--no-hardlinks',
+                  str(self.upstream), str(self.repo))
+        self._git(self.repo, 'config', 'user.email', 'test@example.invalid')
+        self._git(self.repo, 'config', 'user.name', 'Test')
+        self.initial = self._git(self.repo, 'rev-parse', 'HEAD')
+        self.assertIn(b'sample.cs', self._git(self.repo, 'status', '--porcelain'))
+        (self.upstream / 'notes.txt').write_bytes(b'upstream\n')
+        self._git(self.upstream, 'add', 'notes.txt')
+        self._git(self.upstream, 'commit', '-qm', 'Upstream update')
+
+    @staticmethod
+    def _git(repo, *args):
+        result = subprocess.run(
+            ['git', '-C', str(repo), *args], capture_output=True, check=True, timeout=30)
+        return result.stdout
+
+    def test_phantom_changes_sync_without_stashing_or_rewriting_on_repeat(self):
+        self.assertEqual(dev.get_dirty_paths(self.repo), [])
+        self.assertEqual(dev._sync_repo_latest(self.repo), ('updated', 'main'))
+        self.assertEqual(self._git(self.repo, 'rev-parse', 'HEAD'),
+                         self._git(self.upstream, 'rev-parse', 'HEAD'))
+        mtime = (self.repo / 'sample.cs').stat().st_mtime_ns
+        self.assertEqual(dev._sync_repo_latest(self.repo), ('current', 'main'))
+        self.assertEqual((self.repo / 'sample.cs').stat().st_mtime_ns, mtime)
+        self.assertEqual(self._git(self.repo, 'stash', 'list'), b'')
+
+    def test_real_edits_including_line_endings_are_protected(self):
+        for contents in (b'class Changed {}\r\n', b'class Sample {}\n', b'class Sample {} \r\n'):
+            with self.subTest(contents=contents):
+                (self.repo / 'sample.cs').write_bytes(contents)
+                self.assertEqual(dev._sync_repo_latest(self.repo), ('dirty', 'main'))
+                self.assertEqual((self.repo / 'sample.cs').read_bytes(), contents)
+                self.assertEqual(self._git(self.repo, 'rev-parse', 'HEAD'), self.initial)
+                self.assertEqual(self._git(self.repo, 'stash', 'list'), b'')
+
+    def test_staged_and_untracked_work_is_protected(self):
+        self._git(self.repo, 'config', 'status.showUntrackedFiles', 'no')
+        self._git(self.repo, 'add', '--renormalize', 'sample.cs')
+        (self.repo / 'new.txt').write_bytes(b'untracked\n')
+        self.assertEqual(set(dev.get_dirty_paths(self.repo)), {'sample.cs', 'new.txt'})
+        self.assertEqual(dev._sync_repo_latest(self.repo), ('dirty', 'main'))
+        self.assertEqual(self._git(self.repo, 'rev-parse', 'HEAD'), self.initial)
+        self.assertEqual((self.repo / 'new.txt').read_bytes(), b'untracked\n')
+        self.assertIn(b'sample.cs', self._git(self.repo, 'diff', '--cached', '--name-only'))
+
+    def test_stale_real_work_ignores_recent_phantom_timestamp_and_keeps_stash(self):
+        old_time = time.time() - 40 * 86400
+        for name in ('notes.txt', 'new.txt'):
+            (self.repo / name).write_bytes(b'local work\n')
+            os.utime(self.repo / name, (old_time, old_time))
+        self.assertEqual(dev.get_dirty_age_days(self.repo), 40)
+        self.assertEqual(dev._sync_repo_latest(self.repo), ('reset', 'main'))
+        self.assertEqual((self.repo / 'notes.txt').read_bytes(), b'upstream\n')
+        self.assertFalse((self.repo / 'new.txt').exists())
+        self.assertEqual(self._git(self.repo, 'show', 'stash@{0}:notes.txt'), b'local work\n')
+        self.assertEqual(self._git(self.repo, 'show', 'stash@{0}^3:new.txt'), b'local work\n')
+        stash = self._git(self.repo, 'rev-parse', 'refs/stash')
+        self.assertEqual(dev._sync_repo_latest(self.repo), ('current', 'main'))
+        self.assertEqual(self._git(self.repo, 'rev-parse', 'refs/stash'), stash)
+
+    def test_sync_from_subdirectory_uses_relative_paths_regardless_of_config(self):
+        nested = self.repo / 'nested'
+        nested.mkdir()
+        self._git(self.repo, 'config', 'status.relativePaths', 'false')
+        self.assertEqual(dev.get_dirty_paths(nested), [])
+        (self.repo / 'notes.txt').write_bytes(b'local work\n')
+        self.assertEqual(dev.get_dirty_paths(nested), ['../notes.txt'])
+        self.assertEqual(dev._sync_repo_latest(nested), ('dirty', 'main'))
+        self.assertEqual(self._git(self.repo, 'rev-parse', 'HEAD'), self.initial)
+        self.assertEqual((self.repo / 'notes.txt').read_bytes(), b'local work\n')
+
+    def test_repo_sync_command_reports_success_and_specific_skip_reasons(self):
+        config = {'repos': [{'path': 'repo', 'remoteUrl': str(self.upstream)}], 'files': []}
+        with patch('dev._self_update'), patch('dev.sync_rcfiles_push'), \
+             patch('dev.load_config', return_value=config), \
+             patch('dev.get_base_path', return_value=str(self.root)), \
+             patch('dev._report_background_sync_status', return_value=False), \
+             patch('sys.argv', ['dev', 'repo', 'sync']), \
+             patch('sys.stdout', new_callable=StringIO) as output:
+            self.assertEqual(dev.main(), 0)
+            self.assertIn('[OK] repo (synced to origin/main)', output.getvalue())
+            self.assertIn('Synced: 1 | Skipped: 0 | Failed: 0', output.getvalue())
+            for status, reason in (
+                ('dirty', 'uncommitted changes newer than 14d'),
+                ('dirty-unknown', 'uncommitted change age unknown'),
+                ('stash-failed', 'could not stash local changes'),
+                ('stash-incomplete', 'local changes remain after stashing; stash preserved'),
+            ):
+                with self.subTest(status=status), \
+                     patch('dev._sync_repo_latest', return_value=(status, 'main')):
+                    output.seek(0)
+                    output.truncate(0)
+                    self.assertEqual(dev.main(), 0)
+                    self.assertIn(f'[WARN] repo ({reason}; default not reset)', output.getvalue())
+                    self.assertIn('Synced: 0 | Skipped: 1 | Failed: 0', output.getvalue())
+                    if status != 'dirty':
+                        self.assertNotIn('newer than', output.getvalue())
+
+
 class TestGetDirtyAgeDays(unittest.TestCase):
     """Working-tree change age is measured from file mtimes, not commit dates."""
 
@@ -2141,41 +2346,39 @@ class TestGetDirtyAgeDays(unittest.TestCase):
         return path
 
     def test_clean_tree_is_none(self):
-        with patch('dev.run_git', return_value=(True, '')):
+        with patch('dev.get_dirty_paths', return_value=[]):
             self.assertIsNone(dev.get_dirty_age_days(Path(self.tmp)))
 
     def test_uses_newest_change(self):
         self._touch('old.py', 90)
         self._touch('new.py', 2)
-        porcelain = ' M old.py\n?? new.py'
-        with patch('dev.run_git', return_value=(True, porcelain)):
+        with patch('dev.get_dirty_paths', return_value=['old.py', 'new.py']):
             self.assertEqual(dev.get_dirty_age_days(Path(self.tmp)), 2)
 
-    def test_first_line_without_leading_column(self):
-        # run_git strips its output, so the first porcelain line loses its leading
-        # status space. Parsing must not assume a fixed column offset.
+    def test_supplied_paths_do_not_repeat_inspection(self):
         self._touch('old.py', 40)
         self._touch('other.py', 80)
-        with patch('dev.run_git', return_value=(True, 'M old.py\n M other.py')):
-            self.assertEqual(dev.get_dirty_age_days(Path(self.tmp)), 40)
+        with patch('dev.get_dirty_paths') as mock_paths:
+            self.assertEqual(dev.get_dirty_age_days(Path(self.tmp), ['old.py', 'other.py']), 40)
+        mock_paths.assert_not_called()
 
     def test_stale_change_reports_its_age(self):
         self._touch('old.py', 40)
-        with patch('dev.run_git', return_value=(True, ' M old.py')):
+        with patch('dev.get_dirty_paths', return_value=['old.py']):
             self.assertEqual(dev.get_dirty_age_days(Path(self.tmp)), 40)
 
     def test_rename_uses_destination_path(self):
         self._touch('new.py', 30)
-        with patch('dev.run_git', return_value=(True, 'R  gone.py -> new.py')):
+        with patch('dev.get_dirty_paths', return_value=['new.py']):
             self.assertEqual(dev.get_dirty_age_days(Path(self.tmp)), 30)
 
     def test_deletions_only_is_none(self):
-        with patch('dev.run_git', return_value=(True, ' D gone.py')):
+        with patch('dev.get_dirty_paths', return_value=['gone.py']):
             self.assertIsNone(dev.get_dirty_age_days(Path(self.tmp)))
 
-    def test_quoted_path_is_unquoted(self):
+    def test_spaced_path(self):
         self._touch('spaced name.py', 25)
-        with patch('dev.run_git', return_value=(True, ' M "spaced name.py"')):
+        with patch('dev.get_dirty_paths', return_value=['spaced name.py']):
             self.assertEqual(dev.get_dirty_age_days(Path(self.tmp)), 25)
 
 
