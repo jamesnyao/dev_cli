@@ -11,14 +11,14 @@ real repository lists, and custom shell hooks.
 
 ```bash
 git clone "<clone-url>" "$HOME/dev_cli"
-python3 "$HOME/dev_cli/dev.py" init
+"$HOME/dev_cli/dev" init
 ```
 
 Windows (PowerShell):
 
 ```powershell
 git clone "<clone-url>" "$HOME\dev_cli"
-py "$HOME\dev_cli\dev.py" init
+& "$HOME\dev_cli\dev.ps1" init
 ```
 
 `dev init` prints its own next steps. It's idempotent and self-healing — safe
@@ -26,6 +26,10 @@ to rerun any time, and it restores anything deleted (profile redirect,
 override config, hooks stub) without touching existing customizations. Or
 invoke `python3 ~/dev_cli/dev.py` directly without shell profiles, setting
 `DEVCONFIG=example-machine`.
+
+If Python isn't installed, the launchers print a message; run
+`dev python update` (bash) or `.\dev.ps1 python update` (PowerShell) to
+bootstrap it via your package manager (apt/dnf/brew or winget), then retry.
 
 ## Configuration
 

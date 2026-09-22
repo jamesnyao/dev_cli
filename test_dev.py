@@ -854,6 +854,71 @@ class TestShellWorkspace(unittest.TestCase):
         self.assertEqual((tool / 'dev_config.json').read_bytes(), sample_bytes)
 
 
+class TestDevLauncherPythonBootstrap(unittest.TestCase):
+    """The `dev` bash launcher bootstraps python3 via the OS package manager
+    when it's missing from PATH, and otherwise guides the user to opt in."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
+        self.tool = self.home / 'dev_cli'
+        self.tool.mkdir()
+        for name in ('dev', 'dev.py'):
+            shutil.copy2(Path(__file__).parent / name, self.tool / name)
+        (self.tool / 'dev').chmod(0o755)
+        # A curated PATH with the handful of external tools `dev` and its
+        # fake package managers need (dirname/readlink for SCRIPT_DIR, ln for
+        # the fake brew), and nothing that could resolve a real python3.
+        self.bin = self.home / 'bin'
+        self.bin.mkdir()
+        for tool in ('dirname', 'readlink', 'ln', 'mkdir', 'chmod'):
+            (self.bin / tool).symlink_to(shutil.which(tool))
+        self.env = dict(os.environ, HOME=str(self.home), PATH=str(self.bin))
+
+    def _fake_cmd(self, name, script):
+        path = self.bin / name
+        path.write_text(f'#!/bin/sh\n{script}\n')
+        path.chmod(0o755)
+        return path
+
+    def run_dev(self, *args):
+        return subprocess.run([str(self.tool / 'dev'), *args],
+                               env=self.env, text=True, capture_output=True)
+
+    def test_guides_user_when_python_and_no_package_manager(self):
+        result = self.run_dev('repo', 'root')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Run 'dev python update' to bootstrap it", result.stdout)
+
+    def test_bootstrap_installs_and_reruns_with_brew(self):
+        # A fake brew that "installs" python3 by dropping a working shim on PATH.
+        self._fake_cmd('brew', f'''
+if [ "$1" = "install" ]; then
+  ln -sf "{sys.executable}" "{self.bin}/python3"
+  exit 0
+fi
+exit 1
+''')
+        result = self.run_dev('python', 'update')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Bootstrapping', result.stdout)
+        self.assertIn('Run your dev command again', result.stdout)
+
+    def test_bootstrap_reports_failure_when_install_fails(self):
+        self._fake_cmd('brew', 'exit 1')
+        result = self.run_dev('python', 'update')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Failed to install Python', result.stdout)
+
+    def test_bootstrap_warns_when_python3_still_missing_after_install(self):
+        # brew "succeeds" but doesn't actually put a python3 on PATH.
+        self._fake_cmd('brew', 'exit 0')
+        result = self.run_dev('python', 'update')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("still isn't on PATH", result.stdout)
+
+
 class TestCmdInit(unittest.TestCase):
 
     def setUp(self):

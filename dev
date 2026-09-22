@@ -16,8 +16,12 @@ elif [ "$1" = "python" ]; then
     exit 1
   fi
   if [ $? -eq 0 ]; then
-    echo -e "\033[0;32mPython installed. Re-running dev command...\033[0m"
-    python3 "$SCRIPT_DIR/dev.py" "$@"
+    if command -v python3 &>/dev/null; then
+      echo -e "\033[0;32mPython installed. Run your dev command again.\033[0m"
+      exit 0
+    fi
+    echo -e "\033[0;33mPython installed, but python3 still isn't on PATH. Open a new terminal and retry.\033[0m"
+    exit 1
   else
     echo -e "\033[0;31mFailed to install Python.\033[0m"
     exit 1
