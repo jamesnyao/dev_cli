@@ -125,25 +125,24 @@ def confirm(prompt, default_yes=True, assume_yes=False):
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
 def _resolve_config_dir():
-    """Locate the singleton config directory (repos.json + secrets).
+    """Locate the singleton config directory (config.json + secrets).
 
     dev.py is a public, work-agnostic tool: it carries no private data of its
     own, so the config directory normally lives outside it, one level up
     (e.g. a private parent repo that has dev_scripts as a git submodule).
-    Resolution order: explicit override, then a sibling `repoconfig/` next
-    to dev_scripts, then (for someone who clones just this repo standalone)
-    a `repoconfig/` inside it.
+    Resolution order: explicit override, then the parent directory if it
+    already has a config.json (submodule-of-private-repo case), then (for
+    someone who clones just this repo standalone) dev_scripts itself.
     """
     env_override = os.getenv('DEV_CONFIG_DIR')
     if env_override:
         return Path(os.path.expandvars(os.path.expanduser(env_override)))
-    parent_repoconfig = SCRIPT_DIR.parent / 'repoconfig'
-    if parent_repoconfig.is_dir():
-        return parent_repoconfig
-    return SCRIPT_DIR / 'repoconfig'
+    if (SCRIPT_DIR.parent / 'config.json').is_file():
+        return SCRIPT_DIR.parent
+    return SCRIPT_DIR
 
 CONFIG_DIR = _resolve_config_dir()
-CONFIG_FILE = CONFIG_DIR / 'repos.json'
+CONFIG_FILE = CONFIG_DIR / 'config.json'
 ADO_PAT_FILE = CONFIG_DIR / 'ado_pat.txt'
 ADO_TOKEN_CACHE_FILE = CONFIG_DIR / 'ado_token_cache.json'
 ADO_TOKEN_CACHE_SECONDS = 2400  # 40 minute fallback when JWT exp can't be parsed
@@ -263,7 +262,7 @@ def get_current_branch(repo_path):
 def get_default_branch(repo_path, configured=None):
     """Resolve a repo's default branch.
 
-    ``configured`` is the optional per-repo ``defaultBranch`` from repos.json. It
+    ``configured`` is the optional per-repo ``defaultBranch`` from config.json. It
     wins over origin/HEAD when the branch actually exists on origin, so a repo can
     be pinned to a working default (e.g. ``mirror/main``) that is not the remote's
     own HEAD.
@@ -1669,7 +1668,7 @@ def cmd_repo_root(args):
 
 
 def cmd_config_get(args):
-    """Print a dotted-path value from repos.json (e.g. `identity.gitEmail`).
+    """Print a dotted-path value from config.json (e.g. `identity.gitEmail`).
 
     Lets non-Python callers (shell/PowerShell setup scripts) read the same
     singleton config file dev.py uses, instead of hardcoding personal values.
@@ -2084,7 +2083,7 @@ def cmd_repo_old(args):
 # Init Command
 # =============================================================================
 
-BASHRC_SOURCE_LINE = '[ -f ~/.zshrc ] && exec zsh'
+BASHRC_SOURCE_LINE = '[ -f "$HOME/dev_scripts/shell/bash.sh" ] && source "$HOME/dev_scripts/shell/bash.sh"'
 PSRC_CONTENT = '$profile = "$HOME\\.psrc.ps1"\n. $profile\n'
 
 
@@ -3112,7 +3111,7 @@ def main():
     old_p = repo_sub.add_parser('old', help='List/delete old branches')
     old_p.add_argument('--delete', action='store_true', help='Delete the old branches')
     old_p.add_argument('--prefix', default=None,
-                       help="Branch prefix to filter (default: identity.branchPrefix in repos.json, "
+                       help="Branch prefix to filter (default: identity.branchPrefix in config.json, "
                             "else 'user/<git email local-part>/')")
     old_p.add_argument('--days', type=int, default=30, help='Age threshold in days (default: 30)')
     old_p.add_argument('path', nargs='?', help='Path to git repository (default: current directory)')
@@ -3183,7 +3182,7 @@ def main():
                                help='When listing, show only active (unresolved) threads')
 
     # Config subcommand
-    config_parser = subparsers.add_parser('config', help='Read values from the repos.json config file')
+    config_parser = subparsers.add_parser('config', help='Read values from the config.json file')
     config_sub = config_parser.add_subparsers(dest='config_command')
     config_get_p = config_sub.add_parser('get', help='Print a dotted-path value (e.g. identity.gitEmail)')
     config_get_p.add_argument('key')

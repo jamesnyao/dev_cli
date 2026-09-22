@@ -76,7 +76,7 @@ class TestConfig(unittest.TestCase):
         self.orig_config_dir = dev.CONFIG_DIR
         self.orig_config_file = dev.CONFIG_FILE
         dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
-        dev.CONFIG_FILE = dev.CONFIG_DIR / 'repos.json'
+        dev.CONFIG_FILE = dev.CONFIG_DIR / 'config.json'
     
     def tearDown(self):
         dev.CONFIG_DIR = self.orig_config_dir
@@ -180,7 +180,7 @@ class TestGetBasePath(unittest.TestCase):
 
 class TestResolveConfigDir(unittest.TestCase):
     """Test the singleton config directory resolution order:
-    DEV_CONFIG_DIR override > sibling of dev_scripts > inside dev_scripts."""
+    DEV_CONFIG_DIR override > parent dir (if it has config.json) > dev_scripts itself."""
 
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
@@ -197,17 +197,16 @@ class TestResolveConfigDir(unittest.TestCase):
         self.assertEqual(dev._resolve_config_dir(), Path('/explicit/override'))
 
     @patch.dict(os.environ, {}, clear=False)
-    def test_sibling_repoconfig_used_when_present(self):
+    def test_parent_dir_used_when_it_has_config_json(self):
         os.environ.pop('DEV_CONFIG_DIR', None)
-        sibling = self.temp_dir / 'repoconfig'
-        sibling.mkdir()
-        self.assertEqual(dev._resolve_config_dir(), sibling)
+        (self.temp_dir / 'config.json').write_text('{}')
+        self.assertEqual(dev._resolve_config_dir(), self.temp_dir)
 
     @patch.dict(os.environ, {}, clear=False)
-    def test_falls_back_to_standalone_repoconfig(self):
+    def test_falls_back_to_standalone_dev_scripts(self):
         os.environ.pop('DEV_CONFIG_DIR', None)
-        # No sibling repoconfig/ exists next to dev_scripts
-        self.assertEqual(dev._resolve_config_dir(), dev.SCRIPT_DIR / 'repoconfig')
+        # No config.json in the parent dir
+        self.assertEqual(dev._resolve_config_dir(), dev.SCRIPT_DIR)
 
 
 class TestConfigGet(unittest.TestCase):
@@ -219,7 +218,7 @@ class TestConfigGet(unittest.TestCase):
         self.orig_config_file = dev.CONFIG_FILE
         dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
         dev.CONFIG_DIR.mkdir(parents=True)
-        dev.CONFIG_FILE = dev.CONFIG_DIR / 'repos.json'
+        dev.CONFIG_FILE = dev.CONFIG_DIR / 'config.json'
 
     def tearDown(self):
         dev.CONFIG_DIR = self.orig_config_dir
@@ -508,7 +507,7 @@ class TestSyncTrackedFiles(unittest.TestCase):
         self.orig_home_dir = dev.HOME_DIR
         dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
         dev.CONFIG_DIR.mkdir(parents=True)
-        dev.CONFIG_FILE = dev.CONFIG_DIR / 'repos.json'
+        dev.CONFIG_FILE = dev.CONFIG_DIR / 'config.json'
         dev.RCFILES_DIR = dev.CONFIG_DIR / 'rcfiles'
 
         self.home = Path(self.temp_dir) / 'home'
@@ -880,7 +879,7 @@ class TestAddTrackedFile(unittest.TestCase):
         self.orig_home_dir = dev.HOME_DIR
         dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
         dev.CONFIG_DIR.mkdir(parents=True)
-        dev.CONFIG_FILE = dev.CONFIG_DIR / 'repos.json'
+        dev.CONFIG_FILE = dev.CONFIG_DIR / 'config.json'
         dev.RCFILES_DIR = dev.CONFIG_DIR / 'rcfiles'
         dev.HOME_DIR = Path(self.temp_dir) / 'home'
         dev.HOME_DIR.mkdir()
@@ -1257,7 +1256,7 @@ class TestCmdInit(unittest.TestCase):
         bashrc = self.home / '.bashrc'
         with patch('dev.Path.home', return_value=self.home):
             self.assertEqual(dev._init_unix(), 0)
-        self.assertIn('exec zsh', bashrc.read_text())
+        self.assertIn('dev_scripts/shell/bash.sh', bashrc.read_text())
 
     @patch.dict(os.environ, {'SHELL': '/bin/bash'})
     @patch('dev.get_os_type', return_value='linux')
@@ -1269,7 +1268,7 @@ class TestCmdInit(unittest.TestCase):
             self.assertEqual(dev._init_unix(), 0)
         content = bashrc.read_text()
         self.assertIn('# existing', content)
-        self.assertIn('exec zsh', content)
+        self.assertIn('dev_scripts/shell/bash.sh', content)
 
     @patch.dict(os.environ, {'SHELL': '/bin/bash'})
     @patch('dev.get_os_type', return_value='linux')
@@ -1279,7 +1278,7 @@ class TestCmdInit(unittest.TestCase):
         bashrc.write_text(f'{dev.BASHRC_SOURCE_LINE}\n')
         with patch('dev.Path.home', return_value=self.home):
             self.assertEqual(dev._init_unix(), 0)
-        self.assertEqual(bashrc.read_text().count('exec zsh'), 1)
+        self.assertEqual(bashrc.read_text().count('dev_scripts/shell/bash.sh'), 2)
 
     @patch.dict(os.environ, {'SHELL': '/bin/bash'})
     @patch('subprocess.run')
