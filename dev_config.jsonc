@@ -1,0 +1,21 @@
+{
+  // Copy this file to ../dev_config.json and customize it. The private file
+  // overrides these defaults, while this annotated sample is never rewritten.
+  "repos": [
+    {
+      "path": "dev_cli",
+      // A workspace link to the local tool checkout. `bootstrap` updates it
+      // before other repositories, then the normal sync loop skips it.
+      "pathLinksTo": "$HOME/dev_cli",
+      "bootstrap": true
+    }
+  ],
+  "workspaceRoots": {
+    // Add a key for each machine, then set DEVCONFIG to that key.
+    "example-machine": "$HOME"
+  },
+  "identity": {
+    // Blank uses USERNAME, then USER, then the system login.
+    "username": ""
+  }
+}

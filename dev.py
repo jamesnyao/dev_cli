@@ -127,14 +127,59 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 # dev.py is a public, work-agnostic tool: SAMPLE_CONFIG_FILE ships inside it
 # with placeholder values so the tool is usable (and demonstrates its own
 # schema) out of the box. Real, private values live in OVERRIDE_CONFIG_FILE,
-# one level up -- e.g. a private parent repo that has dev_scripts as a git
+# one level up -- e.g. a private parent repo that has dev_cli as a git
 # submodule -- and win on top of the sample when both define the same key.
-SAMPLE_CONFIG_FILE = SCRIPT_DIR / 'dev_config.json'
+SAMPLE_CONFIG_FILE = SCRIPT_DIR / 'dev_config.jsonc'
+
+
+def expand_config_path(value):
+    """Expand home and environment variables, including $HOME on Windows."""
+    value = re.sub(r'\$(?:HOME\b|\{HOME\})', lambda _: str(Path.home()), value)
+    return os.path.expandvars(os.path.expanduser(value))
+
+
+def load_jsonc(path):
+    """Load JSON with // and /* */ comments outside quoted strings."""
+    content = path.read_text(encoding='utf-8')
+    result = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(content):
+        current = content[index]
+        following = content[index + 1] if index + 1 < len(content) else ''
+        if in_string:
+            result.append(current)
+            if escaped:
+                escaped = False
+            elif current == '\\':
+                escaped = True
+            elif current == '"':
+                in_string = False
+        elif current == '"':
+            in_string = True
+            result.append(current)
+        elif current == '/' and following == '/':
+            index = content.find('\n', index)
+            if index == -1:
+                break
+            result.append('\n')
+        elif current == '/' and following == '*':
+            end = content.find('*/', index + 2)
+            if end == -1:
+                raise json.JSONDecodeError('Unterminated JSONC comment', content, index)
+            result.extend('\n' for char in content[index:end + 2] if char == '\n')
+            index = end + 1
+        else:
+            result.append(current)
+        index += 1
+    return json.loads(''.join(result))
+
 
 def _resolve_override_config_file():
     env_override = os.getenv('DEV_CONFIG_OVERRIDE')
     if env_override:
-        return Path(os.path.expandvars(os.path.expanduser(env_override)))
+        return Path(expand_config_path(env_override))
     return SCRIPT_DIR.parent / 'dev_config.json'
 
 OVERRIDE_CONFIG_FILE = _resolve_override_config_file()
@@ -145,7 +190,6 @@ ADO_TOKEN_CACHE_FILE = DEV_TEMP_DIR / 'ado_token_cache.json'
 ADO_TOKEN_CACHE_SECONDS = 2400  # 40 minute fallback when JWT exp can't be parsed
 ADO_TOKEN_EXPIRY_BUFFER = 60  # Treat token as expired this many seconds before its real exp
 ADO_API_VERSION = '7.1'  # ADO REST API version used for all requests
-RCFILES_DIR = CONFIG_DIR / 'rcfiles'
 CLAUDE_CONFIG_FILE = Path.home() / '.claude.json'
 
 def get_os_type():
@@ -159,11 +203,9 @@ def get_os_type():
 def load_config():
     config = {}
     if SAMPLE_CONFIG_FILE.is_file():
-        with open(SAMPLE_CONFIG_FILE, 'r', encoding='utf-8') as f:
-            config = json.load(f)
+        config = load_jsonc(SAMPLE_CONFIG_FILE)
     if OVERRIDE_CONFIG_FILE != SAMPLE_CONFIG_FILE and OVERRIDE_CONFIG_FILE.is_file():
-        with open(OVERRIDE_CONFIG_FILE, 'r', encoding='utf-8') as f:
-            override = json.load(f)
+        override = load_jsonc(OVERRIDE_CONFIG_FILE)
         for key, value in override.items():
             if isinstance(value, dict) and isinstance(config.get(key), dict):
                 config[key] = {**config[key], **value}
@@ -173,13 +215,12 @@ def load_config():
 
 def save_config(config):
     """Write real values to OVERRIDE_CONFIG_FILE. SAMPLE_CONFIG_FILE (inside
-    dev_scripts) is a static, public example and is never written by dev.py."""
+    dev_cli) is a static, public example and is never written by dev.py."""
     OVERRIDE_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     for repo in config.get('repos', []):
         if 'skipOn' in repo:
             repo['skipOn'] = sorted(repo['skipOn'])
     config['repos'] = sorted(config.get('repos', []), key=lambda r: r.get('path', r.get('name', '')))
-    config['files'] = sorted(config.get('files', []), key=lambda f: f.get('path', ''))
     with open(OVERRIDE_CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=2, sort_keys=True)
 
@@ -189,7 +230,7 @@ def get_base_path(config=None):
     devconfig = os.getenv('DEVCONFIG', '')
     roots = config.get('workspaceRoots', {})
     if devconfig and devconfig in roots:
-        return os.path.expandvars(roots[devconfig])
+        return expand_config_path(roots[devconfig])
     raise ValueError(f'No workspaceRoot found for DEVCONFIG={devconfig!r}. Check {OVERRIDE_CONFIG_FILE} workspaceRoots.')
 
 def trust_claude_workspace(base_path):
@@ -231,6 +272,30 @@ def _sync_repo_dir():
     if not success:
         raise RuntimeError(f"Cannot find the sync repository: {root}")
     return Path(root)
+
+
+def _bootstrap_repo_path(config):
+    """Return the enabled bootstrap checkout, or None when configuration omits one."""
+    entries = [repo for repo in config.get('repos', []) if repo.get('bootstrap')]
+    if len(entries) > 1:
+        emit_error('Only one repository may set bootstrap: true')
+        return False
+    if not entries:
+        return None
+    entry = entries[0]
+    devconfig = os.getenv('DEVCONFIG', '')
+    if devconfig and devconfig in entry.get('skipOn', []):
+        return None
+    base_path = Path(get_base_path(config))
+    path = entry.get('pathLinksTo')
+    repo_path = Path(expand_config_path(path)) if path else base_path / entry['path']
+    if not repo_path.exists():
+        emit_error(f"Bootstrap repository is missing: {repo_path}")
+        return False
+    if repo_path.resolve() != _sync_repo_dir().resolve():
+        emit_error(f"Bootstrap repository must be the sync repository: {repo_path}")
+        return False
+    return repo_path
 
 
 def _sync_upstream(repo_path):
@@ -839,44 +904,6 @@ def _sync_repo_latest(repo_path, default_branch=None):
         return 'updated', default
     return 'diverged', default
 
-def get_rcfile_git_timestamp(rel_path):
-    """Get the author date of the last commit that modified an rcfile.
-
-    Anchored at RCFILES_DIR itself (like git_path_deleted) so this resolves
-    correctly regardless of where the config directory lives relative to
-    dev_scripts (in place, or a sibling of a submodule).
-    """
-    success, ts = run_git(RCFILES_DIR, 'log', '-1', '--format=%aI', '--', rel_path)
-    if success and ts:
-        try:
-            return datetime.fromisoformat(ts)
-        except ValueError:
-            return None
-    return None
-
-def git_path_deleted(anchor_dir, name):
-    """True if <name> under anchor_dir is currently untracked but was deleted in git.
-
-    Anchoring git at the file's own directory keeps this correct whether the
-    home copy and the rcfiles mirror live in one repo or two. Distinguishes a
-    file deleted on another machine (a committed deletion, to be propagated)
-    from a genuinely new file that has no git history.
-    """
-    tracked, _ = run_git(anchor_dir, 'ls-files', '--error-unmatch', '--', name)
-    if tracked:
-        return False
-    deleted, commit = run_git(anchor_dir, 'log', '-1', '--diff-filter=D', '--format=%H', '--', name)
-    return bool(deleted and commit)
-
-def get_file_mtime(file_path):
-    """Get the modification time of a file as a timezone-aware datetime."""
-    try:
-        mtime = file_path.stat().st_mtime
-        return datetime.fromtimestamp(mtime, tz=timezone.utc)
-    except OSError:
-        return None
-
-
 def compute_repo_name(repo_path, base_path=None):
     """Compute repo name, using parent/name format for gclient enlistments."""
     repo_path = Path(os.path.abspath(str(repo_path)))
@@ -901,60 +928,8 @@ def compute_repo_name(repo_path, base_path=None):
 
 # ============ REPO COMMANDS ============
 
-def _add_tracked_file(file_path):
-    """Add a single file (or directory) to tracking for cross-machine sync.
-
-    A directory is tracked as a whole: every loose file under it is synced on
-    each `dev repo sync`, so new files added later are picked up automatically.
-    """
-    base_path = Path(os.path.abspath(get_base_path()))
-    file_path = Path(os.path.abspath(str(file_path)))
-
-    try:
-        rel_path = file_path.relative_to(base_path)
-    except ValueError:
-        emit_error(f"Path must be under workspace root: {base_path}")
-        return 1
-
-    rel_str = str(rel_path).replace('\\', '/')
-    is_dir = file_path.is_dir()
-    config = load_config()
-    if 'files' not in config:
-        config['files'] = []
-    # Drop the entry itself and, for a directory, any now-redundant child entries.
-    prefix = rel_str + '/'
-    config['files'] = [
-        f for f in config['files']
-        if f['path'] != rel_str and not (is_dir and f['path'].startswith(prefix))
-    ]
-    config['files'].append({
-        'path': rel_str,
-    })
-
-    dest = RCFILES_DIR / rel_str
-    if is_dir:
-        for src in sorted(file_path.rglob('*')):
-            if not src.is_file():
-                continue
-            sub = src.relative_to(file_path)
-            if '.git' in sub.parts:
-                continue
-            out = dest / sub
-            out.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(src), str(out))
-    else:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(str(file_path), str(dest))
-
-    save_config(config)
-    kind = 'directory' if is_dir else 'file'
-    print(f"{Colors.GREEN}Added {kind}: {rel_str}{Colors.NC}")
-    print(f"  Synced to: {dest}")
-    return 0
-
-
 def cmd_repo_add(args):
-    """Add a repository or file to tracking."""
+    """Add a Git repository to tracking."""
     target_path = Path(args.path).resolve()
     display_path = Path(os.path.abspath(args.path))
 
@@ -962,13 +937,10 @@ def cmd_repo_add(args):
         emit_error(f"Path does not exist: {target_path}")
         return 1
 
-    if target_path.is_file():
-        return _add_tracked_file(display_path)
-
     git_dir = target_path / '.git'
-    if not git_dir.exists():
-        # A non-git directory is tracked as a synced files directory.
-        return _add_tracked_file(display_path)
+    if not target_path.is_dir() or not git_dir.exists():
+        emit_error(f"Not a Git repository: {display_path}")
+        return 1
 
     config = load_config()
     remote_url = get_remote_url(target_path, normalize=True, host_aliases=config.get('githubHostAliases', {}))
@@ -1004,7 +976,7 @@ def cmd_repo_add(args):
     return 0
 
 def cmd_repo_remove(args):
-    """Remove a repository or file from tracking."""
+    """Remove a repository from tracking without deleting its checkout."""
     config = load_config()
     name = args.name.replace('\\', '/')
     if name.startswith('./'):
@@ -1018,83 +990,11 @@ def cmd_repo_remove(args):
         print(f"{Colors.GREEN}Removed repository: {name}{Colors.NC}")
         return 0
 
-    files = config.get('files', [])
-    original_count = len(files)
-    config['files'] = [f for f in files if f['path'] != name]
-
-    if len(config.get('files', [])) < original_count:
-        rcfile = RCFILES_DIR / name
-        if rcfile.is_dir():
-            shutil.rmtree(str(rcfile))
-        elif rcfile.exists():
-            rcfile.unlink()
-        save_config(config)
-        print(f"{Colors.GREEN}Removed file: {name}{Colors.NC}")
-        return 0
-
     emit_error(f"'{name}' is not tracked")
     return 1
 
-def cmd_repo_delete(args):
-    """Delete a single tracked file from the workspace and rcfiles.
-
-    Unlike `remove` (which untracks a whole entry), `delete` removes one file
-    that lives under a tracked directory (e.g. docs/foo.md): it deletes both the
-    workspace copy and the rcfiles copy and commits the removal, so the union-
-    based directory sync will not resurrect it on the next `dev repo sync`.
-    """
-    base_path = Path(os.path.abspath(get_base_path()))
-    name = args.path.replace('\\', '/')
-    if name.startswith('./'):
-        name = name[2:]
-    # Accept an absolute or workspace path and make it workspace-relative.
-    candidate = Path(os.path.abspath(args.path))
-    try:
-        name = candidate.relative_to(base_path).as_posix()
-    except ValueError:
-        pass
-
-    workspace_file = base_path / name.replace('/', os.sep)
-    rcfile = RCFILES_DIR / name
-
-    if workspace_file.is_dir() or rcfile.is_dir():
-        emit_error(f"'{name}' is a directory; use 'dev repo remove' to untrack it")
-        return 1
-
-    tracked = {f['path'] for f in _get_all_tracked_files()}
-    if name not in tracked:
-        emit_error(f"'{name}' is not a tracked file")
-        return 1
-
-    removed = []
-    if workspace_file.is_file():
-        workspace_file.unlink()
-        removed.append('workspace')
-    if rcfile.is_file():
-        rcfile.unlink()
-        removed.append('rcfiles')
-
-    # If it was tracked as its own explicit entry (not only via a directory),
-    # drop that entry too.
-    config = load_config()
-    before = len(config.get('files', []))
-    config['files'] = [f for f in config.get('files', []) if f['path'] != name]
-    if len(config['files']) != before:
-        save_config(config)
-
-    # Commit the deletion so directory expansion won't re-add the file.
-    repo_path = _sync_repo_dir()
-    run_git(repo_path, 'add', '-A')
-    _, status = run_git(repo_path, 'status', '--porcelain')
-    if status:
-        run_git(repo_path, 'commit', '-m', _build_commit_message(repo_path))
-
-    print(f"{Colors.GREEN}Deleted:{Colors.NC} {name} ({', '.join(removed) or 'nothing on disk'})")
-    print(f"  {Colors.CYAN}Run 'dev repo sync' to push the deletion.{Colors.NC}")
-    return 0
-
 def cmd_repo_list(args):
-    """List all tracked repositories and files."""
+    """List all tracked repositories."""
     config = load_config()
     print(f"{Colors.BLUE}Tracked Repositories:{Colors.NC}")
 
@@ -1108,19 +1008,12 @@ def cmd_repo_list(args):
         repo_path = base_path / repo['path'].replace('/', os.sep)
         link_to = repo.get('pathLinksTo')
         if link_to:
-            repo_path = Path(os.path.expandvars(os.path.expanduser(link_to)))
+            repo_path = Path(expand_config_path(link_to))
         _, url = run_git(repo_path, 'remote', 'get-url', 'origin')
         url = url or repo.get('remoteUrl', 'N/A')
         print(f"  {repo['path']}  {Colors.CYAN}{url}{Colors.NC}")
 
     print(f"Total: {Colors.GREEN}{len(config['repos'])}{Colors.NC} repositories")
-
-    files = _get_all_tracked_files()
-    if files:
-        print(f"\n{Colors.BLUE}Tracked Files:{Colors.NC}")
-        for f in sorted(files, key=lambda x: x['path']):
-            print(f"  {f['path']}")
-        print(f"Total: {Colors.GREEN}{len(files)}{Colors.NC} files")
 
     return 0
 
@@ -1145,20 +1038,6 @@ def _build_commit_message(repo_path=None):
             short = f"{p.parts[-2]}/{p.name}"
         else:
             short = p.name
-        # Remap rcfiles paths to ~/ (git diff paths are relative to the repo
-        # root, i.e. HOME_DIR, so derive the prefix from RCFILES_DIR rather
-        # than hardcoding it -- it moves whenever the config dir does)
-        try:
-            rcfiles_prefix = RCFILES_DIR.relative_to(HOME_DIR).as_posix() + '/'
-        except ValueError:
-            rcfiles_prefix = None
-        if rcfiles_prefix and filepath.startswith(rcfiles_prefix):
-            rel = filepath[len(rcfiles_prefix):]
-            rel_p = Path(rel)
-            if len(rel_p.parts) >= 2:
-                short = f"~/{rel_p.parts[-2]}/{rel_p.name}"
-            else:
-                short = f"~/{rel_p.name}"
         if status_char.startswith('A'):
             added.append(short)
         elif status_char.startswith('M'):
@@ -1314,9 +1193,8 @@ def _ensure_link(link_path, repo_path):
             raise
 
 
-def _self_update():
+def _self_update(repo_path):
     """Update the parent and its submodules, then restart with the updated tool."""
-    repo_path = _sync_repo_dir()
     _, old_hash = run_git(repo_path, 'rev-parse', 'HEAD')
     old_source = (SCRIPT_DIR / 'dev.py').read_bytes()
     if not _sync_submodules(repo_path):
@@ -1362,7 +1240,7 @@ def _self_update():
             emit_error(f"Rebase conflict in rcfiles. Please resolve manually. {output}")
             return False
 
-    if not _sync_submodules(repo_path):
+    if behind > 0 and not _sync_submodules(repo_path):
         return False
     _, new_hash = run_git(repo_path, 'rev-parse', 'HEAD')
 
@@ -1379,13 +1257,20 @@ def _self_update():
 
 
 def cmd_repo_sync(args):
-    """Clone missing repositories and sync tracked files."""
-    if _self_update() is False:
-        return 1
-
+    """Update the sync repository, its submodules, and tracked repositories."""
     assume_yes = getattr(args, 'force', False)
     config = load_config()
     base_path = Path(get_base_path())
+    bootstrap_path = _bootstrap_repo_path(config)
+    if bootstrap_path is False:
+        return 1
+    if bootstrap_path and _self_update(bootstrap_path) is False:
+        return 1
+    config = load_config()
+    base_path = Path(get_base_path(config))
+    bootstrap_path = _bootstrap_repo_path(config)
+    if bootstrap_path is False:
+        return 1
 
     print(f"{Colors.BLUE}Syncing rcfiles...{Colors.NC}")
     pulled = False
@@ -1398,13 +1283,6 @@ def cmd_repo_sync(args):
     if sync_rcfiles_push(pulled=pulled) is False:
         return 1
     print()
-
-    if _get_all_tracked_files():
-        print(f"{Colors.BLUE}Syncing tracked files...{Colors.NC}")
-        sync_tracked_files(base_path)
-        print()
-
-    config = load_config()
 
     print(f"{Colors.BLUE}Syncing repositories to: {base_path}{Colors.NC}")
 
@@ -1428,14 +1306,9 @@ def cmd_repo_sync(args):
         link_path = base_path / name.replace('/', os.sep)
 
         if link_to:
-            repo_path = Path(os.path.expandvars(os.path.expanduser(link_to)))
+            repo_path = Path(expand_config_path(link_to))
         else:
             repo_path = link_path
-
-        if not url:
-            print(f"{Colors.RED}[X]{Colors.NC} Cannot clone {name} (no remote URL)")
-            failed += 1
-            continue
 
         # Check if this repo is skipped on this machine
         devconfig = os.getenv('DEVCONFIG', '')
@@ -1452,6 +1325,10 @@ def cmd_repo_sync(args):
         if repo_path.exists():
             if link_to is not None:
                 _ensure_link(link_path, repo_path)
+            if bootstrap_path and repo_path.resolve() == bootstrap_path.resolve():
+                emit_ok(f"{name} (updated during bootstrap)")
+                synced += 1
+                continue
             actual_url = get_remote_url(repo_path)
             fixed_remote = False
             if (url and actual_url and _parse_ado_remote(url)
@@ -1511,6 +1388,11 @@ def cmd_repo_sync(args):
                                default_branch=default_branch, assume_yes=assume_yes)
             continue
 
+        if not url:
+            emit_error(f"Cannot clone {name} (no remote URL)")
+            failed += 1
+            continue
+
         # Prompt user before cloning a new repo
         if not confirm(f"{Colors.YELLOW}[NEW]{Colors.NC} {name} is not set up. Clone it? [y/N] ",
                        default_yes=False, assume_yes=assume_yes):
@@ -1549,188 +1431,6 @@ def cmd_repo_sync(args):
     return 0
 
 
-def has_real_conflict_markers(content):
-    """Check for conflict markers outside code blocks and inline code."""
-    lines = content.split('\n')
-    in_code_block = False
-
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith('```'):
-            in_code_block = not in_code_block
-            continue
-        if in_code_block or '`' in line:
-            continue
-        if re.match(r'^<{7}\s', line) or re.match(r'^={7}\s*$', line) or re.match(r'^>{7}\s', line):
-            return True
-
-    return False
-
-
-HOME_DIR = Path.home()
-
-def _resolve_tracked_home_path(entry):
-    """Home-side path for a tracked entry, honoring an optional pathLinksTo."""
-    link_to = entry.get('pathLinksTo')
-    if link_to:
-        return Path(os.path.expandvars(os.path.expanduser(link_to)))
-    return HOME_DIR / entry['path'].replace('/', os.sep)
-
-
-def _expand_tracked_dir(entry):
-    """Expand a directory entry into one file entry per file underneath.
-
-    Unions the files present in the home tree and the rcfiles tree so loose
-    files added to a tracked directory (e.g. docs/) on either side are picked
-    up automatically. Returns None when the entry is not a directory (a plain
-    file entry, which the caller keeps as-is).
-    """
-    rel_path = entry['path']
-    link_to = entry.get('pathLinksTo')
-    home_root = _resolve_tracked_home_path(entry)
-    rc_root = RCFILES_DIR / rel_path
-
-    if not home_root.is_dir() and not rc_root.is_dir():
-        return None
-
-    children = []
-    seen = set()
-    for root in (home_root, rc_root):
-        if not root.is_dir():
-            continue
-        for f in sorted(root.rglob('*')):
-            if not f.is_file():
-                continue
-            sub = f.relative_to(root).as_posix()
-            if sub.startswith('.git/') or '/.git/' in f'/{sub}':
-                continue
-            child_rel = f'{rel_path}/{sub}'
-            if child_rel in seen:
-                continue
-            seen.add(child_rel)
-            child = {'path': child_rel}
-            if link_to:
-                child['pathLinksTo'] = f"{link_to.rstrip('/')}/{sub}"
-            children.append(child)
-    return children
-
-
-def _get_all_tracked_files():
-    """Return user-tracked file paths from config.
-
-    Directory entries are expanded into per-file entries so loose files added
-    under a tracked directory (e.g. docs/) are synced automatically. Duplicate
-    paths (e.g. a file also covered by a tracked directory) are collapsed.
-    """
-    config = load_config()
-    result = []
-    seen = set()
-    for entry in config.get('files', []):
-        expanded = _expand_tracked_dir(entry)
-        entries = [entry] if expanded is None else expanded
-        for item in entries:
-            if item['path'] in seen:
-                continue
-            seen.add(item['path'])
-            result.append(item)
-    return result
-
-
-def sync_tracked_files(base_path):
-    """Timestamp-based bidirectional sync between home and rcfiles.
-
-    All tracked files sync to home (~/).
-    The newer version wins. Returns True if any rcfiles were modified.
-    """
-    all_files = _get_all_tracked_files()
-    rcfiles_changed = False
-
-    for entry in all_files:
-        rel_path = entry['path']
-        link_to = entry.get('pathLinksTo')
-        if link_to:
-            target_file = Path(os.path.expandvars(os.path.expanduser(link_to)))
-        else:
-            target_file = HOME_DIR / rel_path.replace('/', os.sep)
-        rcfile = RCFILES_DIR / rel_path
-
-        tgt_exists = target_file.exists()
-        rc_exists = rcfile.exists()
-
-        if not tgt_exists and not rc_exists:
-            continue
-
-        tgt_content = target_file.read_bytes() if tgt_exists else None
-        rc_content = rcfile.read_bytes() if rc_exists else None
-
-        if tgt_content == rc_content:
-            if tgt_exists and rc_exists:
-                remote_ts = get_rcfile_git_timestamp(rel_path)
-                if remote_ts:
-                    ts_epoch = remote_ts.timestamp()
-                    os.utime(str(target_file), (ts_epoch, ts_epoch))
-            print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path}")
-            continue
-
-        if rel_path.endswith('.md'):
-            if tgt_exists:
-                tgt_text = target_file.read_text(encoding='utf-8')
-                if has_real_conflict_markers(tgt_text):
-                    print(f"{Colors.YELLOW}[WARN]{Colors.NC} {rel_path} has conflict markers, skipping")
-                    continue
-            if rc_exists:
-                rc_text = rcfile.read_text(encoding='utf-8')
-                if has_real_conflict_markers(rc_text):
-                    print(f"{Colors.YELLOW}[CONFLICT]{Colors.NC} {rel_path} has merge conflicts in repoconfig")
-                    continue
-
-        remote_ts = get_rcfile_git_timestamp(rel_path)
-        local_ts = get_file_mtime(target_file) if tgt_exists else None
-
-        if tgt_exists and not rc_exists:
-            if git_path_deleted(rcfile.parent, rcfile.name):
-                # The rcfiles mirror was deleted on another machine and pulled
-                # in via git. Propagate the deletion to the home copy instead of
-                # resurrecting it as a "new local file".
-                try:
-                    target_file.unlink()
-                except OSError:
-                    pass
-                print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path} {Colors.CYAN}(deleted remotely){Colors.NC}")
-                continue
-            direction = 'local'
-        elif rc_exists and not tgt_exists:
-            if git_path_deleted(target_file.parent, target_file.name):
-                # The home copy's deletion propagated via git; remove the mirror
-                # too instead of pulling it back into the workspace.
-                try:
-                    rcfile.unlink()
-                except OSError:
-                    pass
-                print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path} {Colors.CYAN}(deleted remotely){Colors.NC}")
-                continue
-            direction = 'remote'
-        elif remote_ts and local_ts:
-            direction = 'local' if local_ts > remote_ts else 'remote'
-        else:
-            direction = 'local'
-
-        if direction == 'local':
-            rcfile.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(target_file), str(rcfile))
-            rcfiles_changed = True
-            print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path} {Colors.CYAN}(local -> remote){Colors.NC}")
-        else:
-            target_file.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(rcfile), str(target_file))
-            if remote_ts:
-                ts_epoch = remote_ts.timestamp()
-                os.utime(str(target_file), (ts_epoch, ts_epoch))
-            print(f"{Colors.GREEN}[OK]{Colors.NC} {rel_path} {Colors.CYAN}(remote -> local){Colors.NC}")
-
-    return rcfiles_changed
-
-
 def cmd_repo_status(args):
     """Show which repos exist on this machine."""
     config = load_config()
@@ -1751,20 +1451,6 @@ def cmd_repo_status(args):
 
     print(f"Present: {Colors.GREEN}{present}{Colors.NC} | Missing: {Colors.RED}{missing}{Colors.NC}")
 
-    files = _get_all_tracked_files()
-    if files:
-        print(f"\n{Colors.BLUE}Tracked Files:{Colors.NC}")
-        f_present = f_missing = 0
-        for f in sorted(files, key=lambda x: x['path']):
-            workspace_file = base_path / f['path'].replace('/', os.sep)
-            if workspace_file.exists():
-                print(f"{Colors.GREEN}[OK]{Colors.NC} {f['path']}")
-                f_present += 1
-            else:
-                print(f"{Colors.RED}[X]{Colors.NC} {f['path']} {Colors.YELLOW}(missing){Colors.NC}")
-                f_missing += 1
-        print(f"Present: {Colors.GREEN}{f_present}{Colors.NC} | Missing: {Colors.RED}{f_missing}{Colors.NC}")
-
     return 0
 
 
@@ -1778,7 +1464,7 @@ def cmd_repo_root(args):
 
 def cmd_config_get(args):
     """Print a dotted-path value from the merged config (e.g. `identity.gitEmail`):
-    SAMPLE_CONFIG_FILE (dev_scripts/dev_config.json) overridden by
+    SAMPLE_CONFIG_FILE (dev_cli/dev_config.jsonc) overridden by
     OVERRIDE_CONFIG_FILE (a private dev_config.json one level up).
 
     Lets non-Python callers (shell/PowerShell setup scripts) read the same
@@ -2047,7 +1733,8 @@ def cmd_repo_old(args):
         identity = {}
 
     git_email = _git_config_value('user.email')
-    default_alias = (git_email.split('@')[0] if git_email else '') or getpass.getuser()
+    default_alias = (identity.get('username') or os.getenv('USERNAME')
+                     or os.getenv('USER') or getpass.getuser())
     prefix = args.prefix or identity.get('branchPrefix') or f'user/{default_alias}/'
     creator_email = identity.get('creatorEmail') or git_email
     if not creator_email:
@@ -2194,9 +1881,9 @@ def cmd_repo_old(args):
 # Init Command
 # =============================================================================
 
-BASHRC_SOURCE_LINE = '[ -f "$HOME/dev_scripts/shell/bash.sh" ] && source "$HOME/dev_scripts/shell/bash.sh"'
-ZSHRC_SOURCE_LINE = '[ -f "$HOME/dev_scripts/shell/zsh.sh" ] && source "$HOME/dev_scripts/shell/zsh.sh"'
-PSRC_SOURCE_LINE = '. "$HOME\\dev_scripts\\shell\\profile.ps1"'
+BASHRC_SOURCE_LINE = '[ -f "$HOME/dev_cli/shell/bash.sh" ] && source "$HOME/dev_cli/shell/bash.sh"'
+ZSHRC_SOURCE_LINE = '[[ -f "$HOME/dev_cli/shell/zsh.sh" ]] && source "$HOME/dev_cli/shell/zsh.sh"'
+PSRC_SOURCE_LINE = '. "$HOME\\dev_cli\\shell\\profile.ps1"'
 PSRC_CONTENT = '$profile = "$HOME\\.psrc.ps1"\n. $profile\n'
 
 
@@ -2373,13 +2060,13 @@ def _ado_credential_helper_value():
     Uses an absolute interpreter + dev.py path rather than relying on `dev`
     being on PATH: tools that invoke git internally (notably multi-repo
     checkout managers like gclient) run git with a sanitized PATH that does
-    NOT include dev_scripts, so a bare `!dev ...` helper would silently fail
+    NOT include dev_cli, so a bare `!dev ...` helper would silently fail
     and git would fall back to prompting for a username. We also prefer the
-    canonical home copy (~/dev_scripts/dev.py) over the currently-running
+    canonical home copy (~/dev_cli/dev.py) over the currently-running
     script so the helper hits a fast local file instead of a slow
     Windows-mounted path (/mnt/c/...) when invoked from WSL.
     """
-    home_copy = Path.home() / 'dev_scripts' / 'dev.py'
+    home_copy = Path.home() / 'dev_cli' / 'dev.py'
     running = Path(__file__).resolve()
     dev_py = home_copy if home_copy.exists() else running
     py = shlex.quote(sys.executable or 'python3')
@@ -3188,7 +2875,7 @@ def main():
         epilog=(
             'Examples:\n'
             '  dev repo sync                 Clone/refresh every tracked repo to origin HEAD\n'
-            '  dev repo status               Show which tracked repos/files exist here\n'
+            '  dev repo status               Show which tracked repositories exist here\n'
             '  dev repo old --days 30        List stale user branches (add --delete to prune)\n'
             '  dev pr create -t "Title"      Open a draft PR from the current branch\n'
             '  dev pr diff --id 12345        Show a PR diff by id\n'
@@ -3207,8 +2894,8 @@ def main():
     repo_parser = subparsers.add_parser('repo', help='Manage tracked repositories')
     repo_sub = repo_parser.add_subparsers(dest='repo_command')
 
-    add_p = repo_sub.add_parser('add', help='Add a repository or file to tracking')
-    add_p.add_argument('path', help='Path to a repository or file')
+    add_p = repo_sub.add_parser('add', help='Add a Git repository to tracking')
+    add_p.add_argument('path', help='Path to a Git repository')
     add_p.add_argument('--slow-sync', action='store_true',
                        help='Mark repo for background sync (pull/switch ops run detached)')
     add_p.add_argument('--sync-command', metavar='CMD',
@@ -3217,12 +2904,8 @@ def main():
     add_p.add_argument('--default-branch', metavar='BRANCH',
                        help="Branch to sync instead of origin/HEAD (e.g. 'mirror/main')")
 
-    remove_p = repo_sub.add_parser('remove', help='Remove a repository or file from tracking')
-    remove_p.add_argument('name', help='Name of the repository or file path')
-
-    delete_p = repo_sub.add_parser('delete',
-                                   help='Delete a single tracked file (workspace + rcfiles) and commit the removal')
-    delete_p.add_argument('path', help='Path to the tracked file (e.g. docs/foo.md)')
+    remove_p = repo_sub.add_parser('remove', help='Remove a repository from tracking')
+    remove_p.add_argument('name', help='Name of the repository')
 
     repo_sub.add_parser('list', help='List all tracked repositories')
     sync_p = repo_sub.add_parser('sync', help='Clone missing repositories')
@@ -3235,7 +2918,7 @@ def main():
     old_p.add_argument('--delete', action='store_true', help='Delete the old branches')
     old_p.add_argument('--prefix', default=None,
                        help="Branch prefix to filter (default: identity.branchPrefix in dev_config.json, "
-                            "else 'user/<git email local-part>/')")
+                            "else 'user/<identity.username or system username>/')")
     old_p.add_argument('--days', type=int, default=30, help='Age threshold in days (default: 30)')
     old_p.add_argument('path', nargs='?', help='Path to git repository (default: current directory)')
 
@@ -3369,7 +3052,6 @@ def main():
         cmd_map = {
             'add': cmd_repo_add,
             'remove': cmd_repo_remove,
-            'delete': cmd_repo_delete,
             'list': cmd_repo_list,
             'sync': cmd_repo_sync,
             'status': cmd_repo_status,
