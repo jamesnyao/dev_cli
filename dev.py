@@ -221,7 +221,7 @@ def save_config(config):
         if 'skipOn' in repo:
             repo['skipOn'] = sorted(repo['skipOn'])
     config['repos'] = sorted(config.get('repos', []), key=lambda r: r.get('path', r.get('name', '')))
-    with open(OVERRIDE_CONFIG_FILE, 'w', encoding='utf-8') as f:
+    with open(OVERRIDE_CONFIG_FILE, 'w', encoding='utf-8', newline='\n') as f:
         json.dump(config, f, indent=2, sort_keys=True)
 
 def get_base_path(config=None):
