@@ -30,10 +30,10 @@ def _sanitize_environment():
     unittest.mock.patch.dict always restores by clearing the dict and re-adding
     the saved items, even without clear=True. On Windows an empty-valued var is
     written back into os.environ but removed from the native environment block,
-    so every subprocess started after the first patch.dict loses it. toolchain_tools
-    exports GIT_CONFIG_VALUE_2='' (core.fsmonitor), which leaves GIT_CONFIG_COUNT
-    pointing at a missing value and makes every later git call fail with
-    "missing config value GIT_CONFIG_VALUE_2".
+    so every subprocess started after the first patch.dict loses it. Some git
+    wrappers export GIT_CONFIG_VALUE_2='' (core.fsmonitor), which leaves
+    GIT_CONFIG_COUNT pointing at a missing value and makes every later git
+    call fail with "missing config value GIT_CONFIG_VALUE_2".
 
     The GIT_CONFIG_* injection is dropped as a set so the count stays consistent.
     """
@@ -113,15 +113,15 @@ class TestComputeRepoName(unittest.TestCase):
     def test_nested_gclient_repo(self):
         """Repo under gclient enlistment should use parent/name format"""
         with tempfile.TemporaryDirectory() as tmp:
-            # Create structure: platform/.gclient, platform/src
-            platform = Path(tmp) / 'platform'
-            platform.mkdir()
-            (platform / '.gclient').touch()
-            src = platform / 'src'
+            # Create structure: team/.gclient, team/src
+            team = Path(tmp) / 'team'
+            team.mkdir()
+            (team / '.gclient').touch()
+            src = team / 'src'
             src.mkdir()
             
             name = dev.compute_repo_name(src)
-            self.assertEqual(name, 'platform/src')
+            self.assertEqual(name, 'team/src')
 
 
 class TestHasRealConflictMarkers(unittest.TestCase):
@@ -763,19 +763,19 @@ class TestSyncTrackedFiles(unittest.TestCase):
     def test_non_md_files_skip_conflict_check(self, mock_ts):
         """Non-.md files with conflict-like content should still sync."""
         mock_ts.return_value = self.old_time
-        self._track_file('platform/.gclient')
+        self._track_file('team/.gclient')
         conflict = "<<<<<<< HEAD\nstuff\n=======\nother\n>>>>>>> branch\n"
-        self._setup_rcfile('platform/.gclient', 'old')
-        platform_dir = self.home / 'platform'
-        platform_dir.mkdir(exist_ok=True)
-        home_file = platform_dir / '.gclient'
+        self._setup_rcfile('team/.gclient', 'old')
+        team_dir = self.home / 'team'
+        team_dir.mkdir(exist_ok=True)
+        home_file = team_dir / '.gclient'
         home_file.write_text(conflict)
         self._set_mtime(home_file, self.new_time)
 
         result = dev.sync_tracked_files(self.home)
 
         self.assertTrue(result)
-        rcfile = dev.RCFILES_DIR / 'platform' / '.gclient'
+        rcfile = dev.RCFILES_DIR / 'team' / '.gclient'
         self.assertEqual(rcfile.read_text(), conflict)
 
     # --- Parent directory creation tests ---
@@ -813,27 +813,27 @@ class TestSyncTrackedFiles(unittest.TestCase):
         self.assertEqual(all_files, [])
 
     def test_user_files_tracked(self):
-        self._track_file('platform/.gclient')
+        self._track_file('team/.gclient')
         all_files = dev._get_all_tracked_files()
         paths = [f['path'] for f in all_files]
-        self.assertIn('platform/.gclient', paths)
+        self.assertIn('team/.gclient', paths)
 
     @patch('dev.get_rcfile_git_timestamp')
     def test_user_file_local_newer(self, mock_ts):
         """User-added files should follow the same timestamp logic."""
         mock_ts.return_value = self.old_time
-        self._track_file('platform/.gclient')
-        self._setup_rcfile('platform/.gclient', 'old remote')
-        platform_dir = self.home / 'platform'
-        platform_dir.mkdir(exist_ok=True)
-        home_file = platform_dir / '.gclient'
+        self._track_file('team/.gclient')
+        self._setup_rcfile('team/.gclient', 'old remote')
+        team_dir = self.home / 'team'
+        team_dir.mkdir(exist_ok=True)
+        home_file = team_dir / '.gclient'
         home_file.write_text('new local')
         self._set_mtime(home_file, self.new_time)
 
         result = dev.sync_tracked_files(self.home)
 
         self.assertTrue(result)
-        rcfile = dev.RCFILES_DIR / 'platform' / '.gclient'
+        rcfile = dev.RCFILES_DIR / 'team' / '.gclient'
         self.assertEqual(rcfile.read_text(), 'new local')
 
     @patch('dev.get_rcfile_git_timestamp')
@@ -842,12 +842,12 @@ class TestSyncTrackedFiles(unittest.TestCase):
         mock_ts.return_value = self.new_time
         dev.save_config({
             'repos': [],
-            'files': [{'path': 'platform/.gclient'}]
+            'files': [{'path': 'team/.gclient'}]
         })
-        self._setup_rcfile('platform/.gclient', 'new remote')
-        platform_dir = self.home / 'platform'
-        platform_dir.mkdir(exist_ok=True)
-        home_file = platform_dir / '.gclient'
+        self._setup_rcfile('team/.gclient', 'new remote')
+        team_dir = self.home / 'team'
+        team_dir.mkdir(exist_ok=True)
+        home_file = team_dir / '.gclient'
         home_file.write_text('old local')
         self._set_mtime(home_file, self.old_time)
 
@@ -903,9 +903,9 @@ class TestAddTrackedFile(unittest.TestCase):
     def test_add_tracked_file(self):
         """Adding a file should store it in config and rcfiles"""
 
-        platform_dir = self.workspace / 'platform'
-        platform_dir.mkdir()
-        gclient = platform_dir / '.gclient'
+        team_dir = self.workspace / 'team'
+        team_dir.mkdir()
+        gclient = team_dir / '.gclient'
         gclient.write_text('solutions = [{"name": "src"}]')
 
         result = dev._add_tracked_file(gclient)
@@ -913,18 +913,18 @@ class TestAddTrackedFile(unittest.TestCase):
         self.assertEqual(result, 0)
         config = dev.load_config()
         self.assertEqual(len(config.get('files', [])), 1)
-        self.assertEqual(config['files'][0]['path'], 'platform/.gclient')
+        self.assertEqual(config['files'][0]['path'], 'team/.gclient')
 
-        rcfile = dev.RCFILES_DIR / 'platform' / '.gclient'
+        rcfile = dev.RCFILES_DIR / 'team' / '.gclient'
         self.assertTrue(rcfile.exists())
 
     @patch.dict(os.environ, {'DEVCONFIG': 'test'})
     def test_add_file_replaces_existing(self):
         """Adding same file again should replace the entry"""
 
-        platform_dir = self.workspace / 'platform'
-        platform_dir.mkdir()
-        gclient = platform_dir / '.gclient'
+        team_dir = self.workspace / 'team'
+        team_dir.mkdir()
+        gclient = team_dir / '.gclient'
         gclient.write_text('v1')
 
         dev._add_tracked_file(gclient)
@@ -933,7 +933,7 @@ class TestAddTrackedFile(unittest.TestCase):
 
         config = dev.load_config()
         self.assertEqual(len(config.get('files', [])), 1)
-        rcfile = dev.RCFILES_DIR / 'platform' / '.gclient'
+        rcfile = dev.RCFILES_DIR / 'team' / '.gclient'
         self.assertEqual(rcfile.read_text(), 'v2')
 
     @patch.dict(os.environ, {'DEVCONFIG': 'test'})
@@ -1215,19 +1215,19 @@ class TestAdoGit(unittest.TestCase):
 class TestParseAdoRemote(unittest.TestCase):
 
     def test_devazure_with_user_prefix(self):
-        result = dev._parse_ado_remote('https://contoso@dev.azure.com/contoso/platform/_git/internal.service')
-        self.assertEqual(result, ('contoso', 'platform', 'internal.service'))
+        result = dev._parse_ado_remote('https://contoso@dev.azure.com/contoso/Platform/_git/internal.service')
+        self.assertEqual(result, ('contoso', 'Platform', 'internal.service'))
 
     def test_devazure_without_user_prefix(self):
-        result = dev._parse_ado_remote('https://dev.azure.com/contoso/platform/_git/internal.service.dashboard')
-        self.assertEqual(result, ('contoso', 'platform', 'internal.service.dashboard'))
+        result = dev._parse_ado_remote('https://dev.azure.com/contoso/Platform/_git/internal.service.ui')
+        self.assertEqual(result, ('contoso', 'Platform', 'internal.service.ui'))
 
     def test_visualstudio_format(self):
-        result = dev._parse_ado_remote('https://contoso.visualstudio.com/DefaultCollection/platform/_git/bigrepo.toolchain_tools')
-        self.assertEqual(result, ('contoso', 'platform', 'bigrepo.toolchain_tools'))
+        result = dev._parse_ado_remote('https://contoso.visualstudio.com/DefaultCollection/Platform/_git/bigrepo.tools')
+        self.assertEqual(result, ('contoso', 'Platform', 'bigrepo.tools'))
 
     def test_github_url_returns_none(self):
-        result = dev._parse_ado_remote('git@github.com-work:acme-corp/platform-agents.git')
+        result = dev._parse_ado_remote('git@github.com-work:acme-corp/acme-tools.git')
         self.assertIsNone(result)
 
     def test_with_dot_git_suffix(self):
@@ -1592,44 +1592,44 @@ class TestToolsInstalled(unittest.TestCase):
 class TestNormalizeUrlForComparison(unittest.TestCase):
 
     def test_ado_with_credentials_matches_without(self):
-        url1 = 'https://AzToken123@dev.azure.com/contoso/platform/_git/bigrepo.infra.build'
-        url2 = 'https://contoso@dev.azure.com/contoso/platform/_git/bigrepo.infra.build'
+        url1 = 'https://AzToken123@dev.azure.com/contoso/Platform/_git/bigrepo.infra'
+        url2 = 'https://contoso@dev.azure.com/contoso/Platform/_git/bigrepo.infra'
         self.assertEqual(dev._normalize_url_for_comparison(url1),
                          dev._normalize_url_for_comparison(url2))
 
     def test_ado_without_credentials_matches_config(self):
-        url1 = 'https://dev.azure.com/contoso/platform/_git/internal.service'
-        url2 = 'https://contoso@dev.azure.com/contoso/platform/_git/internal.service'
+        url1 = 'https://dev.azure.com/contoso/Platform/_git/internal.service'
+        url2 = 'https://contoso@dev.azure.com/contoso/Platform/_git/internal.service'
         self.assertEqual(dev._normalize_url_for_comparison(url1),
                          dev._normalize_url_for_comparison(url2))
 
     def test_github_ssh_alias_matches_plain(self):
-        url1 = 'git@github.com-personal:example-user/rcfiles.git'
-        url2 = 'git@github.com:example-user/rcfiles.git'
+        url1 = 'git@github.com-personal:exampleuser/dotfiles.git'
+        url2 = 'git@github.com:exampleuser/dotfiles.git'
         self.assertEqual(dev._normalize_url_for_comparison(url1),
                          dev._normalize_url_for_comparison(url2))
 
-    def test_github_edge_alias_matches_plain(self):
-        url1 = 'git@github.com-work:acme-corp/platform-agents.git'
-        url2 = 'git@github.com:acme-corp/platform-agents.git'
+    def test_github_work_alias_matches_plain(self):
+        url1 = 'git@github.com-work:acme-corp/acme-tools.git'
+        url2 = 'git@github.com:acme-corp/acme-tools.git'
         self.assertEqual(dev._normalize_url_for_comparison(url1),
                          dev._normalize_url_for_comparison(url2))
 
     def test_trailing_dot_git_ignored(self):
-        url1 = 'https://dev.azure.com/contoso/platform/_git/repo.git'
-        url2 = 'https://dev.azure.com/contoso/platform/_git/repo'
+        url1 = 'https://dev.azure.com/contoso/Platform/_git/repo.git'
+        url2 = 'https://dev.azure.com/contoso/Platform/_git/repo'
         self.assertEqual(dev._normalize_url_for_comparison(url1),
                          dev._normalize_url_for_comparison(url2))
 
     def test_different_repos_do_not_match(self):
-        url1 = 'https://dev.azure.com/contoso/platform/_git/repo-a'
-        url2 = 'https://dev.azure.com/contoso/platform/_git/repo-b'
+        url1 = 'https://dev.azure.com/contoso/Platform/_git/repo-a'
+        url2 = 'https://dev.azure.com/contoso/Platform/_git/repo-b'
         self.assertNotEqual(dev._normalize_url_for_comparison(url1),
                             dev._normalize_url_for_comparison(url2))
 
     def test_sync_skips_non_ado_repos(self):
         """_parse_ado_remote returns None for non-ADO URLs, so sync won't fix them."""
-        github_url = 'git@github.com-personal:example-user/rcfiles.git'
+        github_url = 'git@github.com-personal:exampleuser/dotfiles.git'
         self.assertIsNone(dev._parse_ado_remote(github_url))
 
 
@@ -1643,7 +1643,7 @@ class TestCmdPrDesc(unittest.TestCase):
     @patch('dev.get_ado_token', return_value='fake-token')
     @patch('dev._resolve_pr_context')
     def test_no_input_reads_description(self, mock_ctx, mock_token):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'main', 42, 'az', None)
         pr_json = json.dumps({'description': 'existing desc'}).encode()
         mock_resp = type('R', (), {'read': lambda self: pr_json, '__enter__': lambda self: self, '__exit__': lambda *a: None})()
         with patch('urllib.request.urlopen', return_value=mock_resp):
@@ -1652,13 +1652,13 @@ class TestCmdPrDesc(unittest.TestCase):
 
     @patch('dev._resolve_pr_context')
     def test_no_pr_found_returns_error(self, mock_ctx):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', None, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'main', None, 'az', None)
         rc = dev.cmd_pr_desc(self._make_args())
         self.assertEqual(rc, 1)
 
     @patch('dev._resolve_pr_context')
     def test_empty_description_reads_current(self, mock_ctx):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'main', 42, 'az', None)
         pr_json = json.dumps({'description': 'existing desc'}).encode()
         mock_resp = type('R', (), {
             'read': lambda self: pr_json,
@@ -1674,7 +1674,7 @@ class TestCmdPrDesc(unittest.TestCase):
     @patch('subprocess.run')
     @patch('dev._resolve_pr_context')
     def test_description_updates(self, mock_ctx, mock_run, mock_print):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'main', 42, 'az', None)
         mock_run.return_value = type('R', (), {'returncode': 0})()
         rc = dev.cmd_pr_desc(self._make_args(description=['new desc']))
         self.assertEqual(rc, 0)
@@ -1684,7 +1684,7 @@ class TestCmdPrDesc(unittest.TestCase):
     @patch('subprocess.run')
     @patch('dev._resolve_pr_context')
     def test_multiline_description_updates(self, mock_ctx, mock_run, mock_print):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'main', 42, 'az', None)
         mock_run.return_value = type('R', (), {'returncode': 0})()
         rc = dev.cmd_pr_desc(self._make_args(description=['# Title', 'Body', '', '- item']))
         self.assertEqual(rc, 0)
@@ -1722,7 +1722,7 @@ class TestCmdPrCreate(unittest.TestCase):
         return argparse.Namespace(**defaults)
 
     def _ctx(self):
-        return ('contoso', 'platform', 'repo', 'feature-branch', None,
+        return ('contoso', 'Platform', 'repo', 'feature-branch', None,
                 'az', lambda *a: (0, 'main'))
 
     @patch('subprocess.run')
@@ -1752,7 +1752,7 @@ class TestCmdPrCreate(unittest.TestCase):
     @patch('subprocess.run')
     @patch('dev._resolve_pr_context')
     def test_existing_pr_short_circuits(self, mock_ctx, mock_run):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feature-branch', 99,
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'feature-branch', 99,
                                  'az', lambda *a: (0, 'main'))
         rc = dev.cmd_pr_create(self._make_args(title='T'))
         self.assertEqual(rc, 0)
@@ -1771,17 +1771,17 @@ class TestSyncStateHelpers(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_state_paths_safe_for_slashes(self):
-        state_path, log_path = dev._sync_state_paths('platform/src')
-        self.assertEqual(state_path.name, 'edge__src.json')
-        self.assertEqual(log_path.name, 'edge__src.log')
+        state_path, log_path = dev._sync_state_paths('team/src')
+        self.assertEqual(state_path.name, 'team__src.json')
+        self.assertEqual(log_path.name, 'team__src.log')
 
     def test_save_load_clear_roundtrip(self):
-        dev._save_sync_state('platform/src', {'pid': 1234, 'status': 'running'})
-        loaded = dev._load_sync_state('platform/src')
+        dev._save_sync_state('team/src', {'pid': 1234, 'status': 'running'})
+        loaded = dev._load_sync_state('team/src')
         self.assertEqual(loaded['pid'], 1234)
         self.assertEqual(loaded['status'], 'running')
-        dev._clear_sync_state('platform/src')
-        self.assertIsNone(dev._load_sync_state('platform/src'))
+        dev._clear_sync_state('team/src')
+        self.assertIsNone(dev._load_sync_state('team/src'))
 
     def test_load_returns_none_when_missing(self):
         self.assertIsNone(dev._load_sync_state('nope'))
@@ -1804,43 +1804,43 @@ class TestReportBackgroundSyncStatus(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_no_state_returns_false(self):
-        self.assertFalse(dev._report_background_sync_status('platform/src'))
+        self.assertFalse(dev._report_background_sync_status('team/src'))
 
     @patch('dev._is_pid_alive', return_value=True)
     def test_running_alive_returns_true(self, _mock_alive):
-        dev._save_sync_state('platform/src', {
+        dev._save_sync_state('team/src', {
             'pid': 1234, 'status': 'running', 'label': 'switching',
             'started_at': datetime.now(timezone.utc).isoformat(),
             'log_path': 'some/path.log',
         })
-        self.assertTrue(dev._report_background_sync_status('platform/src'))
-        self.assertIsNotNone(dev._load_sync_state('platform/src'))  # not cleared
+        self.assertTrue(dev._report_background_sync_status('team/src'))
+        self.assertIsNotNone(dev._load_sync_state('team/src'))  # not cleared
 
     @patch('dev._is_pid_alive', return_value=False)
     def test_running_dead_clears_state(self, _mock_alive):
-        dev._save_sync_state('platform/src', {
+        dev._save_sync_state('team/src', {
             'pid': 1234, 'status': 'running', 'label': 'switching',
             'started_at': datetime.now(timezone.utc).isoformat(),
             'log_path': 'some/path.log',
         })
-        self.assertFalse(dev._report_background_sync_status('platform/src'))
-        self.assertIsNone(dev._load_sync_state('platform/src'))
+        self.assertFalse(dev._report_background_sync_status('team/src'))
+        self.assertIsNone(dev._load_sync_state('team/src'))
 
     def test_succeeded_clears_state(self):
-        dev._save_sync_state('platform/src', {
+        dev._save_sync_state('team/src', {
             'pid': 1234, 'status': 'succeeded', 'label': 'switching',
             'log_path': 'some/path.log',
         })
-        self.assertFalse(dev._report_background_sync_status('platform/src'))
-        self.assertIsNone(dev._load_sync_state('platform/src'))
+        self.assertFalse(dev._report_background_sync_status('team/src'))
+        self.assertIsNone(dev._load_sync_state('team/src'))
 
     def test_failed_clears_state(self):
-        dev._save_sync_state('platform/src', {
+        dev._save_sync_state('team/src', {
             'pid': 1234, 'status': 'failed', 'exit_code': 1,
             'label': 'switching', 'log_path': 'some/path.log',
         })
-        self.assertFalse(dev._report_background_sync_status('platform/src'))
-        self.assertIsNone(dev._load_sync_state('platform/src'))
+        self.assertFalse(dev._report_background_sync_status('team/src'))
+        self.assertIsNone(dev._load_sync_state('team/src'))
 
 
 class TestCmdBgSync(unittest.TestCase):
@@ -2010,7 +2010,7 @@ class TestCheckStaleBranchForce(unittest.TestCase):
     @patch('subprocess.run')
     def test_assume_yes_switches_without_prompt(self, mock_run, _i, _c, _a, _d):
         mock_run.return_value = type('R', (), {'returncode': 0})()
-        dev.check_stale_branch(Path('/tmp/repo'), 'platform/src', assume_yes=True)
+        dev.check_stale_branch(Path('/tmp/repo'), 'team/src', assume_yes=True)
         self.assertEqual(mock_run.call_count, 3)
 
     @patch('dev.get_default_branch', return_value='main')
@@ -2019,7 +2019,7 @@ class TestCheckStaleBranchForce(unittest.TestCase):
     @patch('builtins.input', side_effect=EOFError)
     @patch('subprocess.run')
     def test_without_force_eof_does_not_switch(self, mock_run, _i, _c, _a, _d):
-        dev.check_stale_branch(Path('/tmp/repo'), 'platform/src')
+        dev.check_stale_branch(Path('/tmp/repo'), 'team/src')
         mock_run.assert_not_called()
 
     @patch('dev.emit_ok')
@@ -2030,7 +2030,7 @@ class TestCheckStaleBranchForce(unittest.TestCase):
     @patch('subprocess.run')
     def test_failed_op_reports_error_and_stops(self, mock_run, _c, _a, _d, mock_err, mock_ok):
         mock_run.return_value = type('R', (), {'returncode': 1})()
-        dev.check_stale_branch(Path('/tmp/repo'), 'platform/src', assume_yes=True)
+        dev.check_stale_branch(Path('/tmp/repo'), 'team/src', assume_yes=True)
         self.assertEqual(mock_run.call_count, 1)
         mock_ok.assert_not_called()
         mock_err.assert_called_once()
@@ -2628,7 +2628,7 @@ class TestCheckStaleBranchConfiguredDefault(unittest.TestCase):
     @patch('subprocess.run')
     def test_configured_mirror_default_is_not_prompted(self, mock_run, _i, _c, _a):
         with patch('dev.get_default_branch', return_value='mirror/main'):
-            dev.check_stale_branch(Path('/tmp/repo'), 'bigrepo.infra.build',
+            dev.check_stale_branch(Path('/tmp/repo'), 'bigrepo.infra',
                                    default_branch='mirror/main')
         mock_run.assert_not_called()
 
@@ -2638,7 +2638,7 @@ class TestCheckStaleBranchConfiguredDefault(unittest.TestCase):
     @patch('subprocess.run')
     def test_other_mirror_branch_still_exempt(self, mock_run, _i, _c, _a):
         with patch('dev.get_default_branch', return_value='mirror/main'):
-            dev.check_stale_branch(Path('/tmp/repo'), 'bigrepo.infra.build',
+            dev.check_stale_branch(Path('/tmp/repo'), 'bigrepo.infra',
                                    default_branch='mirror/main')
         mock_run.assert_not_called()
 
@@ -2649,7 +2649,7 @@ class TestCheckStaleBranchConfiguredDefault(unittest.TestCase):
     def test_feature_branch_switches_to_configured_default(self, mock_run, _i, _c, _a):
         mock_run.return_value = type('R', (), {'returncode': 0})()
         with patch('dev.get_default_branch', return_value='mirror/main'):
-            dev.check_stale_branch(Path('/tmp/repo'), 'bigrepo.infra.build',
+            dev.check_stale_branch(Path('/tmp/repo'), 'bigrepo.infra',
                                    default_branch='mirror/main')
         self.assertEqual(mock_run.call_count, 3)
         self.assertIn('mirror/main', mock_run.call_args_list[1].args[0])
@@ -2673,7 +2673,7 @@ class TestCmdPrDiff(unittest.TestCase):
     @patch('dev._resolve_pr_context')
     def test_fetches_target_from_pr_api(self, mock_ctx, mock_token, mock_run):
         git_fn = lambda *a: (0, '')
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', git_fn)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'feat', 42, 'az', git_fn)
         pr_json = json.dumps({'targetRefName': 'refs/heads/main'}).encode()
         mock_resp = type('R', (), {
             'read': lambda self: pr_json,
@@ -2695,7 +2695,7 @@ class TestCmdPrDiff(unittest.TestCase):
             if 'rev-parse' in cmd_args:
                 return 0, 'origin/main'
             return 0, ''
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', None, 'az', git_fn)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'feat', None, 'az', git_fn)
         mock_run.return_value = subprocess.CompletedProcess([], 0, stdout='origin/main\n', stderr='')
         rc = dev.cmd_pr_diff(self._make_args())
         self.assertEqual(rc, 0)
@@ -2703,7 +2703,7 @@ class TestCmdPrDiff(unittest.TestCase):
     @patch('subprocess.run')
     @patch('dev._resolve_pr_context')
     def test_id_mode_uses_remote_refs(self, mock_ctx, mock_run):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', None, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'feat', None, 'az', None)
         mock_run.return_value = subprocess.CompletedProcess([], 0, stdout='origin/master\n', stderr='')
         rc = dev.cmd_pr_diff(self._make_args())
         self.assertEqual(rc, 0)
@@ -2715,7 +2715,7 @@ class TestCmdPrDiff(unittest.TestCase):
     @patch('dev._resolve_pr_context')
     def test_extra_args_passed_to_git_diff(self, mock_ctx, mock_run):
         git_fn = lambda *a: (0, 'origin/main')
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', None, 'az', git_fn)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'feat', None, 'az', git_fn)
         mock_run.return_value = subprocess.CompletedProcess([], 0, stdout='origin/main\n', stderr='')
         rc = dev.cmd_pr_diff(self._make_args(diff_args=['--', '--stat']))
         self.assertEqual(rc, 0)
@@ -2728,7 +2728,7 @@ class TestCmdPrDiff(unittest.TestCase):
     @patch('subprocess.run')
     @patch('dev._resolve_pr_context')
     def test_reuses_resolved_pr_without_refetch(self, mock_ctx, mock_run, mock_fetch):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'feat', 42, 'az', None)
         mock_run.return_value = subprocess.CompletedProcess([], 0, stdout='origin/master\n', stderr='')
         args = self._make_args(resolved_pr={'targetRefName': 'refs/heads/main'})
         rc = dev.cmd_pr_diff(args)
@@ -2754,21 +2754,21 @@ class TestCmdPrComments(unittest.TestCase):
 
     @patch('dev._resolve_pr_context')
     def test_no_pr_id_returns_error(self, mock_ctx):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', None, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'main', None, 'az', None)
         rc = dev.cmd_pr_comments(self._make_args())
         self.assertEqual(rc, 1)
 
     @patch('dev._fetch_pr_threads', return_value=None)
     @patch('dev._resolve_pr_context')
     def test_fetch_failure_returns_error(self, mock_ctx, mock_threads):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'main', 42, 'az', None)
         rc = dev.cmd_pr_comments(self._make_args())
         self.assertEqual(rc, 1)
 
     @patch('dev._fetch_pr_threads', return_value=[])
     @patch('dev._resolve_pr_context')
     def test_no_active_threads_returns_ok(self, mock_ctx, mock_threads):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'main', 42, 'az', None)
         from io import StringIO
         buf = StringIO()
         with patch('sys.stdout', buf):
@@ -2779,7 +2779,7 @@ class TestCmdPrComments(unittest.TestCase):
     @patch('dev._fetch_pr_threads')
     @patch('dev._resolve_pr_context')
     def test_active_threads_include_ids(self, mock_ctx, mock_threads):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'main', 42, 'az', None)
         mock_threads.return_value = [
             {
                 'id': 100,
@@ -2893,7 +2893,7 @@ class TestCmdPrComments(unittest.TestCase):
     @patch('dev._fetch_pr_threads')
     @patch('dev._resolve_pr_context')
     def test_active_flag_hides_resolved_threads(self, mock_ctx, mock_threads):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'main', 42, 'az', None)
         mock_threads.return_value = [
             {
                 'id': 100,
@@ -2944,7 +2944,7 @@ class TestCmdPrComments(unittest.TestCase):
     @patch('dev._fetch_pr_threads')
     @patch('dev._resolve_pr_context')
     def test_active_flag_no_active_threads_message(self, mock_ctx, mock_threads):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'main', 42, 'az', None)
         mock_threads.return_value = [{
             'id': 200,
             'status': 'fixed',
@@ -2966,7 +2966,7 @@ class TestCmdPrComments(unittest.TestCase):
     @patch('dev._fetch_pr_threads')
     @patch('dev._resolve_pr_context')
     def test_pr_level_thread_no_file(self, mock_ctx, mock_threads):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'main', 42, 'az', None)
         mock_threads.return_value = [{
             'id': 500,
             'status': 'active',
@@ -2995,7 +2995,7 @@ class TestCmdPrComments(unittest.TestCase):
     def test_mixed_thread_keeps_system_entries(self, mock_ctx, mock_threads):
         # A thread with at least one human/bot comment is kept, and its
         # interleaved system entries are shown for context.
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'main', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'main', 42, 'az', None)
         mock_threads.return_value = [{
             'id': 700,
             'status': 'active',
@@ -3052,7 +3052,7 @@ class TestPrCommentPosting(unittest.TestCase):
     @patch('dev._post_pr_thread_new', return_value={'id': 1})
     @patch('dev._resolve_pr_context')
     def test_posting_pre_prefixed_message_not_doubled(self, mock_ctx, mock_new):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'feat', 42, 'az', None)
         buf = StringIO()
         with patch('sys.stdout', buf):
             rc = dev.cmd_pr_comments(self._make_args(message=['Code-review-bot:', 'noted']))
@@ -3063,7 +3063,7 @@ class TestPrCommentPosting(unittest.TestCase):
     @patch('dev._post_pr_thread_new', return_value={'id': 555})
     @patch('dev._resolve_pr_context')
     def test_posting_new_pr_level_thread_stamps_prefix(self, mock_ctx, mock_new):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'feat', 42, 'az', None)
         buf = StringIO()
         with patch('sys.stdout', buf):
             rc = dev.cmd_pr_comments(self._make_args(message=['some', 'feedback']))
@@ -3075,7 +3075,7 @@ class TestPrCommentPosting(unittest.TestCase):
     @patch('dev._post_pr_thread_reply', return_value={'id': 9})
     @patch('dev._resolve_pr_context')
     def test_posting_reply_uses_thread_and_parent(self, mock_ctx, mock_reply):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'feat', 42, 'az', None)
         buf = StringIO()
         with patch('sys.stdout', buf):
             rc = dev.cmd_pr_comments(self._make_args(message=['ack'], reply=700, parent=2))
@@ -3088,7 +3088,7 @@ class TestPrCommentPosting(unittest.TestCase):
     @patch('dev._post_pr_thread_new', return_value={'id': 1})
     @patch('dev._resolve_pr_context')
     def test_posting_file_anchored_thread(self, mock_ctx, mock_new):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'feat', 42, 'az', None)
         buf = StringIO()
         with patch('sys.stdout', buf):
             rc = dev.cmd_pr_comments(self._make_args(message=['bug here'], file='src/a.cs', line=10))
@@ -3098,13 +3098,13 @@ class TestPrCommentPosting(unittest.TestCase):
 
     @patch('dev._resolve_pr_context')
     def test_line_without_file_errors(self, mock_ctx):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'feat', 42, 'az', None)
         rc = dev.cmd_pr_comments(self._make_args(message=['x'], line=5))
         self.assertEqual(rc, 1)
 
     @patch('dev._resolve_pr_context')
     def test_reply_with_file_errors(self, mock_ctx):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'feat', 42, 'az', None)
         rc = dev.cmd_pr_comments(self._make_args(message=['x'], reply=1, file='src/a.cs'))
         self.assertEqual(rc, 1)
 
@@ -3112,7 +3112,7 @@ class TestPrCommentPosting(unittest.TestCase):
     @patch('dev._post_pr_thread_reply', return_value={'id': 9})
     @patch('dev._resolve_pr_context')
     def test_reply_with_resolve_marks_thread_fixed(self, mock_ctx, mock_reply, mock_status):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'feat', 42, 'az', None)
         buf = StringIO()
         with patch('sys.stdout', buf):
             rc = dev.cmd_pr_comments(self._make_args(message=['done'], reply=700, resolve=True))
@@ -3125,7 +3125,7 @@ class TestPrCommentPosting(unittest.TestCase):
     @patch('dev._post_pr_thread_reply')
     @patch('dev._resolve_pr_context')
     def test_resolve_without_message_skips_reply(self, mock_ctx, mock_reply, mock_status):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'feat', 42, 'az', None)
         buf = StringIO()
         with patch('sys.stdout', buf):
             rc = dev.cmd_pr_comments(self._make_args(reply=700, resolve=True))
@@ -3135,7 +3135,7 @@ class TestPrCommentPosting(unittest.TestCase):
 
     @patch('dev._resolve_pr_context')
     def test_resolve_without_reply_errors(self, mock_ctx):
-        mock_ctx.return_value = ('contoso', 'platform', 'repo', 'feat', 42, 'az', None)
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'feat', 42, 'az', None)
         rc = dev.cmd_pr_comments(self._make_args(message=['x'], resolve=True))
         self.assertEqual(rc, 1)
 

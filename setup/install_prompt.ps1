@@ -10,17 +10,13 @@ function prompt {
     }
   } catch {}
 
-  $userHostName = "developer"
-  if ($env:COMPUTERNAME -like "CPC-jamya*") {
-    $hostName = "cloud-devbox"
-  } elseif ($env:COMPUTERNAME -eq "developer-DEVBOX") {
-    $hostName = "devbox"
-  } elseif ($env:COMPUTERNAME -eq "developer-SURFACE") {
-    $hostName = "surface"
-  } else {
-    $hostName = $env:COMPUTERNAME.ToLower()
-    $userHostName = $env:USERNAME
-  }
+  # DEV_PROMPT_USER/DEV_PROMPT_HOST let a private config give machines
+  # friendly short names (e.g. "devbox" instead of a real hostname);
+  # unset, this just shows the real username@hostname.
+  $userHostName = $env:DEV_PROMPT_USER
+  if (-not $userHostName) { $userHostName = $env:USERNAME }
+  $hostName = $env:DEV_PROMPT_HOST
+  if (-not $hostName) { $hostName = $env:COMPUTERNAME.ToLower() }
 
   $userHost = "`e[32m$userHostName@$hostName`e[0m"
   $pathDisplay = "`e[96m$currentPath`e[0m"

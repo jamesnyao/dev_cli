@@ -1,11 +1,12 @@
 if (-not (git config --global user.email)) {
-  if ($env:WORK -eq "MSFT") {
-    $email = "developer@example.com"
-  } else {
-    $email = "james.n.yao@gmail.com"
-  }
-  git config --global user.email "$email"
+  $email = $env:DEV_GIT_EMAIL
+  if (-not $email) { $email = (& dev config get identity.gitEmail 2>$null) }
+  if (-not $email) { $email = Read-Host "git user.email" }
+  if ($email) { git config --global user.email "$email" }
 }
 if (-not (git config --global user.name)) {
-  git config --global user.name "James Yao"
+  $name = $env:DEV_GIT_NAME
+  if (-not $name) { $name = (& dev config get identity.gitName 2>$null) }
+  if (-not $name) { $name = Read-Host "git user.name" }
+  if ($name) { git config --global user.name "$name" }
 }
