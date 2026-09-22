@@ -154,8 +154,8 @@ class TestGetBasePath(unittest.TestCase):
     # Patch only the keys get_base_path reads. Clearing the whole environment
     # drops empty-valued vars from the native process env on Windows (they are
     # restored into os.environ but not into the real environment block), which
-    # breaks every later subprocess -- notably git, whose toolchain_tools wrapper
-    # sets GIT_CONFIG_VALUE_2 to an empty string.
+    # breaks every later subprocess -- notably git, whose wrapper scripts
+    # set GIT_CONFIG_VALUE_2 to an empty string.
     @patch.dict(os.environ, {'DEVCONFIG': ''})
     def test_missing_devconfig_raises(self):
         with self.assertRaises(ValueError):
