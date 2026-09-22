@@ -51,6 +51,11 @@ Set `DEVCONFIG` to a key in `workspaceRoots`. For example, a private override:
 }
 ```
 
+Shell startup defaults to `example-machine` and reads `DEV` from the merged
+configuration rather than hardcoding a workspace directory. An explicitly
+exported `DEVCONFIG` is preserved. Private hooks can select a different machine
+and apply work-specific environment settings after the generic setup.
+
 Use `dev config get <dotted.key>` to read a setting. Local credentials and
 caches live in `.dev_temp/` alongside the override, never in the sample.
 Keep `.dev_temp/` ignored if you version your private configuration.

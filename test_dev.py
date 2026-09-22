@@ -1270,6 +1270,69 @@ class TestParseAdoRemote(unittest.TestCase):
         self.assertEqual(result, ('org', 'proj', 'repo'))
 
 
+@unittest.skipUnless(shutil.which('zsh'), 'zsh is not installed')
+class TestShellWorkspace(unittest.TestCase):
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
+        tool = self.home / 'dev_scripts'
+        (tool / 'shell').mkdir(parents=True)
+        for name in ('dev', 'dev.py', 'dev_config.json', 'shell/zsh.sh'):
+            shutil.copy2(Path(__file__).parent / name, tool / name)
+        tools = self.home / 'bin'
+        tools.mkdir()
+        uname = tools / 'uname'
+        uname.write_text('#!/bin/sh\nprintf "Darwin\\n"\n')
+        uname.chmod(0o755)
+        (tools / 'python3').symlink_to(sys.executable)
+        self.env = dict(os.environ, HOME=str(self.home), DEVCONFIG='',
+                        DEV_CONFIG_OVERRIDE=str(self.home / 'dev_config.json'),
+                        PATH=f'{tools}:/usr/bin:/bin:/usr/sbin:/sbin')
+
+    def shell(self):
+        return subprocess.run(
+            [shutil.which('zsh'), '-f', '-c',
+             'source "$HOME/dev_scripts/shell/zsh.sh" || exit $?; '
+             'printf "%s\\n" "$DEVCONFIG" "$DEV" "$PWD" "${PRIVATE_HOOK:-no}"'],
+            env=self.env, text=True, capture_output=True)
+
+    def test_standalone_uses_sample_workspace(self):
+        result = self.shell()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(),
+                         ['example-machine', str(self.home), str(self.home), 'no'])
+
+    def test_explicit_machine_uses_private_override(self):
+        workspace = self.home / 'custom workspace'
+        workspace.mkdir()
+        self.env['DEVCONFIG'] = 'my-machine'
+        (self.home / 'dev_config.json').write_text(json.dumps({
+            'workspaceRoots': {'my-machine': str(workspace)}, 'repos': []}))
+        result = self.shell()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(),
+                         ['my-machine', str(workspace), str(workspace), 'no'])
+
+    def test_private_hook_runs_after_generic_setup(self):
+        hooks = self.home / 'work_scripts'
+        hooks.mkdir()
+        (hooks / 'hooks.sh').write_text(
+            '[[ "$DEVCONFIG" == "example-machine" ]] || return 1\n'
+            'export DEVCONFIG=private-machine\nexport PRIVATE_HOOK=yes\n')
+        result = self.shell()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(),
+                         ['private-machine', str(self.home), str(self.home), 'yes'])
+
+    def test_unknown_machine_reports_configuration_error(self):
+        self.env['DEVCONFIG'] = 'missing'
+        result = self.shell()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('No workspaceRoot found', result.stderr)
+
+
 class TestCmdInit(unittest.TestCase):
 
     def setUp(self):

@@ -6,11 +6,7 @@ export platform=$(uname | tr '[:upper:]' '[:lower:]')
 
 # Detect WSL and set a display name for the prompt
 if [[ "$platform" == "linux" ]] && grep -qi microsoft /proc/version 2>/dev/null; then
-  if [[ "$HOST" == *devbox* ]]; then
-    export ZSH_THEME_PLATFORM="devbox"
-  else
-    export ZSH_THEME_PLATFORM="wsl"
-  fi
+  export ZSH_THEME_PLATFORM="wsl"
 else
   export ZSH_THEME_PLATFORM="$platform"
 fi
@@ -33,24 +29,11 @@ if [[ "$platform" == "linux" ]]; then
   PATH="$HOME/.local/bin:/usr/local/go/bin:$PATH"
 fi
 
-# Workspace root + machine identity (see workspaceRoots in dev_config.json)
-if [[ "$platform" == "linux" ]] && grep -qi microsoft /proc/version 2>/dev/null; then
-  export DEV="$HOME/dev"
-  if [[ "$HOST" == *devbox* ]]; then
-    export DEVCONFIG="${DEVCONFIG:-wsl-devbox}"
-  else
-    export DEVCONFIG="${DEVCONFIG:-wsl-surface}"
-  fi
-elif [[ "$platform" == "linux" ]]; then
-  export DEV="/workspace"
-  export DEVCONFIG="${DEVCONFIG:-linux-devbox}"
-elif [[ "$platform" == "darwin" ]]; then
-  export DEV="$HOME"
-  export DEVCONFIG="${DEVCONFIG:-mac-devbox}"
-fi
-
 # Dev CLI
 export PATH="$HOME/dev_scripts:$PATH"
+export DEVCONFIG="${DEVCONFIG:-example-machine}"
+DEV="$(dev repo root)" || return
+export DEV
 
 # zoxide (replaces cd)
 if command -v zoxide &>/dev/null; then
@@ -74,4 +57,6 @@ command -v fzf &>/dev/null && source <(fzf --zsh) 2>/dev/null
 [[ -n "$DEV" ]] && cd "$DEV"
 
 # Private, work-specific setup -- runs last so it can override anything above.
-[[ -f "$HOME/work_scripts/hooks.sh" ]] && source "$HOME/work_scripts/hooks.sh"
+if [[ -f "$HOME/work_scripts/hooks.sh" ]]; then
+  source "$HOME/work_scripts/hooks.sh"
+fi

@@ -19,6 +19,15 @@ if (($env:PATH -split ';') -notcontains $DevScripts) {
 . $SETUP\install_agency.ps1
 . $SETUP\install_pwsh.ps1
 
+if (-not $env:DEVCONFIG) {
+  $env:DEVCONFIG = "example-machine"
+}
+$Workspace = & dev repo root
+if ($LASTEXITCODE -ne 0) {
+  throw "Could not read workspaceRoots for DEVCONFIG=$env:DEVCONFIG"
+}
+$env:DEV = $Workspace
+
 # Private, work-specific setup -- runs last so it can override anything above.
 $WorkHooks = "$env:USERPROFILE\work_scripts\hooks.ps1"
 if (Test-Path $WorkHooks) {
