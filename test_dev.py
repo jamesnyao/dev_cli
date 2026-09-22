@@ -446,6 +446,7 @@ class TestTrustClaudeWorkspace(unittest.TestCase):
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
+        self.workspace = str(Path(self.temp_dir) / 'workspace')
         self.orig_claude_config_file = dev.CLAUDE_CONFIG_FILE
         dev.CLAUDE_CONFIG_FILE = Path(self.temp_dir) / '.claude.json'
 
@@ -454,41 +455,41 @@ class TestTrustClaudeWorkspace(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_noop_when_claude_config_missing(self):
-        dev.trust_claude_workspace('/workspace')
+        dev.trust_claude_workspace(self.workspace)
         self.assertFalse(dev.CLAUDE_CONFIG_FILE.exists())
 
     def test_marks_new_project_trusted(self):
         dev.CLAUDE_CONFIG_FILE.write_text(json.dumps({'projects': {}}))
-        dev.trust_claude_workspace('/workspace')
+        dev.trust_claude_workspace(self.workspace)
         config = json.loads(dev.CLAUDE_CONFIG_FILE.read_text())
-        self.assertTrue(config['projects']['/workspace']['hasTrustDialogAccepted'])
+        self.assertTrue(config['projects'][self.workspace]['hasTrustDialogAccepted'])
 
     def test_preserves_other_project_fields(self):
         dev.CLAUDE_CONFIG_FILE.write_text(json.dumps({
-            'projects': {'/workspace': {'hasTrustDialogAccepted': False, 'allowedTools': ['Bash']}}
+            'projects': {self.workspace: {'hasTrustDialogAccepted': False, 'allowedTools': ['Bash']}}
         }))
-        dev.trust_claude_workspace('/workspace')
+        dev.trust_claude_workspace(self.workspace)
         config = json.loads(dev.CLAUDE_CONFIG_FILE.read_text())
-        self.assertTrue(config['projects']['/workspace']['hasTrustDialogAccepted'])
-        self.assertEqual(config['projects']['/workspace']['allowedTools'], ['Bash'])
+        self.assertTrue(config['projects'][self.workspace]['hasTrustDialogAccepted'])
+        self.assertEqual(config['projects'][self.workspace]['allowedTools'], ['Bash'])
 
     def test_preserves_unrelated_top_level_keys(self):
         dev.CLAUDE_CONFIG_FILE.write_text(json.dumps({'oauthAccount': {'id': 'abc'}, 'projects': {}}))
-        dev.trust_claude_workspace('/workspace')
+        dev.trust_claude_workspace(self.workspace)
         config = json.loads(dev.CLAUDE_CONFIG_FILE.read_text())
         self.assertEqual(config['oauthAccount'], {'id': 'abc'})
 
     def test_already_trusted_is_noop(self):
         dev.CLAUDE_CONFIG_FILE.write_text(json.dumps({
-            'projects': {'/workspace': {'hasTrustDialogAccepted': True}}
+            'projects': {self.workspace: {'hasTrustDialogAccepted': True}}
         }))
         mtime_before = dev.CLAUDE_CONFIG_FILE.stat().st_mtime_ns
-        dev.trust_claude_workspace('/workspace')
+        dev.trust_claude_workspace(self.workspace)
         self.assertEqual(dev.CLAUDE_CONFIG_FILE.stat().st_mtime_ns, mtime_before)
 
     def test_malformed_json_is_ignored(self):
         dev.CLAUDE_CONFIG_FILE.write_text('{not valid json')
-        dev.trust_claude_workspace('/workspace')
+        dev.trust_claude_workspace(self.workspace)
         self.assertEqual(dev.CLAUDE_CONFIG_FILE.read_text(), '{not valid json')
 
 
@@ -854,6 +855,7 @@ class TestShellWorkspace(unittest.TestCase):
         self.assertEqual((tool / 'dev_config.json').read_bytes(), sample_bytes)
 
 
+@unittest.skipIf(os.name == 'nt', 'the bash launcher requires a Unix host')
 class TestDevLauncherPythonBootstrap(unittest.TestCase):
     """The `dev` bash launcher bootstraps python3 via the OS package manager
     when it's missing from PATH, and otherwise guides the user to opt in."""
@@ -917,6 +919,44 @@ exit 1
         result = self.run_dev('python', 'update')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("still isn't on PATH", result.stdout)
+
+
+@unittest.skipUnless(os.name == 'nt', 'Windows launchers require a Windows host')
+class TestWindowsDevLaunchers(unittest.TestCase):
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='dev launcher ')
+        self.addCleanup(self.temp.cleanup)
+        self.tool = Path(self.temp.name)
+        for name in ('dev.cmd', 'dev.ps1'):
+            shutil.copy2(Path(__file__).parent / name, self.tool / name)
+        (self.tool / 'dev.py').write_text(
+            'import json, sys\n'
+            'print(json.dumps(sys.argv[2:]))\n'
+            'sys.exit(int(sys.argv[1]))\n')
+        self.env = dict(os.environ, PATH=os.pathsep.join(
+            [str(Path(sys.executable).parent), os.environ.get('PATH', '')]))
+
+    def test_cmd_preserves_arguments_and_exit_status(self):
+        for code in (0, 7):
+            with self.subTest(code=code):
+                result = subprocess.run(
+                    [str(self.tool / 'dev.cmd'), str(code), 'space argument', '!literal!'],
+                    shell=True, env=self.env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertEqual(json.loads(result.stdout), ['space argument', '!literal!'])
+
+    def test_powershell_preserves_arguments_and_exit_status(self):
+        powershell = shutil.which('pwsh') or shutil.which('powershell')
+        self.assertIsNotNone(powershell)
+        for code in (0, 7):
+            with self.subTest(code=code):
+                result = subprocess.run(
+                    [powershell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                     '-File', str(self.tool / 'dev.ps1'), str(code), 'space argument', '!literal!'],
+                    env=self.env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertEqual(json.loads(result.stdout), ['space argument', '!literal!'])
 
 
 class TestCmdInit(unittest.TestCase):
@@ -1088,23 +1128,28 @@ class TestCheckPython3Shim(unittest.TestCase):
         # No exception, no output, when the shim file isn't present.
         dev._check_python3_shim()
 
-    @patch('dev.get_os_type', return_value='darwin')
-    def test_warns_when_shim_finds_no_working_interpreter(self, _mock_os):
-        shim = dev.SCRIPT_DIR / 'python3'
-        shim.write_text('#!/bin/sh\nexit 1\n')
-        shim.chmod(0o755)
-        with patch('dev.emit_warn') as mock_warn:
-            dev._check_python3_shim()
-        mock_warn.assert_called_once()
+    def test_warns_when_shim_finds_no_working_interpreter(self):
+        for platform, name in (('darwin', 'python3'), ('windows', 'python3.cmd')):
+            with self.subTest(platform=platform):
+                shim = dev.SCRIPT_DIR / name
+                shim.touch()
+                with patch('dev.get_os_type', return_value=platform), \
+                     patch('dev.subprocess.run', return_value=subprocess.CompletedProcess([], 1)) as mock_run, \
+                     patch('dev.emit_warn') as mock_warn:
+                    dev._check_python3_shim()
+                mock_warn.assert_called_once()
+                self.assertEqual(mock_run.call_args.args[0], [str(shim), '--version'])
+                self.assertEqual(mock_run.call_args.kwargs['shell'], platform == 'windows')
 
-    @patch('dev.get_os_type', return_value='darwin')
-    def test_silent_when_shim_finds_working_interpreter(self, _mock_os):
-        shim = dev.SCRIPT_DIR / 'python3'
-        shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" --version\n')
-        shim.chmod(0o755)
-        with patch('dev.emit_warn') as mock_warn:
-            dev._check_python3_shim()
-        mock_warn.assert_not_called()
+    def test_silent_when_shim_finds_working_interpreter(self):
+        for platform, name in (('darwin', 'python3'), ('windows', 'python3.cmd')):
+            with self.subTest(platform=platform):
+                (dev.SCRIPT_DIR / name).touch()
+                with patch('dev.get_os_type', return_value=platform), \
+                     patch('dev.subprocess.run', return_value=subprocess.CompletedProcess([], 0)), \
+                     patch('dev.emit_warn') as mock_warn:
+                    dev._check_python3_shim()
+                mock_warn.assert_not_called()
 
 
 class TestCmdInitSelfHealing(unittest.TestCase):

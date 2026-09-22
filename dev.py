@@ -231,7 +231,8 @@ def get_base_path(config=None):
     roots = config.get('workspaceRoots', {})
     if devconfig and devconfig in roots:
         return expand_config_path(roots[devconfig])
-    raise ValueError(f'No workspaceRoot found for DEVCONFIG={devconfig!r}. Check {OVERRIDE_CONFIG_FILE} workspaceRoots.')
+    raise ValueError(
+        f'No workspaceRoot found for DEVCONFIG={devconfig!r}. Check {OVERRIDE_CONFIG_FILE} workspaceRoots.')
 
 def trust_claude_workspace(base_path):
     """Mark the workspace root trusted in ~/.claude.json so Claude Code
@@ -1993,7 +1994,7 @@ def _check_python3_shim():
     try:
         result = subprocess.run(
             [str(shim_path), '--version'], capture_output=True, text=True,
-            env=env, timeout=10, shell=(get_os_type() == 'windows'))
+            env=env, timeout=10, shell=get_os_type() == 'windows')
     except OSError:
         return
 
@@ -2093,7 +2094,6 @@ def cmd_ado_set_pat(args):
     if not pat:
         # Prompt for PAT if not provided
         try:
-            import getpass
             pat = getpass.getpass("Enter your Azure DevOps PAT: ").strip()
         except EOFError:
             emit_error("No PAT provided")
