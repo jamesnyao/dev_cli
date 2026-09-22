@@ -49,7 +49,7 @@ next to the override; keep it gitignored.
 
 ## Private overlays
 
-`dev init` creates `~/dev_env/hooks.sh` (or `hooks.ps1` on Windows) as a stub
+`dev init` creates `~/dev_env/env.sh` (or `env.ps1` on Windows) as a stub
 if one doesn't exist — edit it for custom PATH/env/prompt setup; it's sourced
 last and never overwritten.
 
@@ -57,8 +57,8 @@ last and never overwritten.
 ~/
 ├── dev_config.json         # Your configuration, outside the tool repo
 ├── dev_env/
-│   ├── hooks.sh             # Optional zsh customization
-│   └── hooks.ps1            # Optional PowerShell customization
+│   ├── env.sh               # Optional zsh customization
+│   └── env.ps1              # Optional PowerShell customization
 └── dev_cli/                 # This repository
     ├── dev_config.json       # Shared annotated sample, never rewritten
     ├── shell/

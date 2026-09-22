@@ -803,7 +803,7 @@ class TestShellWorkspace(unittest.TestCase):
     def test_private_hook_runs_after_generic_setup(self):
         hooks = self.home / 'dev_env'
         hooks.mkdir()
-        (hooks / 'hooks.sh').write_text(
+        (hooks / 'env.sh').write_text(
             '[[ "$DEVCONFIG" == "example-machine" ]] || return 1\n'
             'export DEVCONFIG=private-machine\nexport PRIVATE_HOOK=yes\n')
         result = self.shell()
@@ -822,7 +822,7 @@ class TestShellWorkspace(unittest.TestCase):
             'identity': {'username': 'configured-user'}}))
         hooks = self.home / 'dev_env'
         hooks.mkdir()
-        (hooks / 'hooks.sh').write_text(
+        (hooks / 'env.sh').write_text(
             '[[ "$DEV_PROMPT_USER" == "configured-user" ]] || return 1\n')
         result = self.shell()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1080,20 +1080,20 @@ class TestCmdInitSelfHealing(unittest.TestCase):
         mock_stdin.isatty.return_value = False
         self.assertEqual(dev.cmd_init(None), 0)
         zshrc = self.home / '.zshrc'
-        hook_path = dev._hook_path()
+        env_path = dev._env_path()
         self.assertTrue(zshrc.is_file())
         self.assertTrue(dev.OVERRIDE_CONFIG_FILE.is_file())
-        self.assertTrue(hook_path.is_file())
+        self.assertTrue(env_path.is_file())
 
         # Simulate loss of each artifact independently of the others.
         zshrc.unlink()
         dev.OVERRIDE_CONFIG_FILE.unlink()
-        hook_path.unlink()
+        env_path.unlink()
 
         self.assertEqual(dev.cmd_init(None), 0)
         self.assertIn(dev.ZSHRC_SOURCE_LINE, zshrc.read_text())
         self.assertTrue(dev.OVERRIDE_CONFIG_FILE.is_file())
-        self.assertTrue(hook_path.is_file())
+        self.assertTrue(env_path.is_file())
 
     @patch.dict(os.environ, {'SHELL': '/bin/zsh'})
     @patch('dev.get_os_type', return_value='linux')
@@ -1102,15 +1102,15 @@ class TestCmdInitSelfHealing(unittest.TestCase):
         mock_stdin.isatty.return_value = False
         self.assertEqual(dev.cmd_init(None), 0)
         dev.OVERRIDE_CONFIG_FILE.write_text(json.dumps({'identity': {'username': 'kept'}}))
-        hook_path = dev._hook_path()
-        hook_path.write_text('export CUSTOM=1\n')
+        env_path = dev._env_path()
+        env_path.write_text('export CUSTOM=1\n')
         (self.home / '.zshrc').write_text(
             f'export CUSTOM_RC=1\n{dev.ZSHRC_SOURCE_LINE}\n')
 
         self.assertEqual(dev.cmd_init(None), 0)
         self.assertEqual(json.loads(dev.OVERRIDE_CONFIG_FILE.read_text()),
                          {'identity': {'username': 'kept'}})
-        self.assertEqual(hook_path.read_text(), 'export CUSTOM=1\n')
+        self.assertEqual(env_path.read_text(), 'export CUSTOM=1\n')
         self.assertIn('export CUSTOM_RC=1', (self.home / '.zshrc').read_text())
 
 

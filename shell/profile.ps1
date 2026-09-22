@@ -37,7 +37,7 @@ if (-not $env:DEV_PROMPT_USER) {
 }
 
 # Private, work-specific setup -- runs last so it can override anything above.
-$WorkHooks = "$env:USERPROFILE\dev_env\hooks.ps1"
-if (Test-Path $WorkHooks) {
-  . $WorkHooks
+$WorkEnv = "$env:USERPROFILE\dev_env\env.ps1"
+if (Test-Path $WorkEnv) {
+  . $WorkEnv
 }
