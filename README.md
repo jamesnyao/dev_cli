@@ -99,8 +99,9 @@ python3 test_dev.py TestConfig.test_save_never_writes_sample_file
 ```
 
 Requires Python 3 and Git only; zsh startup tests need `zsh` and are skipped
-otherwise. `dev test` runs the suite plus pylint (pylint required for that
-path only).
+otherwise. Bash launcher tests run on Unix; batch and PowerShell launcher
+tests run on Windows. Run the suite natively on each platform after launcher
+changes. `dev test` runs the suite plus pylint (pylint required for that path only).
 
 ## License
 
