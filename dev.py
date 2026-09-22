@@ -912,6 +912,8 @@ def compute_repo_name(repo_path, base_path=None):
     repo_path = Path(os.path.abspath(str(repo_path)))
 
     parent = repo_path.parent
+    if base_path and parent == Path(os.path.abspath(str(base_path))):
+        return repo_path.name
     if (parent / '.gclient').exists():
         return f"{parent.name}/{repo_path.name}"
 

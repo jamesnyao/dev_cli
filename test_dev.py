@@ -203,6 +203,7 @@ class TestConfig(unittest.TestCase):
         subprocess.run(['git', '-C', str(home), 'remote', 'add', 'origin', url],
                        check=True, capture_output=True)
         dev._ensure_link(link, home)
+        (workspace / '.gclient').touch()
         for existing in ([], [{'path': 'home', 'bootstrap': True, 'skipOn': ['other-machine']}]):
             with self.subTest(existing=bool(existing)):
                 dev.save_config({'repos': existing})
@@ -225,6 +226,12 @@ class TestComputeRepoName(unittest.TestCase):
             repo.mkdir()
             name = dev.compute_repo_name(repo)
             self.assertEqual(name, 'my-repo')
+
+    def test_workspace_gclient_does_not_prefix_top_level_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / '.gclient').touch()
+            self.assertEqual(dev.compute_repo_name(workspace / 'home', workspace), 'home')
     
     def test_nested_gclient_repo(self):
         """Repo under gclient enlistment should use parent/name format"""
