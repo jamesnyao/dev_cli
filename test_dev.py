@@ -952,6 +952,96 @@ class TestCmdInit(unittest.TestCase):
         self.assertIn('.psrc.ps1', profile.read_text())
 
 
+class TestInitConfig(unittest.TestCase):
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.orig_config_dir = dev.CONFIG_DIR
+        self.orig_override_config_file = dev.OVERRIDE_CONFIG_FILE
+        self.orig_sample_config_file = dev.SAMPLE_CONFIG_FILE
+        dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
+        dev.OVERRIDE_CONFIG_FILE = dev.CONFIG_DIR / 'dev_config.json'
+        dev.SAMPLE_CONFIG_FILE = Path(self.temp_dir) / 'dev_config.json'
+
+    def tearDown(self):
+        dev.CONFIG_DIR = self.orig_config_dir
+        dev.OVERRIDE_CONFIG_FILE = self.orig_override_config_file
+        dev.SAMPLE_CONFIG_FILE = self.orig_sample_config_file
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_errors_when_sample_missing(self):
+        self.assertEqual(dev._init_config(), 1)
+        self.assertFalse(dev.OVERRIDE_CONFIG_FILE.exists())
+
+    def test_creates_override_from_sample(self):
+        dev.SAMPLE_CONFIG_FILE.write_text(json.dumps({
+            'workspaceRoots': {'example-machine': '$HOME'},
+            'identity': {'username': ''}}))
+        with patch('sys.stdin.isatty', return_value=False):
+            self.assertEqual(dev._init_config(), 0)
+        saved = json.loads(dev.OVERRIDE_CONFIG_FILE.read_text())
+        self.assertEqual(saved['workspaceRoots']['example-machine'], '$HOME')
+
+    def test_skips_when_override_already_exists(self):
+        dev.SAMPLE_CONFIG_FILE.write_text(json.dumps({'identity': {'username': ''}}))
+        dev.OVERRIDE_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        dev.OVERRIDE_CONFIG_FILE.write_text(json.dumps({'identity': {'username': 'kept'}}))
+        with patch('sys.stdin.isatty', return_value=True):
+            self.assertEqual(dev._init_config(), 0)
+        saved = json.loads(dev.OVERRIDE_CONFIG_FILE.read_text())
+        self.assertEqual(saved['identity']['username'], 'kept')
+
+    def test_prompts_for_blank_username_when_interactive(self):
+        dev.SAMPLE_CONFIG_FILE.write_text(json.dumps({'identity': {'username': ''}}))
+        with patch('sys.stdin.isatty', return_value=True), \
+             patch('builtins.input', return_value='alice'):
+            self.assertEqual(dev._init_config(), 0)
+        saved = json.loads(dev.OVERRIDE_CONFIG_FILE.read_text())
+        self.assertEqual(saved['identity']['username'], 'alice')
+
+    def test_does_not_prompt_when_username_already_set(self):
+        dev.SAMPLE_CONFIG_FILE.write_text(json.dumps({'identity': {'username': 'bob'}}))
+        with patch('sys.stdin.isatty', return_value=True), \
+             patch('builtins.input', side_effect=AssertionError('should not prompt')):
+            self.assertEqual(dev._init_config(), 0)
+        saved = json.loads(dev.OVERRIDE_CONFIG_FILE.read_text())
+        self.assertEqual(saved['identity']['username'], 'bob')
+
+
+class TestCheckPython3Shim(unittest.TestCase):
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.orig_script_dir = dev.SCRIPT_DIR
+        dev.SCRIPT_DIR = Path(self.temp_dir)
+
+    def tearDown(self):
+        dev.SCRIPT_DIR = self.orig_script_dir
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_noop_without_shim_file(self):
+        # No exception, no output, when the shim file isn't present.
+        dev._check_python3_shim()
+
+    @patch('dev.get_os_type', return_value='darwin')
+    def test_warns_when_shim_finds_no_working_interpreter(self, _mock_os):
+        shim = dev.SCRIPT_DIR / 'python3'
+        shim.write_text('#!/bin/sh\nexit 1\n')
+        shim.chmod(0o755)
+        with patch('dev.emit_warn') as mock_warn:
+            dev._check_python3_shim()
+        mock_warn.assert_called_once()
+
+    @patch('dev.get_os_type', return_value='darwin')
+    def test_silent_when_shim_finds_working_interpreter(self, _mock_os):
+        shim = dev.SCRIPT_DIR / 'python3'
+        shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" --version\n')
+        shim.chmod(0o755)
+        with patch('dev.emit_warn') as mock_warn:
+            dev._check_python3_shim()
+        mock_warn.assert_not_called()
+
+
 class TestSelfUpdate(unittest.TestCase):
 
     def setUp(self):

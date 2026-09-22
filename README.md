@@ -11,29 +11,29 @@ real repository lists, and custom shell hooks.
 
 ```bash
 git clone "<clone-url>" "$HOME/dev_cli"
-cp -n "$HOME/dev_cli/dev_config.json" "$HOME/dev_config.json"
-# edit ~/dev_config.json
 python3 "$HOME/dev_cli/dev.py" init
+# edit ~/dev_config.json
 ```
 
 Windows (PowerShell):
 
 ```powershell
 git clone "<clone-url>" "$HOME\dev_cli"
-if (-not (Test-Path "$HOME\dev_config.json")) {
-  Copy-Item "$HOME\dev_cli\dev_config.json" "$HOME\dev_config.json"
-}
-notepad "$HOME\dev_config.json"
 py "$HOME\dev_cli\dev.py" init
+notepad "$HOME\dev_config.json"
 ```
 
 Open a new terminal and run `dev repo root` / `dev repo list`. The sample is
 usable as-is: workspace root is `$HOME`, the only repo is this `dev_cli`
 checkout, and identity is derived from the environment.
 
-`dev init` preserves existing profile content and only adds redirects. You
-can also invoke `python3 ~/dev_cli/dev.py` directly without shell profiles;
-set `DEVCONFIG=example-machine` when doing so.
+`dev init` sets up shell profile redirects, creates `~/dev_config.json` from
+the sample if it doesn't exist yet (prompting for a username if the terminal
+is interactive and none is configured), and warns if a python earlier on
+`PATH` would shadow the `python3` shim (see `DEV_PYTHON_SKIP` below). It's
+idempotent and preserves existing profile content and an existing override
+config. You can also invoke `python3 ~/dev_cli/dev.py` directly without shell
+profiles; set `DEVCONFIG=example-machine` when doing so.
 
 ## Configuration
 

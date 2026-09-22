@@ -1955,11 +1955,64 @@ def _init_unix():
     return 0
 
 
+def _init_config():
+    """Create the private override config from the sample, prompting for a
+    username when one isn't already configured and the terminal is interactive."""
+    if OVERRIDE_CONFIG_FILE.is_file():
+        emit_ok(f"{OVERRIDE_CONFIG_FILE} already exists")
+        return 0
+    if not SAMPLE_CONFIG_FILE.is_file():
+        emit_error(f"Sample config not found: {SAMPLE_CONFIG_FILE}")
+        return 1
+
+    config = load_jsonc(SAMPLE_CONFIG_FILE)
+    if not config.get('identity', {}).get('username') and sys.stdin.isatty():
+        try:
+            answer = input(
+                "Username for branch names/PRs (blank = auto-detect from OS): ").strip()
+        except EOFError:
+            answer = ''
+        if answer:
+            config.setdefault('identity', {})['username'] = answer
+
+    save_config(config)
+    emit_ok(f"Created {OVERRIDE_CONFIG_FILE}")
+    return 0
+
+
+def _check_python3_shim():
+    """Warn if the python3 shim on PATH would not resolve to a working
+    interpreter, e.g. a broken or unwanted toolchain python earlier on PATH."""
+    shim_name = 'python3.cmd' if get_os_type() == 'windows' else 'python3'
+    shim_path = SCRIPT_DIR / shim_name
+    if not shim_path.is_file():
+        return
+
+    simulated_path = os.pathsep.join([str(SCRIPT_DIR), os.environ.get('PATH', '')])
+    env = dict(os.environ, PATH=simulated_path)
+    try:
+        result = subprocess.run(
+            [str(shim_path), '--version'], capture_output=True, text=True,
+            env=env, timeout=10, shell=(get_os_type() == 'windows'))
+    except OSError:
+        return
+
+    if result.returncode != 0:
+        emit_warn("The python3 shim could not find a working interpreter")
+        print("     A python earlier on PATH may be broken or unwanted for this tool.")
+        print("     Set DEV_PYTHON_SKIP to a substring of its path to skip it.")
+
+
 def cmd_init(args):
-    """Bootstrap shell profile on a fresh machine."""
-    if get_os_type() == 'windows':
-        return _init_windows()
-    return _init_unix()
+    """Bootstrap shell profile, override config, and the python3 shim on a fresh machine."""
+    rc = _init_windows() if get_os_type() == 'windows' else _init_unix()
+    if rc != 0:
+        return rc
+    rc = _init_config()
+    if rc != 0:
+        return rc
+    _check_python3_shim()
+    return 0
 
 
 def cmd_test(args):
