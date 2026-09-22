@@ -17,7 +17,9 @@
     "example-machine": "$HOME"
   },
   "identity": {
-    // Blank uses USERNAME, then USER, then the system login.
+    // Blank uses USERNAME, then USER, then the system login. Also supports
+    // `branchPrefix` (default "user/<resolved-username>/") and
+    // `creatorEmail` (default Git's global user.email).
     "username": ""
   }
 }

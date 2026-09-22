@@ -36,36 +36,19 @@ works as-is (`$HOME` workspace, this checkout as its only repo).
 username if interactive and unset) and warns if a `python3` earlier on `PATH`
 would shadow the shim (see `DEV_PYTHON_SKIP` below).
 
-`dev_config.json` in this repo is a read-only sample. Real settings go in
-`../dev_config.json` (or the file named by `DEV_CONFIG_OVERRIDE`). Override
+`dev_config.json` in this repo is a read-only sample; real settings go in
+`../dev_config.json` (or the file named by `DEV_CONFIG_OVERRIDE`). Dictionary
 keys merge shallowly, except `repos`, which replaces the sample list
-completely. CLI config writes target only the override file.
+completely — CLI config writes target only the override file, which never
+carries comments since `dev` rewrites it as standard JSON.
 
-`$HOME` expands on every platform, including Windows. Add more
-`workspaceRoots` entries for multiple machines and set `DEVCONFIG` to the
-matching key.
-
-| Setting | Default when unset or blank |
-| --- | --- |
-| `identity.username` | `USERNAME`, then `USER`, then the system login |
-| `identity.branchPrefix` | `user/<resolved-username>/` |
-| `identity.creatorEmail` | Git's global `user.email` |
-
-The CLI never invents or modifies your Git author name/email.
-
-Use `dev repo add <local-repo-path>` to add Git checkouts to `repos`; run
-`dev repo add -h` for the available options. At most one entry may set
-`bootstrap: true`, which updates that checkout before syncing the rest.
-
-The loader accepts JSON with `//` and `/* */` comments. `dev` only writes and
-rewrites the private override (as standard JSON), so keep comments in the
-sample or elsewhere.
+The sample is annotated with every supported setting and its default. Add
+repos with `dev repo add <path>` (`-h` for options); read any setting with
+`dev config get <dotted.key>`.
 
 Only Git repositories are managed — loose files and directories belong in
-your dotfiles repo directly.
-
-Use `dev config get <dotted.key>` to read a setting. Local credentials/caches
-live in `.dev_temp/` next to the override; keep it gitignored.
+your dotfiles repo directly. Local credentials/caches live in `.dev_temp/`
+next to the override; keep it gitignored.
 
 ## Private overlays
 
