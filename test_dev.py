@@ -74,20 +74,22 @@ class TestConfig(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.orig_config_dir = dev.CONFIG_DIR
-        self.orig_config_file = dev.CONFIG_FILE
+        self.orig_override_config_file = dev.OVERRIDE_CONFIG_FILE
+        self.orig_sample_config_file = dev.SAMPLE_CONFIG_FILE
         dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
-        dev.CONFIG_FILE = dev.CONFIG_DIR / 'config.json'
-    
+        dev.OVERRIDE_CONFIG_FILE = dev.CONFIG_DIR / 'dev_config.json'
+        dev.SAMPLE_CONFIG_FILE = Path(self.temp_dir) / 'no-sample-here.json'
+
     def tearDown(self):
         dev.CONFIG_DIR = self.orig_config_dir
-        dev.CONFIG_FILE = self.orig_config_file
+        dev.OVERRIDE_CONFIG_FILE = self.orig_override_config_file
+        dev.SAMPLE_CONFIG_FILE = self.orig_sample_config_file
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
-    
-    def test_load_config_creates_default(self):
-        """load_config should raise when config file is missing"""
-        with self.assertRaises(FileNotFoundError):
-            dev.load_config()
+
+    def test_load_config_defaults_to_empty(self):
+        """load_config should return {} when neither sample nor override exists"""
+        self.assertEqual(dev.load_config(), {})
     
     def test_save_and_load_config(self):
         """Config should round-trip correctly"""
@@ -97,6 +99,37 @@ class TestConfig(unittest.TestCase):
         dev.save_config(config)
         loaded = dev.load_config()
         self.assertEqual(loaded['repos'][0]['path'], 'test-repo')
+
+    def test_save_never_writes_sample_file(self):
+        """save_config only ever writes OVERRIDE_CONFIG_FILE, never the sample."""
+        dev.SAMPLE_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        dev.SAMPLE_CONFIG_FILE.write_text(json.dumps({'identity': {'gitEmail': 'sample@example.com'}}))
+        dev.save_config({'repos': []})
+        sample = json.loads(dev.SAMPLE_CONFIG_FILE.read_text())
+        self.assertEqual(sample, {'identity': {'gitEmail': 'sample@example.com'}})
+
+    def test_override_wins_on_shared_dict_key(self):
+        """Override values win per-key within a shared dict (e.g. identity)."""
+        dev.SAMPLE_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        dev.SAMPLE_CONFIG_FILE.write_text(json.dumps({
+            'identity': {'gitEmail': 'sample@example.com', 'branchPrefix': 'user/sample/'},
+            'repos': [{'path': 'sample-repo'}],
+        }))
+        dev.OVERRIDE_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        dev.OVERRIDE_CONFIG_FILE.write_text(json.dumps({
+            'identity': {'gitEmail': 'real@example.com'},
+            'repos': [{'path': 'real-repo'}],
+        }))
+        config = dev.load_config()
+        self.assertEqual(config['identity']['gitEmail'], 'real@example.com')
+        self.assertEqual(config['identity']['branchPrefix'], 'user/sample/')
+        self.assertEqual(config['repos'], [{'path': 'real-repo'}])
+
+    def test_override_absent_falls_back_to_sample(self):
+        dev.SAMPLE_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        dev.SAMPLE_CONFIG_FILE.write_text(json.dumps({'identity': {'gitEmail': 'sample@example.com'}}))
+        config = dev.load_config()
+        self.assertEqual(config['identity']['gitEmail'], 'sample@example.com')
 
 
 class TestComputeRepoName(unittest.TestCase):
@@ -178,9 +211,10 @@ class TestGetBasePath(unittest.TestCase):
         self.assertEqual(dev.get_base_path(config=config), '/from-config')
 
 
-class TestResolveConfigDir(unittest.TestCase):
-    """Test the singleton config directory resolution order:
-    DEV_CONFIG_DIR override > parent dir (if it has config.json) > dev_scripts itself."""
+class TestResolveOverrideConfigFile(unittest.TestCase):
+    """Test override config file resolution: DEV_CONFIG_OVERRIDE env var,
+    else one level up from dev_scripts (regardless of whether it exists yet --
+    it's the private write target, not just a read lookup)."""
 
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
@@ -192,21 +226,14 @@ class TestResolveConfigDir(unittest.TestCase):
         dev.SCRIPT_DIR = self.orig_script_dir
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    @patch.dict(os.environ, {'DEV_CONFIG_DIR': '/explicit/override'})
+    @patch.dict(os.environ, {'DEV_CONFIG_OVERRIDE': '/explicit/override.json'})
     def test_env_override_wins(self):
-        self.assertEqual(dev._resolve_config_dir(), Path('/explicit/override'))
+        self.assertEqual(dev._resolve_override_config_file(), Path('/explicit/override.json'))
 
     @patch.dict(os.environ, {}, clear=False)
-    def test_parent_dir_used_when_it_has_config_json(self):
-        os.environ.pop('DEV_CONFIG_DIR', None)
-        (self.temp_dir / 'config.json').write_text('{}')
-        self.assertEqual(dev._resolve_config_dir(), self.temp_dir)
-
-    @patch.dict(os.environ, {}, clear=False)
-    def test_falls_back_to_standalone_dev_scripts(self):
-        os.environ.pop('DEV_CONFIG_DIR', None)
-        # No config.json in the parent dir
-        self.assertEqual(dev._resolve_config_dir(), dev.SCRIPT_DIR)
+    def test_defaults_to_parent_of_dev_scripts(self):
+        os.environ.pop('DEV_CONFIG_OVERRIDE', None)
+        self.assertEqual(dev._resolve_override_config_file(), self.temp_dir / 'dev_config.json')
 
 
 class TestConfigGet(unittest.TestCase):
@@ -215,14 +242,17 @@ class TestConfigGet(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.orig_config_dir = dev.CONFIG_DIR
-        self.orig_config_file = dev.CONFIG_FILE
+        self.orig_override_config_file = dev.OVERRIDE_CONFIG_FILE
+        self.orig_sample_config_file = dev.SAMPLE_CONFIG_FILE
         dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
         dev.CONFIG_DIR.mkdir(parents=True)
-        dev.CONFIG_FILE = dev.CONFIG_DIR / 'config.json'
+        dev.OVERRIDE_CONFIG_FILE = dev.CONFIG_DIR / 'dev_config.json'
+        dev.SAMPLE_CONFIG_FILE = Path(self.temp_dir) / 'no-sample-here.json'
 
     def tearDown(self):
         dev.CONFIG_DIR = self.orig_config_dir
-        dev.CONFIG_FILE = self.orig_config_file
+        dev.OVERRIDE_CONFIG_FILE = self.orig_override_config_file
+        dev.SAMPLE_CONFIG_FILE = self.orig_sample_config_file
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _args(self, key):
@@ -232,7 +262,7 @@ class TestConfigGet(unittest.TestCase):
         self.assertEqual(dev.cmd_config_get(self._args('identity.gitEmail')), 1)
 
     def test_top_level_string_value(self):
-        dev.CONFIG_FILE.write_text(json.dumps({'description': 'hello'}))
+        dev.OVERRIDE_CONFIG_FILE.write_text(json.dumps({'description': 'hello'}))
         buf = StringIO()
         with patch('sys.stdout', buf):
             rc = dev.cmd_config_get(self._args('description'))
@@ -240,7 +270,7 @@ class TestConfigGet(unittest.TestCase):
         self.assertEqual(buf.getvalue().strip(), 'hello')
 
     def test_nested_dotted_key(self):
-        dev.CONFIG_FILE.write_text(json.dumps({'identity': {'gitEmail': 'you@example.com'}}))
+        dev.OVERRIDE_CONFIG_FILE.write_text(json.dumps({'identity': {'gitEmail': 'you@example.com'}}))
         buf = StringIO()
         with patch('sys.stdout', buf):
             rc = dev.cmd_config_get(self._args('identity.gitEmail'))
@@ -248,11 +278,11 @@ class TestConfigGet(unittest.TestCase):
         self.assertEqual(buf.getvalue().strip(), 'you@example.com')
 
     def test_missing_key_returns_1(self):
-        dev.CONFIG_FILE.write_text(json.dumps({'identity': {}}))
+        dev.OVERRIDE_CONFIG_FILE.write_text(json.dumps({'identity': {}}))
         self.assertEqual(dev.cmd_config_get(self._args('identity.gitEmail')), 1)
 
     def test_malformed_json_returns_1(self):
-        dev.CONFIG_FILE.write_text('{not valid')
+        dev.OVERRIDE_CONFIG_FILE.write_text('{not valid')
         self.assertEqual(dev.cmd_config_get(self._args('identity.gitEmail')), 1)
 
 
@@ -502,12 +532,14 @@ class TestSyncTrackedFiles(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.orig_config_dir = dev.CONFIG_DIR
-        self.orig_config_file = dev.CONFIG_FILE
+        self.orig_override_config_file = dev.OVERRIDE_CONFIG_FILE
+        self.orig_sample_config_file = dev.SAMPLE_CONFIG_FILE
         self.orig_rcfiles_dir = dev.RCFILES_DIR
         self.orig_home_dir = dev.HOME_DIR
         dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
         dev.CONFIG_DIR.mkdir(parents=True)
-        dev.CONFIG_FILE = dev.CONFIG_DIR / 'config.json'
+        dev.OVERRIDE_CONFIG_FILE = dev.CONFIG_DIR / 'dev_config.json'
+        dev.SAMPLE_CONFIG_FILE = Path(self.temp_dir) / 'no-sample-here.json'
         dev.RCFILES_DIR = dev.CONFIG_DIR / 'rcfiles'
 
         self.home = Path(self.temp_dir) / 'home'
@@ -521,7 +553,8 @@ class TestSyncTrackedFiles(unittest.TestCase):
 
     def tearDown(self):
         dev.CONFIG_DIR = self.orig_config_dir
-        dev.CONFIG_FILE = self.orig_config_file
+        dev.OVERRIDE_CONFIG_FILE = self.orig_override_config_file
+        dev.SAMPLE_CONFIG_FILE = self.orig_sample_config_file
         dev.RCFILES_DIR = self.orig_rcfiles_dir
         dev.HOME_DIR = self.orig_home_dir
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -874,12 +907,14 @@ class TestAddTrackedFile(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.orig_config_dir = dev.CONFIG_DIR
-        self.orig_config_file = dev.CONFIG_FILE
+        self.orig_override_config_file = dev.OVERRIDE_CONFIG_FILE
+        self.orig_sample_config_file = dev.SAMPLE_CONFIG_FILE
         self.orig_rcfiles_dir = dev.RCFILES_DIR
         self.orig_home_dir = dev.HOME_DIR
         dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
         dev.CONFIG_DIR.mkdir(parents=True)
-        dev.CONFIG_FILE = dev.CONFIG_DIR / 'config.json'
+        dev.OVERRIDE_CONFIG_FILE = dev.CONFIG_DIR / 'dev_config.json'
+        dev.SAMPLE_CONFIG_FILE = Path(self.temp_dir) / 'no-sample-here.json'
         dev.RCFILES_DIR = dev.CONFIG_DIR / 'rcfiles'
         dev.HOME_DIR = Path(self.temp_dir) / 'home'
         dev.HOME_DIR.mkdir()
@@ -892,7 +927,8 @@ class TestAddTrackedFile(unittest.TestCase):
 
     def tearDown(self):
         dev.CONFIG_DIR = self.orig_config_dir
-        dev.CONFIG_FILE = self.orig_config_file
+        dev.OVERRIDE_CONFIG_FILE = self.orig_override_config_file
+        dev.SAMPLE_CONFIG_FILE = self.orig_sample_config_file
         dev.RCFILES_DIR = self.orig_rcfiles_dir
         dev.HOME_DIR = self.orig_home_dir
         import shutil
@@ -1177,7 +1213,7 @@ class TestAdoGit(unittest.TestCase):
     @patch('subprocess.run')
     @patch('dev.get_ado_token', return_value='test-bearer-token')
     def test_runs_git_with_bearer_token(self, mock_token, mock_run):
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr='')
         args = argparse.Namespace(git_args=['pull'])
         result = dev.cmd_ado_git(args)
         self.assertEqual(result, 0)
@@ -1191,7 +1227,7 @@ class TestAdoGit(unittest.TestCase):
     @patch('subprocess.run')
     @patch('dev.get_ado_token', return_value='test-bearer-token')
     def test_passes_extra_git_args(self, mock_token, mock_run):
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr='')
         args = argparse.Namespace(git_args=['pull', '--rebase'])
         result = dev.cmd_ado_git(args)
         self.assertEqual(result, 0)
@@ -1202,7 +1238,7 @@ class TestAdoGit(unittest.TestCase):
     @patch('subprocess.run')
     @patch('dev.get_ado_token', return_value='test-bearer-token')
     def test_clone_with_url(self, mock_token, mock_run):
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr='')
         args = argparse.Namespace(git_args=['clone', 'https://dev.azure.com/org/proj/_git/repo'])
         result = dev.cmd_ado_git(args)
         self.assertEqual(result, 0)
@@ -1240,6 +1276,9 @@ class TestCmdInit(unittest.TestCase):
         self.tmpdir = Path(tempfile.mkdtemp())
         self.home = self.tmpdir / 'home'
         self.home.mkdir()
+        home_patch = patch('dev.Path.home', return_value=self.home)
+        home_patch.start()
+        self.addCleanup(home_patch.stop)
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
@@ -1248,6 +1287,16 @@ class TestCmdInit(unittest.TestCase):
     @patch('dev.get_os_type', return_value='linux')
     def test_unix_zsh_already_default(self, mock_os):
         self.assertEqual(dev._init_unix(), 0)
+        self.assertIn(dev.ZSHRC_SOURCE_LINE, (self.home / '.zshrc').read_text())
+
+    @patch.dict(os.environ, {'SHELL': '/bin/zsh'})
+    def test_unix_preserves_existing_zshrc(self):
+        profile = self.home / '.zshrc'
+        profile.write_text('export MY_SETTING=1\n')
+        self.assertEqual(dev._init_unix(), 0)
+        self.assertEqual(dev._init_unix(), 0)
+        self.assertTrue(profile.read_text().startswith('export MY_SETTING=1\n'))
+        self.assertEqual(profile.read_text().count(dev.ZSHRC_SOURCE_LINE), 1)
 
     @patch.dict(os.environ, {'SHELL': '/bin/bash'})
     @patch('dev.get_os_type', return_value='linux')
@@ -1306,9 +1355,28 @@ class TestCmdInit(unittest.TestCase):
         self.assertEqual(dev._init_windows(), 0)
         self.assertTrue(profile.exists())
         self.assertIn('.psrc.ps1', profile.read_text())
+        self.assertIn(dev.PSRC_SOURCE_LINE, (self.home / '.psrc.ps1').read_text())
+
+    @patch('subprocess.run')
+    def test_windows_preserves_existing_profile(self, mock_run):
+        profile = self.tmpdir / 'profile.ps1'
+        profile.write_text('$env:MY_SETTING = "value"\n')
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=str(profile) + '\n', stderr='')
+        self.assertEqual(dev._init_windows(), 0)
+        self.assertTrue(profile.read_text().startswith('$env:MY_SETTING = "value"\n'))
+        self.assertIn('.psrc.ps1', profile.read_text())
 
 
 class TestSelfUpdate(unittest.TestCase):
+
+    def setUp(self):
+        for target, value in (('_sync_repo_dir', dev.SCRIPT_DIR),
+                              ('_sync_submodules', True),
+                              ('_sync_upstream', 'origin/main')):
+            patcher = patch(f'dev.{target}', return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     @patch('dev.run_git')
     def test_no_update_when_hash_unchanged(self, mock_git):
@@ -1442,6 +1510,11 @@ class TestSyncRcfilesPull(unittest.TestCase):
 class TestSyncRcfilesPushPulled(unittest.TestCase):
     """Test that sync_rcfiles_push suppresses 'up to date' when pulled."""
 
+    def setUp(self):
+        patcher = patch('dev._sync_repo_dir', return_value=dev.SCRIPT_DIR)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     @patch('dev.get_default_branch', return_value='main')
     @patch('dev.run_git')
     def test_up_to_date_shown_when_not_pulled(self, mock_git, mock_branch):
@@ -1459,6 +1532,171 @@ class TestSyncRcfilesPushPulled(unittest.TestCase):
         with patch('sys.stdout', new_callable=StringIO) as mock_out:
             dev.sync_rcfiles_push(pulled=True)
         self.assertNotIn('rcfiles up to date', mock_out.getvalue())
+
+
+class TestSyncSubmodules(unittest.TestCase):
+    """Submodule updates must not commit unrelated parent edits."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.base_path = Path(self.temp_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    @patch('dev.run_git')
+    def test_noop_without_gitmodules(self, mock_git):
+        self.assertTrue(dev._sync_submodules(self.base_path))
+        mock_git.assert_not_called()
+
+    @patch('dev.run_git')
+    def test_up_to_date_skips_commit_and_push(self, mock_git):
+        (self.base_path / '.gitmodules').write_text('[submodule "dev_scripts"]\n')
+
+        def side_effect(repo, *args):
+            if args[0] == 'config':
+                return (True, 'submodule.dev_scripts.path dev_scripts')
+            if args[:2] == ('submodule', 'update'):
+                return (True, '')
+            if args[0] == 'rev-list':
+                return (True, '')
+            self.fail(f"unexpected git call: {args}")
+        mock_git.side_effect = side_effect
+
+        self.assertTrue(dev._sync_submodules(self.base_path))
+        calls = [c.args[1] for c in mock_git.call_args_list]
+        self.assertNotIn('commit', calls)
+        self.assertNotIn('push', calls)
+
+    @patch('dev.run_git')
+    def test_changed_pointer_is_left_for_parent_sync(self, mock_git):
+        (self.base_path / '.gitmodules').write_text('[submodule "dev_scripts"]\n')
+
+        def side_effect(repo, *args):
+            if args[0] == 'config':
+                return (True, 'submodule.dev_scripts.path dev_scripts')
+            if args[:2] == ('submodule', 'update'):
+                return (True, '')
+            if args[0] == 'rev-list':
+                return (True, '')
+            self.fail(f"unexpected git call: {args}")
+        mock_git.side_effect = side_effect
+
+        self.assertTrue(dev._sync_submodules(self.base_path))
+        calls = [c.args[1] for c in mock_git.call_args_list]
+        self.assertNotIn('add', calls)
+        self.assertNotIn('commit', calls)
+        self.assertNotIn('push', calls)
+
+    @patch('dev.run_git')
+    def test_update_failure_skips_commit(self, mock_git):
+        (self.base_path / '.gitmodules').write_text('[submodule "dev_scripts"]\n')
+
+        def side_effect(repo, *args):
+            if args[0] == 'config':
+                return (True, 'submodule.dev_scripts.path dev_scripts')
+            if args[:2] == ('submodule', 'update'):
+                return (False, 'network error')
+            self.fail(f"unexpected git call: {args}")
+        mock_git.side_effect = side_effect
+
+        self.assertFalse(dev._sync_submodules(self.base_path))
+        calls = [c.args[1] for c in mock_git.call_args_list]
+        self.assertNotIn('commit', calls)
+
+
+class TestSplitRepositorySync(unittest.TestCase):
+    """Exercise the split using real local parent and submodule remotes."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.parent = self.base / 'home'
+        self.tool = self.base / 'tool'
+        self.remote = self.base / 'tool.git'
+        self.parent_remote = self.base / 'home.git'
+        for repo in (self.parent, self.tool):
+            self.git(self.base, 'init', '--initial-branch=main', str(repo))
+            self.git(repo, 'config', 'user.name', 'Test')
+            self.git(repo, 'config', 'user.email', 'test@example.com')
+        (self.tool / 'dev.py').write_text('print("tool")\n')
+        self.git(self.tool, 'add', 'dev.py')
+        self.git(self.tool, 'commit', '-m', 'add tool')
+        self.git(self.base, 'clone', '--bare', str(self.tool), str(self.remote))
+        self.git(self.tool, 'remote', 'add', 'origin', str(self.remote))
+        self.git(self.parent, '-c', 'protocol.file.allow=always', 'submodule', 'add',
+                 '-b', 'main', str(self.remote), 'dev_scripts')
+        self.child = self.parent / 'dev_scripts'
+        self.git(self.child, 'config', 'user.name', 'Test')
+        self.git(self.child, 'config', 'user.email', 'test@example.com')
+        self.git(self.parent, 'commit', '-am', 'add submodule')
+        self.git(self.base, 'clone', '--bare', str(self.parent), str(self.parent_remote))
+        self.git(self.parent, 'remote', 'add', 'origin', str(self.parent_remote))
+        self.git(self.parent, 'fetch', 'origin')
+        self.git(self.parent, 'branch', '--set-upstream-to=origin/main')
+        for patcher in (patch('dev.SCRIPT_DIR', self.child),
+                        patch.dict(os.environ, {'GIT_ALLOW_PROTOCOL': 'file'})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def git(path, *args):
+        return subprocess.run(['git', '-C', str(path), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def test_sync_root_is_parent_not_workspace(self):
+        self.assertEqual(dev._sync_repo_dir().resolve(), self.parent.resolve())
+        with patch('dev.SCRIPT_DIR', self.tool):
+            self.assertEqual(dev._sync_repo_dir().resolve(), self.tool.resolve())
+
+    def test_updates_detached_submodule_without_committing_parent_edits(self):
+        self.git(self.child, 'checkout', '--detach')
+        parent_head = self.git(self.parent, 'rev-parse', 'HEAD')
+        (self.parent / 'private.txt').write_text('keep this edit\n')
+        (self.tool / 'dev.py').write_text('print("updated tool")\n')
+        self.git(self.tool, 'commit', '-am', 'update tool')
+        self.git(self.tool, 'push', 'origin', 'main')
+        self.assertTrue(dev._sync_submodules(self.parent))
+        self.assertEqual(self.git(self.child, 'rev-parse', 'HEAD'),
+                         self.git(self.tool, 'rev-parse', 'HEAD'))
+        self.assertEqual(self.git(self.parent, 'rev-parse', 'HEAD'), parent_head)
+        self.assertEqual(self.git(self.parent, 'diff', '--cached'), '')
+        self.assertEqual((self.parent / 'private.txt').read_text(), 'keep this edit\n')
+
+    def test_dirty_child_blocks_parent_sync(self):
+        (self.child / 'dev.py').write_text('uncommitted work\n')
+        self.assertFalse(dev._self_update())
+        self.assertEqual((self.child / 'dev.py').read_text(), 'uncommitted work\n')
+        self.assertEqual(self.git(self.parent, 'diff', '--cached'), '')
+
+    def test_unpublished_child_commit_is_not_discarded(self):
+        self.git(self.child, 'checkout', '--detach')
+        (self.child / 'dev.py').write_text('local work\n')
+        self.git(self.child, 'commit', '-am', 'change tool locally')
+        before = self.git(self.child, 'rev-parse', 'HEAD')
+        self.assertFalse(dev._sync_submodules(self.parent))
+        self.assertEqual(self.git(self.child, 'rev-parse', 'HEAD'), before)
+
+    def test_initializes_submodule_in_fresh_clone(self):
+        clone = self.base / 'fresh-home'
+        self.git(self.base, 'clone', str(self.parent_remote), str(clone))
+        self.assertTrue(dev._sync_submodules(clone))
+        self.assertTrue((clone / 'dev_scripts' / 'dev.py').is_file())
+
+    def test_push_updates_parent_feature_branch_only(self):
+        branch = 'user/test/split'
+        self.git(self.parent, 'switch', '-c', branch)
+        self.git(self.parent, 'push', '-u', 'origin', branch)
+        main_before = self.git(self.parent_remote, 'rev-parse', 'main')
+        tool_before = self.git(self.remote, 'rev-parse', 'main')
+        (self.parent / 'private.txt').write_text('private configuration\n')
+        self.assertTrue(dev.sync_rcfiles_push())
+        self.assertEqual(self.git(self.parent_remote, 'rev-parse', branch),
+                         self.git(self.parent, 'rev-parse', 'HEAD'))
+        self.assertEqual(self.git(self.parent_remote, 'rev-parse', 'main'), main_before)
+        self.assertEqual(self.git(self.remote, 'rev-parse', 'main'), tool_before)
+        self.assertEqual(dev._sync_upstream(self.parent), f'origin/{branch}')
 
 
 class TestEnsureLink(unittest.TestCase):

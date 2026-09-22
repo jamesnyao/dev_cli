@@ -1,5 +1,5 @@
 #!/bin/bash
-# Python3 shim - skips toolchain_tools python and finds real system python
+# Python3 shim - finds system Python while skipping a configured toolchain
 # Cross-platform logic shared conceptually with python3.cmd
 
 # Prevent infinite recursion
@@ -8,7 +8,7 @@ if [[ -n "$PYTHON3_WRAPPER_ACTIVE" ]]; then
 fi
 export PYTHON3_WRAPPER_ACTIVE=1
 
-# Find python3 in PATH, skipping toolchain_tools/scripts
+# Find python3 in PATH
 find_real_python() {
     local self_path
     self_path="$(readlink -f "$0")"
@@ -21,8 +21,7 @@ find_real_python() {
         # Skip if doesn't exist or not executable
         [[ -x "$candidate" ]] || continue
         
-        # Skip toolchain_tools/scripts directory
-        [[ "$candidate" == */toolchain_tools/scripts/* ]] && continue
+        [[ -n "$DEV_PYTHON_SKIP" && "$candidate" == *"$DEV_PYTHON_SKIP"* ]] && continue
         
         # Skip self (this wrapper)
         local resolved

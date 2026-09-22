@@ -33,20 +33,20 @@ if [[ "$platform" == "linux" ]]; then
   PATH="$HOME/.local/bin:/usr/local/go/bin:$PATH"
 fi
 
-# Workspace root + machine identity (see workspaceRoots in config.json)
+# Workspace root + machine identity (see workspaceRoots in dev_config.json)
 if [[ "$platform" == "linux" ]] && grep -qi microsoft /proc/version 2>/dev/null; then
   export DEV="$HOME/dev"
   if [[ "$HOST" == *devbox* ]]; then
-    export DEVCONFIG="wsl-devbox"
+    export DEVCONFIG="${DEVCONFIG:-wsl-devbox}"
   else
-    export DEVCONFIG="wsl-surface"
+    export DEVCONFIG="${DEVCONFIG:-wsl-surface}"
   fi
 elif [[ "$platform" == "linux" ]]; then
   export DEV="/workspace"
-  export DEVCONFIG="linux-devbox"
+  export DEVCONFIG="${DEVCONFIG:-linux-devbox}"
 elif [[ "$platform" == "darwin" ]]; then
   export DEV="$HOME"
-  export DEVCONFIG="mac-devbox"
+  export DEVCONFIG="${DEVCONFIG:-mac-devbox}"
 fi
 
 # Dev CLI

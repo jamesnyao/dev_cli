@@ -2,6 +2,10 @@
 # Work-specific setup lives in a private hook sourced at the very end, if present.
 
 $SETUP = "$env:USERPROFILE\dev_scripts\setup"
+$DevScripts = Split-Path $PSScriptRoot -Parent
+if (($env:PATH -split ';') -notcontains $DevScripts) {
+  $env:PATH = "$DevScripts;$env:PATH"
+}
 
 . $SETUP\install_winget.ps1
 . $SETUP\install_prompt.ps1
@@ -17,4 +21,6 @@ $SETUP = "$env:USERPROFILE\dev_scripts\setup"
 
 # Private, work-specific setup -- runs last so it can override anything above.
 $WorkHooks = "$env:USERPROFILE\work_scripts\hooks.ps1"
-if (Test-Path $WorkHooks) { . $WorkHooks }
+if (Test-Path $WorkHooks) {
+  . $WorkHooks
+}

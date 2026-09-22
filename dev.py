@@ -124,27 +124,24 @@ def confirm(prompt, default_yes=True, assume_yes=False):
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
-def _resolve_config_dir():
-    """Locate the singleton config directory (config.json + secrets).
+# dev.py is a public, work-agnostic tool: SAMPLE_CONFIG_FILE ships inside it
+# with placeholder values so the tool is usable (and demonstrates its own
+# schema) out of the box. Real, private values live in OVERRIDE_CONFIG_FILE,
+# one level up -- e.g. a private parent repo that has dev_scripts as a git
+# submodule -- and win on top of the sample when both define the same key.
+SAMPLE_CONFIG_FILE = SCRIPT_DIR / 'dev_config.json'
 
-    dev.py is a public, work-agnostic tool: it carries no private data of its
-    own, so the config directory normally lives outside it, one level up
-    (e.g. a private parent repo that has dev_scripts as a git submodule).
-    Resolution order: explicit override, then the parent directory if it
-    already has a config.json (submodule-of-private-repo case), then (for
-    someone who clones just this repo standalone) dev_scripts itself.
-    """
-    env_override = os.getenv('DEV_CONFIG_DIR')
+def _resolve_override_config_file():
+    env_override = os.getenv('DEV_CONFIG_OVERRIDE')
     if env_override:
         return Path(os.path.expandvars(os.path.expanduser(env_override)))
-    if (SCRIPT_DIR.parent / 'config.json').is_file():
-        return SCRIPT_DIR.parent
-    return SCRIPT_DIR
+    return SCRIPT_DIR.parent / 'dev_config.json'
 
-CONFIG_DIR = _resolve_config_dir()
-CONFIG_FILE = CONFIG_DIR / 'config.json'
-ADO_PAT_FILE = CONFIG_DIR / 'ado_pat.txt'
-ADO_TOKEN_CACHE_FILE = CONFIG_DIR / 'ado_token_cache.json'
+OVERRIDE_CONFIG_FILE = _resolve_override_config_file()
+CONFIG_DIR = OVERRIDE_CONFIG_FILE.parent
+DEV_TEMP_DIR = CONFIG_DIR / '.dev_temp'  # local-only: secrets and caches, never tracked
+ADO_PAT_FILE = DEV_TEMP_DIR / 'ado_pat.txt'
+ADO_TOKEN_CACHE_FILE = DEV_TEMP_DIR / 'ado_token_cache.json'
 ADO_TOKEN_CACHE_SECONDS = 2400  # 40 minute fallback when JWT exp can't be parsed
 ADO_TOKEN_EXPIRY_BUFFER = 60  # Treat token as expired this many seconds before its real exp
 ADO_API_VERSION = '7.1'  # ADO REST API version used for all requests
@@ -160,17 +157,30 @@ def get_os_type():
     return 'linux'
 
 def load_config():
-    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-        return json.load(f)
+    config = {}
+    if SAMPLE_CONFIG_FILE.is_file():
+        with open(SAMPLE_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+    if OVERRIDE_CONFIG_FILE != SAMPLE_CONFIG_FILE and OVERRIDE_CONFIG_FILE.is_file():
+        with open(OVERRIDE_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            override = json.load(f)
+        for key, value in override.items():
+            if isinstance(value, dict) and isinstance(config.get(key), dict):
+                config[key] = {**config[key], **value}
+            else:
+                config[key] = value
+    return config
 
 def save_config(config):
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    """Write real values to OVERRIDE_CONFIG_FILE. SAMPLE_CONFIG_FILE (inside
+    dev_scripts) is a static, public example and is never written by dev.py."""
+    OVERRIDE_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     for repo in config.get('repos', []):
         if 'skipOn' in repo:
             repo['skipOn'] = sorted(repo['skipOn'])
     config['repos'] = sorted(config.get('repos', []), key=lambda r: r.get('path', r.get('name', '')))
     config['files'] = sorted(config.get('files', []), key=lambda f: f.get('path', ''))
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+    with open(OVERRIDE_CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=2, sort_keys=True)
 
 def get_base_path(config=None):
@@ -180,7 +190,7 @@ def get_base_path(config=None):
     roots = config.get('workspaceRoots', {})
     if devconfig and devconfig in roots:
         return os.path.expandvars(roots[devconfig])
-    raise ValueError(f'No workspaceRoot found for DEVCONFIG={devconfig!r}. Check {CONFIG_FILE} workspaceRoots.')
+    raise ValueError(f'No workspaceRoot found for DEVCONFIG={devconfig!r}. Check {OVERRIDE_CONFIG_FILE} workspaceRoots.')
 
 def trust_claude_workspace(base_path):
     """Mark the workspace root trusted in ~/.claude.json so Claude Code
@@ -206,9 +216,30 @@ def run_git(repo_path, *args):
             ['git', '-C', str(repo_path)] + list(args),
             capture_output=True, text=True, timeout=30
         )
-        return result.returncode == 0, result.stdout.strip()
-    except Exception:
-        return False, ''
+        output = result.stdout if result.returncode == 0 else result.stderr or result.stdout
+        return result.returncode == 0, output.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+
+
+def _sync_repo_dir():
+    """Find the private superproject, or the tool's own repository when standalone."""
+    success, parent = run_git(SCRIPT_DIR, 'rev-parse', '--show-superproject-working-tree')
+    if success and parent:
+        return Path(parent)
+    success, root = run_git(SCRIPT_DIR, 'rev-parse', '--show-toplevel')
+    if not success:
+        raise RuntimeError(f"Cannot find the sync repository: {root}")
+    return Path(root)
+
+
+def _sync_upstream(repo_path):
+    """Use the current branch's upstream rather than rebasing feature work onto main."""
+    success, upstream = run_git(repo_path, 'rev-parse', '--abbrev-ref',
+                                '--symbolic-full-name', '@{upstream}')
+    if success and upstream:
+        return upstream
+    return f"origin/{get_default_branch(repo_path) or 'main'}"
 
 def _git_config_value(key, default=''):
     """Read a value from global git config (e.g. 'user.email'), independent of any repo."""
@@ -262,7 +293,7 @@ def get_current_branch(repo_path):
 def get_default_branch(repo_path, configured=None):
     """Resolve a repo's default branch.
 
-    ``configured`` is the optional per-repo ``defaultBranch`` from config.json. It
+    ``configured`` is the optional per-repo ``defaultBranch`` from dev_config.json. It
     wins over origin/HEAD when the branch actually exists on origin, so a repo can
     be pinned to a working default (e.g. ``mirror/main``) that is not the remote's
     own HEAD.
@@ -1052,10 +1083,11 @@ def cmd_repo_delete(args):
         save_config(config)
 
     # Commit the deletion so directory expansion won't re-add the file.
-    run_git(SCRIPT_DIR, 'add', '-A')
-    _, status = run_git(SCRIPT_DIR, 'status', '--porcelain')
+    repo_path = _sync_repo_dir()
+    run_git(repo_path, 'add', '-A')
+    _, status = run_git(repo_path, 'status', '--porcelain')
     if status:
-        run_git(SCRIPT_DIR, 'commit', '-m', _build_commit_message())
+        run_git(repo_path, 'commit', '-m', _build_commit_message(repo_path))
 
     print(f"{Colors.GREEN}Deleted:{Colors.NC} {name} ({', '.join(removed) or 'nothing on disk'})")
     print(f"  {Colors.CYAN}Run 'dev repo sync' to push the deletion.{Colors.NC}")
@@ -1092,9 +1124,10 @@ def cmd_repo_list(args):
 
     return 0
 
-def _build_commit_message():
+def _build_commit_message(repo_path=None):
     """Build a descriptive commit message from staged changes."""
-    _, status = run_git(SCRIPT_DIR, 'diff', '--cached', '--name-status')
+    repo_path = repo_path or SCRIPT_DIR
+    _, status = run_git(repo_path, 'diff', '--cached', '--name-status')
     if not status:
         return 'Auto-sync'
 
@@ -1153,33 +1186,87 @@ def _build_commit_message():
 
 def sync_rcfiles_push(pulled=False):
     """Commit any pending changes and push to remote."""
-    run_git(SCRIPT_DIR, 'add', '-A')
-    _, status = run_git(SCRIPT_DIR, 'status', '--porcelain')
+    repo_path = _sync_repo_dir()
+    success, output = run_git(repo_path, 'add', '-A')
+    if not success:
+        emit_error(f"Cannot stage rcfiles: {output}")
+        return False
+    success, status = run_git(repo_path, 'status', '--porcelain')
+    if not success:
+        emit_error(f"Cannot inspect rcfiles: {status}")
+        return False
     if status:
-        commit_msg = _build_commit_message()
-        run_git(SCRIPT_DIR, 'commit', '-m', commit_msg)
+        success, output = run_git(repo_path, 'commit', '-m', _build_commit_message(repo_path))
+        if not success:
+            emit_error(f"Cannot commit rcfiles: {output}")
+            return False
 
-    default_branch = get_default_branch(SCRIPT_DIR) or 'main'
-    _, ahead_behind = run_git(SCRIPT_DIR, 'rev-list', '--left-right', '--count', f'HEAD...origin/{default_branch}')
+    upstream = _sync_upstream(repo_path)
+    success, ahead_behind = run_git(repo_path, 'rev-list', '--left-right', '--count', f'HEAD...{upstream}')
+    if not success:
+        emit_error(f"Cannot compare rcfiles with {upstream}: {ahead_behind}")
+        return False
     try:
         ahead, _ = ahead_behind.split()
         ahead = int(ahead)
-    except Exception:
-        ahead = 0
+    except ValueError:
+        emit_error(f"Invalid revision counts: {ahead_behind}")
+        return False
 
     if ahead > 0:
-        success, output = run_git(SCRIPT_DIR, 'push')
+        success, output = run_git(repo_path, 'push')
         if success:
-            log_range = f'origin/{default_branch}~{ahead}..origin/{default_branch}'
-            _, log = run_git(SCRIPT_DIR, 'log', log_range, '--oneline')
+            log_range = f'{upstream}~{ahead}..{upstream}'
+            _, log = run_git(repo_path, 'log', log_range, '--oneline')
             emit_ok(f"rcfiles pushed ({ahead} commits)")
             for line in log.strip().splitlines():
                 print(f"     {line}")
         else:
             emit_error(f"Failed to push rcfiles: {output}")
+            return False
     else:
         if not pulled:
             emit_ok("rcfiles up to date")
+    return True
+
+
+def _sync_submodules(base_path):
+    """Update published, clean submodules; let the parent sync commit their pointers."""
+    if not (base_path / '.gitmodules').exists():
+        return True
+    success, paths = run_git(base_path, 'config', '--file', '.gitmodules',
+                            '--get-regexp', r'^submodule\..*\.path$')
+    if not success:
+        emit_error(f"Cannot read submodule paths: {paths}")
+        return False
+    for line in paths.splitlines():
+        child = base_path / line.split(None, 1)[1]
+        if not (child / '.git').exists():
+            continue
+        success, status = run_git(child, 'status', '--porcelain')
+        if not success or status:
+            emit_error(f"Submodule {child} has local changes or cannot be inspected; "
+                       f"commit and push it separately before syncing. {status}")
+            return False
+        success, unpublished = run_git(child, 'rev-list', 'HEAD', '--not', '--remotes')
+        if not success or unpublished:
+            emit_error(f"Submodule {child} has unpublished commits or cannot be inspected; "
+                       f"push it before syncing. {unpublished}")
+            return False
+    success, output = run_git(base_path, 'submodule', 'update', '--init', '--recursive',
+                              '--remote', '--merge')
+    if not success:
+        emit_error(f"Submodule update failed: {output}")
+        return False
+    for line in paths.splitlines():
+        child = base_path / line.split(None, 1)[1]
+        success, unpublished = run_git(child, 'rev-list', 'HEAD', '--not', '--remotes')
+        if not success or unpublished:
+            emit_error(f"Submodule {child} needs its merge committed and pushed before "
+                       f"the parent can sync. {unpublished}")
+            return False
+    emit_ok("Submodules updated")
+    return True
 
 
 def _is_dir_link(path):
@@ -1228,52 +1315,73 @@ def _ensure_link(link_path, repo_path):
 
 
 def _self_update():
-    """Pull latest dev_scripts, re-exec if changed."""
-    _, old_hash = run_git(SCRIPT_DIR, 'rev-parse', 'HEAD')
+    """Update the parent and its submodules, then restart with the updated tool."""
+    repo_path = _sync_repo_dir()
+    _, old_hash = run_git(repo_path, 'rev-parse', 'HEAD')
+    old_source = (SCRIPT_DIR / 'dev.py').read_bytes()
+    if not _sync_submodules(repo_path):
+        return False
 
-    run_git(SCRIPT_DIR, 'add', '-A')
-    _, status = run_git(SCRIPT_DIR, 'status', '--porcelain')
-    if status:
-        commit_msg = _build_commit_message()
-        run_git(SCRIPT_DIR, 'commit', '-m', commit_msg)
-
-    _, pre_fetch_hash = run_git(SCRIPT_DIR, 'rev-parse', 'HEAD')
-
-    success, _ = run_git(SCRIPT_DIR, 'fetch', 'origin')
+    success, output = run_git(repo_path, 'add', '-A')
     if not success:
-        return
+        emit_error(f"Cannot stage rcfiles: {output}")
+        return False
+    success, status = run_git(repo_path, 'status', '--porcelain')
+    if not success:
+        emit_error(f"Cannot inspect rcfiles: {status}")
+        return False
+    if status:
+        success, output = run_git(repo_path, 'commit', '-m', _build_commit_message(repo_path))
+        if not success:
+            emit_error(f"Cannot commit rcfiles: {output}")
+            return False
 
-    default_branch = get_default_branch(SCRIPT_DIR) or 'main'
-    _, ahead_behind = run_git(SCRIPT_DIR, 'rev-list', '--left-right', '--count', f'HEAD...origin/{default_branch}')
+    _, pre_fetch_hash = run_git(repo_path, 'rev-parse', 'HEAD')
+
+    success, output = run_git(repo_path, 'fetch', 'origin')
+    if not success:
+        emit_error(f"Cannot fetch rcfiles: {output}")
+        return False
+
+    upstream = _sync_upstream(repo_path)
+    success, ahead_behind = run_git(repo_path, 'rev-list', '--left-right', '--count', f'HEAD...{upstream}')
+    if not success:
+        emit_error(f"Cannot compare rcfiles with {upstream}: {ahead_behind}")
+        return False
     try:
         _, behind = ahead_behind.split()
         behind = int(behind)
-    except Exception:
-        behind = 0
+    except ValueError:
+        emit_error(f"Invalid revision counts: {ahead_behind}")
+        return False
 
     if behind > 0:
-        success, _ = run_git(SCRIPT_DIR, 'rebase', f'origin/{default_branch}')
+        success, output = run_git(repo_path, 'rebase', upstream)
         if not success:
-            run_git(SCRIPT_DIR, 'rebase', '--abort')
-            emit_error("Rebase conflict in dev_scripts. Please resolve manually.")
-            return
+            run_git(repo_path, 'rebase', '--abort')
+            emit_error(f"Rebase conflict in rcfiles. Please resolve manually. {output}")
+            return False
 
-    _, new_hash = run_git(SCRIPT_DIR, 'rev-parse', 'HEAD')
+    if not _sync_submodules(repo_path):
+        return False
+    _, new_hash = run_git(repo_path, 'rev-parse', 'HEAD')
 
-    if old_hash != new_hash:
+    if old_hash != new_hash or old_source != (SCRIPT_DIR / 'dev.py').read_bytes():
         if pre_fetch_hash != new_hash:
             os.environ['_DEV_PULLED_RCFILES'] = ''
-            _, log = run_git(SCRIPT_DIR, 'log', '--oneline', f'{pre_fetch_hash}..{new_hash}')
+            _, log = run_git(repo_path, 'log', '--oneline', f'{pre_fetch_hash}..{new_hash}')
             if log:
                 os.environ['_DEV_PULLED_RCFILES'] = log
         result = subprocess.run(
             [sys.executable, str(SCRIPT_DIR / 'dev.py')] + sys.argv[1:])
         sys.exit(result.returncode)
+    return True
 
 
 def cmd_repo_sync(args):
     """Clone missing repositories and sync tracked files."""
-    _self_update()
+    if _self_update() is False:
+        return 1
 
     assume_yes = getattr(args, 'force', False)
     config = load_config()
@@ -1287,7 +1395,8 @@ def cmd_repo_sync(args):
         emit_ok("rcfiles updated from remote:")
         for line in pulled_log.strip().splitlines():
             print(f"     {Colors.YELLOW}{line}{Colors.NC}")
-    sync_rcfiles_push(pulled=pulled)
+    if sync_rcfiles_push(pulled=pulled) is False:
+        return 1
     print()
 
     if _get_all_tracked_files():
@@ -1668,11 +1777,13 @@ def cmd_repo_root(args):
 
 
 def cmd_config_get(args):
-    """Print a dotted-path value from config.json (e.g. `identity.gitEmail`).
+    """Print a dotted-path value from the merged config (e.g. `identity.gitEmail`):
+    SAMPLE_CONFIG_FILE (dev_scripts/dev_config.json) overridden by
+    OVERRIDE_CONFIG_FILE (a private dev_config.json one level up).
 
     Lets non-Python callers (shell/PowerShell setup scripts) read the same
-    singleton config file dev.py uses, instead of hardcoding personal values.
-    Exits 1 with no output if the file or key is missing, so callers can fall
+    config dev.py uses, instead of hardcoding personal values. Exits 1 with
+    no output if the key is missing anywhere, so callers can fall
     back to a generic default.
     """
     try:
@@ -1940,7 +2051,7 @@ def cmd_repo_old(args):
     prefix = args.prefix or identity.get('branchPrefix') or f'user/{default_alias}/'
     creator_email = identity.get('creatorEmail') or git_email
     if not creator_email:
-        emit_error(f"No creator email configured. Set identity.creatorEmail in {CONFIG_FILE}, "
+        emit_error(f"No creator email configured. Set identity.creatorEmail in {OVERRIDE_CONFIG_FILE}, "
                    "or run: git config --global user.email you@example.com")
         return 1
     creator_alias = prefix.strip('/').split('/')[-1] if '/' in prefix else None
@@ -2084,7 +2195,18 @@ def cmd_repo_old(args):
 # =============================================================================
 
 BASHRC_SOURCE_LINE = '[ -f "$HOME/dev_scripts/shell/bash.sh" ] && source "$HOME/dev_scripts/shell/bash.sh"'
+ZSHRC_SOURCE_LINE = '[ -f "$HOME/dev_scripts/shell/zsh.sh" ] && source "$HOME/dev_scripts/shell/zsh.sh"'
+PSRC_SOURCE_LINE = '. "$HOME\\dev_scripts\\shell\\profile.ps1"'
 PSRC_CONTENT = '$profile = "$HOME\\.psrc.ps1"\n. $profile\n'
+
+
+def _ensure_profile_source(path, source):
+    """Append a missing redirect without replacing an existing shell profile."""
+    content = path.read_text(encoding='utf-8') if path.exists() else ''
+    if source.strip() not in content:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('a', encoding='utf-8') as profile:
+            profile.write(f"\n{source.strip()}\n" if content else f"{source.strip()}\n")
 
 
 def _init_windows():
@@ -2097,6 +2219,7 @@ def _init_windows():
         return 1
 
     profile_path = Path(result.stdout.strip())
+    _ensure_profile_source(Path.home() / '.psrc.ps1', PSRC_SOURCE_LINE)
 
     if profile_path.exists():
         content = profile_path.read_text(encoding='utf-8')
@@ -2104,14 +2227,14 @@ def _init_windows():
             emit_ok("$PROFILE already sources .psrc.ps1")
             return 0
 
-    profile_path.parent.mkdir(parents=True, exist_ok=True)
-    profile_path.write_text(PSRC_CONTENT, encoding='utf-8')
+    _ensure_profile_source(profile_path, PSRC_CONTENT)
     emit_ok(f"Wrote $PROFILE -> .psrc.ps1 ({profile_path})")
     return 0
 
 
 def _init_unix():
     """Ensure zsh is the running shell, or .bashrc execs into it."""
+    _ensure_profile_source(Path.home() / '.zshrc', ZSHRC_SOURCE_LINE)
     shell = os.environ.get('SHELL', '')
 
     if 'zsh' in shell:
@@ -2199,7 +2322,7 @@ def cmd_ado_set_pat(args):
         emit_error("PAT cannot be empty")
         return 1
 
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    ADO_PAT_FILE.parent.mkdir(parents=True, exist_ok=True)
     ADO_PAT_FILE.write_text(pat)
     if sys.platform != 'win32':
         os.chmod(ADO_PAT_FILE, 0o600)
@@ -2399,7 +2522,7 @@ def _cache_ado_token(token):
         'token': token,
         'expires': expires,
     }
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    ADO_TOKEN_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
     ADO_TOKEN_CACHE_FILE.write_text(json.dumps(cache))
 
 
@@ -3111,7 +3234,7 @@ def main():
     old_p = repo_sub.add_parser('old', help='List/delete old branches')
     old_p.add_argument('--delete', action='store_true', help='Delete the old branches')
     old_p.add_argument('--prefix', default=None,
-                       help="Branch prefix to filter (default: identity.branchPrefix in config.json, "
+                       help="Branch prefix to filter (default: identity.branchPrefix in dev_config.json, "
                             "else 'user/<git email local-part>/')")
     old_p.add_argument('--days', type=int, default=30, help='Age threshold in days (default: 30)')
     old_p.add_argument('path', nargs='?', help='Path to git repository (default: current directory)')
@@ -3182,7 +3305,7 @@ def main():
                                help='When listing, show only active (unresolved) threads')
 
     # Config subcommand
-    config_parser = subparsers.add_parser('config', help='Read values from the config.json file')
+    config_parser = subparsers.add_parser('config', help='Read values from the dev_config.json file')
     config_sub = config_parser.add_subparsers(dest='config_command')
     config_get_p = config_sub.add_parser('get', help='Print a dotted-path value (e.g. identity.gitEmail)')
     config_get_p.add_argument('key')

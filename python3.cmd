@@ -14,9 +14,8 @@ REM Prefer .bat over .exe on Windows shims
 for %%I in (python3.bat python3.exe) do (
   set "CAND=%%~$PATH:I"
 
-  REM Skip toolchain_tools python (any drive)
-  if defined CAND (
-    echo !CAND! | findstr /I /c:"toolchain_tools" >nul && set "CAND="
+  if defined CAND if defined DEV_PYTHON_SKIP (
+    echo !CAND! | findstr /I /L /c:"%DEV_PYTHON_SKIP%" >nul && set "CAND="
   )
 
   REM Skip Windows Store stubs
