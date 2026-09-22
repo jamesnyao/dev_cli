@@ -5,6 +5,7 @@ Dev CLI - Cross-platform development workflow tool
 
 import argparse
 import base64
+import getpass
 import json
 import os
 import platform
@@ -122,7 +123,26 @@ def confirm(prompt, default_yes=True, assume_yes=False):
 
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
-CONFIG_DIR = SCRIPT_DIR / 'repoconfig'
+
+def _resolve_config_dir():
+    """Locate the singleton config directory (repos.json + secrets).
+
+    dev.py is a public, work-agnostic tool: it carries no private data of its
+    own, so the config directory normally lives outside it, one level up
+    (e.g. a private parent repo that has dev_scripts as a git submodule).
+    Resolution order: explicit override, then a sibling `repoconfig/` next
+    to dev_scripts, then (for someone who clones just this repo standalone)
+    a `repoconfig/` inside it.
+    """
+    env_override = os.getenv('DEV_CONFIG_DIR')
+    if env_override:
+        return Path(os.path.expandvars(os.path.expanduser(env_override)))
+    parent_repoconfig = SCRIPT_DIR.parent / 'repoconfig'
+    if parent_repoconfig.is_dir():
+        return parent_repoconfig
+    return SCRIPT_DIR / 'repoconfig'
+
+CONFIG_DIR = _resolve_config_dir()
 CONFIG_FILE = CONFIG_DIR / 'repos.json'
 ADO_PAT_FILE = CONFIG_DIR / 'ado_pat.txt'
 ADO_TOKEN_CACHE_FILE = CONFIG_DIR / 'ado_token_cache.json'
@@ -191,22 +211,31 @@ def run_git(repo_path, *args):
     except Exception:
         return False, ''
 
-GITHUB_SSH_HOSTS = {
-    'example-user': 'github.com-personal',
-    'acme-corp': 'github.com-work',
-}
+def _git_config_value(key, default=''):
+    """Read a value from global git config (e.g. 'user.email'), independent of any repo."""
+    try:
+        result = subprocess.run(['git', 'config', '--global', key],
+                                 capture_output=True, text=True, timeout=10)
+        return result.stdout.strip() if result.returncode == 0 else default
+    except Exception:
+        return default
 
-def normalize_github_url(url):
-    """Convert GitHub URLs to SSH format with correct host alias."""
+def normalize_github_url(url, host_aliases=None):
+    """Convert GitHub URLs to SSH format with correct host alias.
+
+    host_aliases maps a GitHub org/user to a git SSH host alias (e.g. from
+    an ssh config Host entry), for multi-account setups. Defaults to none.
+    """
+    host_aliases = host_aliases or {}
     https_match = re.match(r'https://github\.com/([^/]+)/(.+?)(?:\.git)?$', url)
     if https_match:
         org, repo = https_match.groups()
-        host = GITHUB_SSH_HOSTS.get(org, 'github.com')
+        host = host_aliases.get(org, 'github.com')
         return f'git@{host}:{org}/{repo}.git'
     ssh_match = re.match(r'git@github\.com:([^/]+)/(.+?)(?:\.git)?$', url)
     if ssh_match:
         org, repo = ssh_match.groups()
-        host = GITHUB_SSH_HOSTS.get(org, 'github.com')
+        host = host_aliases.get(org, 'github.com')
         return f'git@{host}:{org}/{repo}.git'
     return url
 
@@ -221,10 +250,10 @@ def _normalize_url_for_comparison(url):
     url = re.sub(r'git@github\.com-[^:]+:', 'git@github.com:', url)
     return url.rstrip('/').removesuffix('.git')
 
-def get_remote_url(repo_path, normalize=False):
+def get_remote_url(repo_path, normalize=False, host_aliases=None):
     success, url = run_git(repo_path, 'remote', 'get-url', 'origin')
     if success and normalize:
-        return normalize_github_url(url)
+        return normalize_github_url(url, host_aliases)
     return url if success else ''
 
 def get_current_branch(repo_path):
@@ -632,7 +661,7 @@ def _stash_before_switch(repo_path, branch):
     return label if result.returncode == 0 else None
 
 
-def check_stale_branch(repo_path, name, slow_sync=False, gclient_sync=False, default_branch=None,
+def check_stale_branch(repo_path, name, slow_sync=False, sync_command=None, default_branch=None,
                        assume_yes=False):
     current = get_current_branch(repo_path)
     if not current or current == 'HEAD':
@@ -673,10 +702,10 @@ def check_stale_branch(repo_path, name, slow_sync=False, gclient_sync=False, def
         {'argv': ['git', '-C', repo_path_str, 'reset', '--hard', f'origin/{default}'], 'cwd': None},
     ]
     label = f'switching {current} -> {default}'
-    if gclient_sync:
-        gclient_cwd = str(Path(repo_path).parent)
-        ops.append({'argv': ['gclient', 'sync', '-Df'], 'cwd': gclient_cwd})
-        label += ' + gclient sync -Df'
+    if sync_command:
+        hook_cwd = str(Path(repo_path).parent)
+        ops.append({'argv': shlex.split(sync_command), 'cwd': hook_cwd})
+        label += f' + {sync_command}'
 
     if slow_sync:
         pid = _spawn_background_sync(name, ops, label=label)
@@ -781,9 +810,13 @@ def _sync_repo_latest(repo_path, default_branch=None):
     return 'diverged', default
 
 def get_rcfile_git_timestamp(rel_path):
-    """Get the author date of the last commit that modified an rcfile."""
-    rcfile_rel = str(Path('repoconfig') / 'rcfiles' / rel_path).replace('\\', '/')
-    success, ts = run_git(SCRIPT_DIR, 'log', '-1', '--format=%aI', '--', rcfile_rel)
+    """Get the author date of the last commit that modified an rcfile.
+
+    Anchored at RCFILES_DIR itself (like git_path_deleted) so this resolves
+    correctly regardless of where the config directory lives relative to
+    dev_scripts (in place, or a sibling of a submodule).
+    """
+    success, ts = run_git(RCFILES_DIR, 'log', '-1', '--format=%aI', '--', rel_path)
     if success and ts:
         try:
             return datetime.fromisoformat(ts)
@@ -907,11 +940,11 @@ def cmd_repo_add(args):
         # A non-git directory is tracked as a synced files directory.
         return _add_tracked_file(display_path)
 
-    remote_url = get_remote_url(target_path, normalize=True)
+    config = load_config()
+    remote_url = get_remote_url(target_path, normalize=True, host_aliases=config.get('githubHostAliases', {}))
     if not remote_url:
         emit_warn("No 'origin' remote found")
 
-    config = load_config()
     base_path = get_base_path()
     repo_name = compute_repo_name(display_path, base_path)
     config['repos'] = [r for r in config['repos'] if r['path'] != repo_name]
@@ -922,8 +955,8 @@ def cmd_repo_add(args):
     }
     if getattr(args, 'slow_sync', False):
         entry['slowSync'] = True
-    if getattr(args, 'gclient_sync', False):
-        entry['gclientSync'] = True
+    if getattr(args, 'sync_command', None):
+        entry['syncCommand'] = args.sync_command
     if getattr(args, 'default_branch', None):
         entry['defaultBranch'] = args.default_branch
     config['repos'].append(entry)
@@ -936,8 +969,8 @@ def cmd_repo_add(args):
         print(f"  {Colors.CYAN}Default branch: {entry['defaultBranch']} (synced instead of origin/HEAD){Colors.NC}")
     if entry.get('slowSync'):
         print(f"  {Colors.CYAN}Slow sync: enabled (pull operations run in background){Colors.NC}")
-    if entry.get('gclientSync'):
-        print(f"  {Colors.CYAN}Gclient sync: enabled (runs `gclient sync -Df` after branch switch){Colors.NC}")
+    if entry.get('syncCommand'):
+        print(f"  {Colors.CYAN}Sync hook: enabled (runs `{entry['syncCommand']}` after branch switch){Colors.NC}")
     return 0
 
 def cmd_repo_remove(args):
@@ -1080,9 +1113,14 @@ def _build_commit_message():
             short = f"{p.parts[-2]}/{p.name}"
         else:
             short = p.name
-        # Remap rcfiles paths to ~/
-        rcfiles_prefix = 'repoconfig/rcfiles/'
-        if filepath.startswith(rcfiles_prefix):
+        # Remap rcfiles paths to ~/ (git diff paths are relative to the repo
+        # root, i.e. HOME_DIR, so derive the prefix from RCFILES_DIR rather
+        # than hardcoding it -- it moves whenever the config dir does)
+        try:
+            rcfiles_prefix = RCFILES_DIR.relative_to(HOME_DIR).as_posix() + '/'
+        except ValueError:
+            rcfiles_prefix = None
+        if rcfiles_prefix and filepath.startswith(rcfiles_prefix):
             rel = filepath[len(rcfiles_prefix):]
             rel_p = Path(rel)
             if len(rel_p.parts) >= 2:
@@ -1276,9 +1314,9 @@ def cmd_repo_sync(args):
         url = repo.get('remoteUrl', '')
         link_to = repo.get('pathLinksTo')
         slow_sync = bool(repo.get('slowSync'))
-        gclient_sync = bool(repo.get('gclientSync'))
+        sync_command = repo.get('syncCommand')
         default_branch = repo.get('defaultBranch')
-        # Handle nested paths like platform/src
+        # Handle nested paths like team/src
         link_path = base_path / name.replace('/', os.sep)
 
         if link_to:
@@ -1317,11 +1355,11 @@ def cmd_repo_sync(args):
                 fixed_remote = True
             suffix = f" {Colors.YELLOW}(fixed remote URL){Colors.NC}" if fixed_remote else ''
 
-            # Slow-sync repos (huge enlistments like bigrepo) are never fetched
+            # Slow-sync repos (huge multi-repo checkouts) are never fetched
             # inline; their background sync / stale-branch prompt handles updates.
             if slow_sync:
                 print(f"{Colors.GREEN}[OK]{Colors.NC} {name}{suffix}")
-                check_stale_branch(repo_path, name, slow_sync=slow_sync, gclient_sync=gclient_sync,
+                check_stale_branch(repo_path, name, slow_sync=slow_sync, sync_command=sync_command,
                                    default_branch=default_branch, assume_yes=assume_yes)
                 skipped += 1
                 continue
@@ -1361,7 +1399,7 @@ def cmd_repo_sync(args):
                       f"{Colors.YELLOW}(fetch/update failed){Colors.NC}{suffix}")
                 failed += 1
 
-            check_stale_branch(repo_path, name, slow_sync=slow_sync, gclient_sync=gclient_sync,
+            check_stale_branch(repo_path, name, slow_sync=slow_sync, sync_command=sync_command,
                                default_branch=default_branch, assume_yes=assume_yes)
             continue
 
@@ -1594,7 +1632,7 @@ def cmd_repo_status(args):
 
     present = missing = 0
     for repo in sorted(config['repos'], key=lambda r: r['path']):
-        # Handle nested paths like platform/src
+        # Handle nested paths like team/src
         target_path = base_path / repo['path'].replace('/', os.sep)
         if target_path.exists():
             print(f"{Colors.GREEN}[OK]{Colors.NC} {repo['path']}")
@@ -1627,6 +1665,30 @@ def cmd_repo_root(args):
     config = load_config()
     base_path = get_base_path(config)
     print(base_path)
+    return 0
+
+
+def cmd_config_get(args):
+    """Print a dotted-path value from repos.json (e.g. `identity.gitEmail`).
+
+    Lets non-Python callers (shell/PowerShell setup scripts) read the same
+    singleton config file dev.py uses, instead of hardcoding personal values.
+    Exits 1 with no output if the file or key is missing, so callers can fall
+    back to a generic default.
+    """
+    try:
+        config = load_config()
+    except (OSError, json.JSONDecodeError):
+        return 1
+    value = config
+    for part in args.key.split('.'):
+        if isinstance(value, dict) and part in value:
+            value = value[part]
+        else:
+            return 1
+    if value is None:
+        return 1
+    print(value if isinstance(value, str) else json.dumps(value))
     return 0
 
 
@@ -1869,8 +1931,19 @@ def _print_old_branches(repo_path, old_branches, creator_prefix=None):
 def cmd_repo_old(args):
     """List or delete old branches you pushed."""
 
-    prefix = args.prefix or 'user/developer/'
-    creator_email = 'developer@example.com'
+    try:
+        identity = load_config().get('identity', {})
+    except (OSError, json.JSONDecodeError):
+        identity = {}
+
+    git_email = _git_config_value('user.email')
+    default_alias = (git_email.split('@')[0] if git_email else '') or getpass.getuser()
+    prefix = args.prefix or identity.get('branchPrefix') or f'user/{default_alias}/'
+    creator_email = identity.get('creatorEmail') or git_email
+    if not creator_email:
+        emit_error(f"No creator email configured. Set identity.creatorEmail in {CONFIG_FILE}, "
+                   "or run: git config --global user.email you@example.com")
+        return 1
     creator_alias = prefix.strip('/').split('/')[-1] if '/' in prefix else None
     days = args.days or 30
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
@@ -2176,13 +2249,13 @@ def _ado_credential_helper_value():
     credential-helper`.
 
     Uses an absolute interpreter + dev.py path rather than relying on `dev`
-    being on PATH: tools that invoke git internally (notably toolchain_tools /
-    gclient) run git with a sanitized PATH that does NOT include dev_scripts,
-    so a bare `!dev ...` helper would silently fail and git would fall back to
-    prompting for a username. We also prefer the canonical home copy
-    (~/dev_scripts/dev.py) over the currently-running script so the helper hits
-    a fast local file instead of a slow Windows-mounted path (/mnt/c/...) when
-    invoked from WSL.
+    being on PATH: tools that invoke git internally (notably multi-repo
+    checkout managers like gclient) run git with a sanitized PATH that does
+    NOT include dev_scripts, so a bare `!dev ...` helper would silently fail
+    and git would fall back to prompting for a username. We also prefer the
+    canonical home copy (~/dev_scripts/dev.py) over the currently-running
+    script so the helper hits a fast local file instead of a slow
+    Windows-mounted path (/mnt/c/...) when invoked from WSL.
     """
     home_copy = Path.home() / 'dev_scripts' / 'dev.py'
     running = Path(__file__).resolve()
@@ -2197,7 +2270,8 @@ def _heal_ado_auth(repo_path):
     ADO bearer token on demand. Unlike a static http.extraheader, this re-fetches
     the token via `dev ado token` on every auth challenge, so it AUTO-HEALS when
     the token expires (as long as `az login` is still valid). Tools that invoke
-    git internally (gclient sync, toolchain_tools selfupdate) reuse it transparently.
+    git internally (e.g. gclient sync, other repo-management wrappers) reuse
+    it transparently.
 
     Returns the host that was healed, or None if the repo has no ADO remote.
     """
@@ -2242,7 +2316,7 @@ def cmd_ado_git(args):
     host = _heal_ado_auth(Path(os.getcwd()).resolve())
     if host:
         emit_ok(f"Installed auto-refreshing ADO auth for {host}; "
-                "gclient/toolchain_tools git will reuse it and re-heal on expiry")
+                "other tools' git invocations will reuse it and re-heal on expiry")
 
     result = subprocess.run(
         ['git', '-c', f'http.extraheader=Authorization: Bearer {token}'] + git_args)
@@ -3015,8 +3089,9 @@ def main():
     add_p.add_argument('path', help='Path to a repository or file')
     add_p.add_argument('--slow-sync', action='store_true',
                        help='Mark repo for background sync (pull/switch ops run detached)')
-    add_p.add_argument('--gclient-sync', action='store_true',
-                       help='Run `gclient sync -Df` after a branch switch (uses repo parent as cwd)')
+    add_p.add_argument('--sync-command', metavar='CMD',
+                       help="Command to run after a branch switch, e.g. 'gclient sync -Df' "
+                            "(runs with the repo's parent directory as cwd)")
     add_p.add_argument('--default-branch', metavar='BRANCH',
                        help="Branch to sync instead of origin/HEAD (e.g. 'mirror/main')")
 
@@ -3036,7 +3111,9 @@ def main():
 
     old_p = repo_sub.add_parser('old', help='List/delete old branches')
     old_p.add_argument('--delete', action='store_true', help='Delete the old branches')
-    old_p.add_argument('--prefix', default='user/developer/', help='Branch prefix to filter (default: user/developer/)')
+    old_p.add_argument('--prefix', default=None,
+                       help="Branch prefix to filter (default: identity.branchPrefix in repos.json, "
+                            "else 'user/<git email local-part>/')")
     old_p.add_argument('--days', type=int, default=30, help='Age threshold in days (default: 30)')
     old_p.add_argument('path', nargs='?', help='Path to git repository (default: current directory)')
 
@@ -3105,6 +3182,12 @@ def main():
     pr_comments_p.add_argument('--active', action='store_true',
                                help='When listing, show only active (unresolved) threads')
 
+    # Config subcommand
+    config_parser = subparsers.add_parser('config', help='Read values from the repos.json config file')
+    config_sub = config_parser.add_subparsers(dest='config_command')
+    config_get_p = config_sub.add_parser('get', help='Print a dotted-path value (e.g. identity.gitEmail)')
+    config_get_p.add_argument('key')
+
     # Init command
     subparsers.add_parser('init', help='Bootstrap shell profile ($PROFILE on Windows, .bashrc→zsh on Linux)')
 
@@ -3129,6 +3212,11 @@ def main():
         return cmd_init(args)
     elif args.command == 'test':
         return cmd_test(args)
+    elif args.command == 'config':
+        if args.config_command == 'get':
+            return cmd_config_get(args)
+        else:
+            config_parser.print_help()
     elif args.command == '__bg_sync__':
         return cmd_bg_sync(args)
     elif args.command == 'ado':

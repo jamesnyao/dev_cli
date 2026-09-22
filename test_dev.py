@@ -178,6 +178,142 @@ class TestGetBasePath(unittest.TestCase):
         self.assertEqual(dev.get_base_path(config=config), '/from-config')
 
 
+class TestResolveConfigDir(unittest.TestCase):
+    """Test the singleton config directory resolution order:
+    DEV_CONFIG_DIR override > sibling of dev_scripts > inside dev_scripts."""
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp())
+        self.orig_script_dir = dev.SCRIPT_DIR
+        dev.SCRIPT_DIR = self.temp_dir / 'dev_scripts'
+        dev.SCRIPT_DIR.mkdir()
+
+    def tearDown(self):
+        dev.SCRIPT_DIR = self.orig_script_dir
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    @patch.dict(os.environ, {'DEV_CONFIG_DIR': '/explicit/override'})
+    def test_env_override_wins(self):
+        self.assertEqual(dev._resolve_config_dir(), Path('/explicit/override'))
+
+    @patch.dict(os.environ, {}, clear=False)
+    def test_sibling_repoconfig_used_when_present(self):
+        os.environ.pop('DEV_CONFIG_DIR', None)
+        sibling = self.temp_dir / 'repoconfig'
+        sibling.mkdir()
+        self.assertEqual(dev._resolve_config_dir(), sibling)
+
+    @patch.dict(os.environ, {}, clear=False)
+    def test_falls_back_to_standalone_repoconfig(self):
+        os.environ.pop('DEV_CONFIG_DIR', None)
+        # No sibling repoconfig/ exists next to dev_scripts
+        self.assertEqual(dev._resolve_config_dir(), dev.SCRIPT_DIR / 'repoconfig')
+
+
+class TestConfigGet(unittest.TestCase):
+    """Test `dev config get <dotted.key>` reading from the singleton config file."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.orig_config_dir = dev.CONFIG_DIR
+        self.orig_config_file = dev.CONFIG_FILE
+        dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
+        dev.CONFIG_DIR.mkdir(parents=True)
+        dev.CONFIG_FILE = dev.CONFIG_DIR / 'repos.json'
+
+    def tearDown(self):
+        dev.CONFIG_DIR = self.orig_config_dir
+        dev.CONFIG_FILE = self.orig_config_file
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _args(self, key):
+        return argparse.Namespace(key=key)
+
+    def test_missing_config_file_returns_1(self):
+        self.assertEqual(dev.cmd_config_get(self._args('identity.gitEmail')), 1)
+
+    def test_top_level_string_value(self):
+        dev.CONFIG_FILE.write_text(json.dumps({'description': 'hello'}))
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            rc = dev.cmd_config_get(self._args('description'))
+        self.assertEqual(rc, 0)
+        self.assertEqual(buf.getvalue().strip(), 'hello')
+
+    def test_nested_dotted_key(self):
+        dev.CONFIG_FILE.write_text(json.dumps({'identity': {'gitEmail': 'you@example.com'}}))
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            rc = dev.cmd_config_get(self._args('identity.gitEmail'))
+        self.assertEqual(rc, 0)
+        self.assertEqual(buf.getvalue().strip(), 'you@example.com')
+
+    def test_missing_key_returns_1(self):
+        dev.CONFIG_FILE.write_text(json.dumps({'identity': {}}))
+        self.assertEqual(dev.cmd_config_get(self._args('identity.gitEmail')), 1)
+
+    def test_malformed_json_returns_1(self):
+        dev.CONFIG_FILE.write_text('{not valid')
+        self.assertEqual(dev.cmd_config_get(self._args('identity.gitEmail')), 1)
+
+
+class TestCmdRepoOldIdentity(unittest.TestCase):
+    """Test cmd_repo_old's config/git-derived identity resolution (no hardcoded user)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.repo_path = Path(self.temp_dir) / 'repo'
+        (self.repo_path / '.git').mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _args(self, prefix=None, days=30, delete=False):
+        return argparse.Namespace(path=str(self.repo_path), prefix=prefix, days=days, delete=delete)
+
+    @patch('dev.get_remote_url', return_value='')
+    @patch('dev._scan_old_branches_git', return_value=[])
+    @patch('dev._git_config_value', return_value='')
+    @patch('dev.load_config', return_value={})
+    def test_no_email_anywhere_errors(self, mock_load, mock_git_cfg, mock_scan, mock_remote):
+        rc = dev.cmd_repo_old(self._args())
+        self.assertEqual(rc, 1)
+        mock_scan.assert_not_called()
+
+    @patch('dev.get_remote_url', return_value='')
+    @patch('dev._scan_old_branches_git', return_value=[])
+    @patch('dev._git_config_value', return_value='someone@example.com')
+    @patch('dev.load_config', return_value={})
+    def test_falls_back_to_git_config_email_and_alias(self, mock_load, mock_git_cfg, mock_scan, mock_remote):
+        rc = dev.cmd_repo_old(self._args())
+        self.assertEqual(rc, 0)
+        _, prefix_arg, email_arg, _cutoff = mock_scan.call_args[0]
+        self.assertEqual(email_arg, 'someone@example.com')
+        self.assertEqual(prefix_arg, 'user/someone/')
+
+    @patch('dev.get_remote_url', return_value='')
+    @patch('dev._scan_old_branches_git', return_value=[])
+    @patch('dev._git_config_value', return_value='')
+    @patch('dev.load_config', return_value={'identity': {'branchPrefix': 'user/alice/',
+                                                          'creatorEmail': 'alice@example.com'}})
+    def test_identity_config_used_when_present(self, mock_load, mock_git_cfg, mock_scan, mock_remote):
+        rc = dev.cmd_repo_old(self._args())
+        self.assertEqual(rc, 0)
+        _, prefix_arg, email_arg, _cutoff = mock_scan.call_args[0]
+        self.assertEqual(prefix_arg, 'user/alice/')
+        self.assertEqual(email_arg, 'alice@example.com')
+
+    @patch('dev.get_remote_url', return_value='')
+    @patch('dev._scan_old_branches_git', return_value=[])
+    @patch('dev._git_config_value', return_value='')
+    @patch('dev.load_config', return_value={'identity': {'creatorEmail': 'alice@example.com'}})
+    def test_explicit_prefix_flag_overrides_identity(self, mock_load, mock_git_cfg, mock_scan, mock_remote):
+        rc = dev.cmd_repo_old(self._args(prefix='user/explicit/'))
+        self.assertEqual(rc, 0)
+        _, prefix_arg, _email_arg, _cutoff = mock_scan.call_args[0]
+        self.assertEqual(prefix_arg, 'user/explicit/')
+
+
 class TestTrustClaudeWorkspace(unittest.TestCase):
     """Test auto-trusting the workspace root in ~/.claude.json"""
 
@@ -231,40 +367,53 @@ class TestTrustClaudeWorkspace(unittest.TestCase):
 
 class TestNormalizeGithubUrl(unittest.TestCase):
     """Test GitHub URL normalization to SSH with correct host aliases"""
-    
+
+    ALIASES = {'exampleuser': 'github.com-personal', 'acme-corp': 'github.com-work'}
+
     def test_https_personal_account(self):
-        """HTTPS URL for personal account should use github.com-personal"""
-        url = 'https://github.com/example-user/rcfiles.git'
-        self.assertEqual(dev.normalize_github_url(url), 'git@github.com-personal:example-user/rcfiles.git')
-    
-    def test_https_edge_org(self):
-        """HTTPS URL for acme-corp org should use github.com-work"""
-        url = 'https://github.com/acme-corp/platform-agents.git'
-        self.assertEqual(dev.normalize_github_url(url), 'git@github.com-work:acme-corp/platform-agents.git')
-    
+        """HTTPS URL for an aliased personal account should use its alias"""
+        url = 'https://github.com/exampleuser/dotfiles.git'
+        self.assertEqual(dev.normalize_github_url(url, self.ALIASES),
+                          'git@github.com-personal:exampleuser/dotfiles.git')
+
+    def test_https_second_org(self):
+        """HTTPS URL for a second aliased org should use its own alias"""
+        url = 'https://github.com/acme-corp/acme-tools.git'
+        self.assertEqual(dev.normalize_github_url(url, self.ALIASES),
+                          'git@github.com-work:acme-corp/acme-tools.git')
+
     def test_https_without_git_suffix(self):
         """HTTPS URL without .git suffix should still work"""
-        url = 'https://github.com/example-user/rcfiles'
-        self.assertEqual(dev.normalize_github_url(url), 'git@github.com-personal:example-user/rcfiles.git')
-    
+        url = 'https://github.com/exampleuser/dotfiles'
+        self.assertEqual(dev.normalize_github_url(url, self.ALIASES),
+                          'git@github.com-personal:exampleuser/dotfiles.git')
+
     def test_ssh_personal_account(self):
-        """SSH URL with github.com should be converted to github.com-personal"""
-        url = 'git@github.com:example-user/rcfiles.git'
-        self.assertEqual(dev.normalize_github_url(url), 'git@github.com-personal:example-user/rcfiles.git')
-    
-    def test_ssh_edge_org(self):
-        """SSH URL with github.com should be converted to github.com-work"""
-        url = 'git@github.com:acme-corp/platform-agents.git'
-        self.assertEqual(dev.normalize_github_url(url), 'git@github.com-work:acme-corp/platform-agents.git')
-    
+        """SSH URL with github.com should be converted to its aliased host"""
+        url = 'git@github.com:exampleuser/dotfiles.git'
+        self.assertEqual(dev.normalize_github_url(url, self.ALIASES),
+                          'git@github.com-personal:exampleuser/dotfiles.git')
+
+    def test_ssh_second_org(self):
+        """SSH URL with github.com should be converted to the second org's alias"""
+        url = 'git@github.com:acme-corp/acme-tools.git'
+        self.assertEqual(dev.normalize_github_url(url, self.ALIASES),
+                          'git@github.com-work:acme-corp/acme-tools.git')
+
     def test_unknown_org_uses_default_host(self):
-        """Unknown org should use plain github.com"""
+        """Org with no configured alias should use plain github.com"""
         url = 'https://github.com/unknown-org/some-repo.git'
-        self.assertEqual(dev.normalize_github_url(url), 'git@github.com:unknown-org/some-repo.git')
-    
+        self.assertEqual(dev.normalize_github_url(url, self.ALIASES),
+                          'git@github.com:unknown-org/some-repo.git')
+
+    def test_no_aliases_configured_uses_default_host(self):
+        """With no alias map at all, every org falls back to plain github.com"""
+        url = 'https://github.com/exampleuser/dotfiles.git'
+        self.assertEqual(dev.normalize_github_url(url), 'git@github.com:exampleuser/dotfiles.git')
+
     def test_non_github_url_unchanged(self):
         """Non-GitHub URLs should be returned unchanged"""
-        url = 'https://dev.azure.com/contoso/platform/_git/internal.service'
+        url = 'https://dev.azure.com/contoso/Platform/_git/internal.service'
         self.assertEqual(dev.normalize_github_url(url), url)
 
 
@@ -1772,12 +1921,12 @@ class TestCheckStaleBranchSlowSync(unittest.TestCase):
     @patch('builtins.input', return_value='y')
     def test_slow_sync_spawns_bg_and_returns(self, _i, _c, _a, _d, _sp, mock_spawn):
         with patch('subprocess.run') as mock_run:
-            dev.check_stale_branch(Path('/tmp/repo'), 'platform/src', slow_sync=True)
+            dev.check_stale_branch(Path('/tmp/repo'), 'team/src', slow_sync=True)
             mock_run.assert_not_called()
             mock_spawn.assert_called_once()
             ops = mock_spawn.call_args[0][1]
             self.assertEqual(len(ops), 3)
-            # No gclient when flag not set
+            # No sync hook when none configured
             self.assertTrue(all(op['argv'][0] == 'git' for op in ops))
 
     @patch('dev._spawn_background_sync', return_value=99999)
@@ -1786,13 +1935,12 @@ class TestCheckStaleBranchSlowSync(unittest.TestCase):
     @patch('dev.get_branch_age_days', return_value=30)
     @patch('dev.get_current_branch', return_value='user/x/old')
     @patch('builtins.input', return_value='y')
-    def test_slow_sync_with_gclient_appends_op(self, _i, _c, _a, _d, _sp, mock_spawn):
-        dev.check_stale_branch(Path('/tmp/repo'), 'platform/src',
-                               slow_sync=True, gclient_sync=True)
+    def test_slow_sync_with_sync_command_appends_op(self, _i, _c, _a, _d, _sp, mock_spawn):
+        dev.check_stale_branch(Path('/tmp/repo'), 'team/src',
+                               slow_sync=True, sync_command='gclient sync -Df')
         ops = mock_spawn.call_args[0][1]
         self.assertEqual(len(ops), 4)
-        self.assertEqual(ops[-1]['argv'][:2], ['gclient', 'sync'])
-        self.assertIn('-Df', ops[-1]['argv'])
+        self.assertEqual(ops[-1]['argv'], ['gclient', 'sync', '-Df'])
         # cwd should be parent of repo
         self.assertEqual(ops[-1]['cwd'], str(Path('/tmp/repo').parent))
 
@@ -1803,7 +1951,7 @@ class TestCheckStaleBranchSlowSync(unittest.TestCase):
     @patch('subprocess.run')
     def test_no_slow_sync_runs_synchronously(self, mock_run, _i, _c, _a, _d):
         mock_run.return_value = type('R', (), {'returncode': 0})()
-        dev.check_stale_branch(Path('/tmp/repo'), 'platform/src', slow_sync=False)
+        dev.check_stale_branch(Path('/tmp/repo'), 'team/src', slow_sync=False)
         self.assertEqual(mock_run.call_count, 3)
 
     @patch('dev.get_default_branch', return_value='main')
@@ -1811,12 +1959,12 @@ class TestCheckStaleBranchSlowSync(unittest.TestCase):
     @patch('dev.get_current_branch', return_value='user/x/old')
     @patch('builtins.input', return_value='y')
     @patch('subprocess.run')
-    def test_no_slow_sync_with_gclient_runs_four(self, mock_run, _i, _c, _a, _d):
+    def test_no_slow_sync_with_sync_command_runs_four(self, mock_run, _i, _c, _a, _d):
         mock_run.return_value = type('R', (), {'returncode': 0})()
-        dev.check_stale_branch(Path('/tmp/repo'), 'platform/src',
-                               slow_sync=False, gclient_sync=True)
+        dev.check_stale_branch(Path('/tmp/repo'), 'team/src',
+                               slow_sync=False, sync_command='gclient sync -Df')
         self.assertEqual(mock_run.call_count, 4)
-        # Last call should be gclient
+        # Last call should be the sync hook
         self.assertEqual(mock_run.call_args_list[-1].args[0][0], 'gclient')
 
 
