@@ -111,6 +111,88 @@ class TestConfig(unittest.TestCase):
         config = dev.load_config()
         self.assertEqual(config['identity']['gitEmail'], 'sample@example.com')
 
+    def test_load_jsonc_preserves_comment_like_strings(self):
+        dev.SAMPLE_CONFIG_FILE.write_text(
+            '// Leading comment\n'
+            '{"remoteUrl": "https://example.com//repo", '
+            '"note": "/* literal */", /* block\ncomment */ "value": true}')
+        self.assertEqual(dev.load_config(), {
+            'remoteUrl': 'https://example.com//repo',
+            'note': '/* literal */',
+            'value': True,
+        })
+
+    def test_load_jsonc_rejects_unterminated_comment(self):
+        dev.SAMPLE_CONFIG_FILE.write_text('{"value": /* unfinished')
+        with self.assertRaises(json.JSONDecodeError):
+            dev.load_config()
+
+    @patch('dev._sync_repo_dir')
+    @patch('dev.get_base_path')
+    def test_bootstrap_path_uses_linked_sync_repository(self, mock_base, mock_sync_root):
+        tool = Path(self.temp_dir) / 'dev_cli'
+        tool.mkdir()
+        mock_base.return_value = self.temp_dir
+        mock_sync_root.return_value = tool
+        config = {'repos': [{
+            'path': 'dev_cli',
+            'pathLinksTo': str(tool),
+            'bootstrap': True,
+        }]}
+        self.assertEqual(dev._bootstrap_repo_path(config), tool)
+
+    @patch('dev._sync_repo_dir')
+    @patch('dev.get_base_path')
+    def test_duplicate_bootstrap_entries_fail_before_sync(self, mock_base, mock_sync_root):
+        mock_base.return_value = self.temp_dir
+        mock_sync_root.return_value = Path(self.temp_dir)
+        config = {'repos': [
+            {'path': 'one', 'bootstrap': True},
+            {'path': 'two', 'bootstrap': True},
+        ]}
+        with patch('sys.stderr', new_callable=StringIO) as errors:
+            self.assertFalse(dev._bootstrap_repo_path(config))
+        mock_sync_root.assert_not_called()
+        self.assertIn('Only one repository', errors.getvalue())
+
+    @patch.dict(os.environ, {'DEVCONFIG': 'skip-machine'})
+    def test_skipped_bootstrap_is_not_updated(self):
+        config = {'repos': [{
+            'path': 'dev_cli',
+            'bootstrap': True,
+            'skipOn': ['skip-machine'],
+        }]}
+        self.assertIsNone(dev._bootstrap_repo_path(config))
+
+    def test_repo_add_rejects_files_and_non_git_directories(self):
+        file = Path(self.temp_dir) / 'note.txt'
+        file.write_text('keep this file')
+        directory = Path(self.temp_dir) / 'not-a-repo'
+        directory.mkdir()
+        for target in (file, directory):
+            with self.subTest(target=target), patch('sys.stderr', new_callable=StringIO) as errors:
+                self.assertEqual(dev.cmd_repo_add(argparse.Namespace(path=str(target))), 1)
+                self.assertIn('Not a Git repository', errors.getvalue())
+        self.assertFalse(dev.OVERRIDE_CONFIG_FILE.exists())
+        self.assertEqual(file.read_text(), 'keep this file')
+
+    def test_repo_tracking_preserves_checkout(self):
+        repo = Path(self.temp_dir) / 'project'
+        subprocess.run(['git', 'init', str(repo)], check=True, capture_output=True)
+        url = 'https://example.com/project.git'
+        subprocess.run(['git', '-C', str(repo), 'remote', 'add', 'origin', url],
+                       check=True, capture_output=True)
+        marker = repo / 'note.txt'
+        marker.write_text('keep this file')
+        dev.save_config({'repos': []})
+        with patch('dev.get_base_path', return_value=self.temp_dir):
+            self.assertEqual(dev.cmd_repo_add(argparse.Namespace(path=str(repo))), 0)
+        self.assertEqual(dev.load_config(), {
+            'repos': [{'path': 'project', 'remoteUrl': url}]})
+        self.assertEqual(dev.cmd_repo_remove(argparse.Namespace(name='project')), 0)
+        self.assertEqual(dev.load_config(), {'repos': []})
+        self.assertEqual(marker.read_text(), 'keep this file')
+
 
 class TestComputeRepoName(unittest.TestCase):
     """Test repo name computation"""
@@ -135,30 +217,6 @@ class TestComputeRepoName(unittest.TestCase):
             
             name = dev.compute_repo_name(src)
             self.assertEqual(name, 'team/src')
-
-
-class TestHasRealConflictMarkers(unittest.TestCase):
-    """Test conflict marker detection"""
-    
-    def test_no_conflicts(self):
-        """Normal content should not be detected as conflict"""
-        content = "# Title\n\n## Section\nSome content\n"
-        self.assertFalse(dev.has_real_conflict_markers(content))
-    
-    def test_real_conflict_markers(self):
-        """Real conflict markers should be detected"""
-        content = "## Section\n<<<<<<< HEAD\nVersion A\n=======\nVersion B\n>>>>>>> branch\n"
-        self.assertTrue(dev.has_real_conflict_markers(content))
-    
-    def test_example_markers_in_backticks(self):
-        """Example markers in backticks should NOT be detected as conflicts"""
-        content = "If you see `<<<<<<<` markers, resolve them.\n"
-        self.assertFalse(dev.has_real_conflict_markers(content))
-    
-    def test_example_markers_in_code_block(self):
-        """Example markers in code blocks should NOT be detected as conflicts"""
-        content = "```\n<<<<<<< branch\n=======\n>>>>>>> other\n```\n"
-        self.assertFalse(dev.has_real_conflict_markers(content))
 
 
 class TestGetBasePath(unittest.TestCase):
@@ -193,13 +251,13 @@ class TestGetBasePath(unittest.TestCase):
 
 class TestResolveOverrideConfigFile(unittest.TestCase):
     """Test override config file resolution: DEV_CONFIG_OVERRIDE env var,
-    else one level up from dev_scripts (regardless of whether it exists yet --
+    else one level up from dev_cli (regardless of whether it exists yet --
     it's the private write target, not just a read lookup)."""
 
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
         self.orig_script_dir = dev.SCRIPT_DIR
-        dev.SCRIPT_DIR = self.temp_dir / 'dev_scripts'
+        dev.SCRIPT_DIR = self.temp_dir / 'dev_cli'
         dev.SCRIPT_DIR.mkdir()
 
     def tearDown(self):
@@ -211,7 +269,7 @@ class TestResolveOverrideConfigFile(unittest.TestCase):
         self.assertEqual(dev._resolve_override_config_file(), Path('/explicit/override.json'))
 
     @patch.dict(os.environ, {}, clear=False)
-    def test_defaults_to_parent_of_dev_scripts(self):
+    def test_defaults_to_parent_of_dev_cli(self):
         os.environ.pop('DEV_CONFIG_OVERRIDE', None)
         self.assertEqual(dev._resolve_override_config_file(), self.temp_dir / 'dev_config.json')
 
@@ -534,582 +592,6 @@ class TestBuildCommitMessage(unittest.TestCase):
         self.assertLessEqual(len(msg), 200)
 
 
-class TestSyncTrackedFiles(unittest.TestCase):
-    """Test timestamp-based bidirectional file sync"""
-
-    def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
-        self.orig_config_dir = dev.CONFIG_DIR
-        self.orig_override_config_file = dev.OVERRIDE_CONFIG_FILE
-        self.orig_sample_config_file = dev.SAMPLE_CONFIG_FILE
-        self.orig_rcfiles_dir = dev.RCFILES_DIR
-        self.orig_home_dir = dev.HOME_DIR
-        dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
-        dev.CONFIG_DIR.mkdir(parents=True)
-        dev.OVERRIDE_CONFIG_FILE = dev.CONFIG_DIR / 'dev_config.json'
-        dev.SAMPLE_CONFIG_FILE = Path(self.temp_dir) / 'no-sample-here.json'
-        dev.RCFILES_DIR = dev.CONFIG_DIR / 'rcfiles'
-
-        self.home = Path(self.temp_dir) / 'home'
-        self.home.mkdir()
-        dev.HOME_DIR = self.home
-
-        dev.save_config({'repos': [], 'files': []})
-
-        self.old_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        self.new_time = datetime(2026, 3, 1, tzinfo=timezone.utc)
-
-    def tearDown(self):
-        dev.CONFIG_DIR = self.orig_config_dir
-        dev.OVERRIDE_CONFIG_FILE = self.orig_override_config_file
-        dev.SAMPLE_CONFIG_FILE = self.orig_sample_config_file
-        dev.RCFILES_DIR = self.orig_rcfiles_dir
-        dev.HOME_DIR = self.orig_home_dir
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-
-    def _set_mtime(self, path, dt):
-        ts = dt.timestamp()
-        os.utime(str(path), (ts, ts))
-
-    def _setup_rcfile(self, rel_path, content):
-        rcfile = dev.RCFILES_DIR / rel_path
-        rcfile.parent.mkdir(parents=True, exist_ok=True)
-        rcfile.write_text(content)
-        return rcfile
-
-    def _setup_home_file(self, rel_path, content, mtime=None):
-        home_file = self.home / rel_path.replace('/', os.sep)
-        home_file.parent.mkdir(parents=True, exist_ok=True)
-        home_file.write_text(content)
-        if mtime:
-            self._set_mtime(home_file, mtime)
-        return home_file
-
-    # --- Timestamp-based direction tests ---
-
-    def _track_file(self, path):
-        """Add a file to the tracked files config."""
-        config = dev.load_config()
-        files = config.get('files', [])
-        if not any(f['path'] == path for f in files):
-            files.append({'path': path})
-        config['files'] = files
-        dev.save_config(config)
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_local_newer_overwrites_remote(self, mock_ts):
-        """When home file mtime > rcfile git timestamp, local wins."""
-        mock_ts.return_value = self.old_time
-        self._track_file('myconfig.md')
-        self._setup_rcfile('myconfig.md', 'old remote')
-        self._setup_home_file('myconfig.md', 'new local', self.new_time)
-
-        result = dev.sync_tracked_files(self.home)
-
-        self.assertTrue(result)
-        rcfile = dev.RCFILES_DIR / 'myconfig.md'
-        self.assertEqual(rcfile.read_text(), 'new local')
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_remote_newer_overwrites_local(self, mock_ts):
-        """When rcfile git timestamp > home file mtime, remote wins."""
-        mock_ts.return_value = self.new_time
-        self._track_file('myconfig.md')
-        self._setup_rcfile('myconfig.md', 'new remote')
-        self._setup_home_file('myconfig.md', 'old local', self.old_time)
-
-        result = dev.sync_tracked_files(self.home)
-
-        self.assertFalse(result)
-        home_file = self.home / 'myconfig.md'
-        self.assertEqual(home_file.read_text(), 'new remote')
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_identical_content_skipped(self, mock_ts):
-        """Same content should not trigger any copy."""
-        mock_ts.return_value = self.old_time
-        self._track_file('myconfig.md')
-        content = '# Same content'
-        self._setup_rcfile('myconfig.md', content)
-        self._setup_home_file('myconfig.md', content)
-
-        result = dev.sync_tracked_files(self.home)
-
-        self.assertFalse(result)
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_only_home_copies_to_rcfiles(self, mock_ts):
-        """File only in home should be copied to rcfiles."""
-        mock_ts.return_value = None
-        self._track_file('myconfig.md')
-        self._setup_home_file('myconfig.md', 'local only', self.new_time)
-
-        result = dev.sync_tracked_files(self.home)
-
-        self.assertTrue(result)
-        rcfile = dev.RCFILES_DIR / 'myconfig.md'
-        self.assertTrue(rcfile.exists())
-        self.assertEqual(rcfile.read_text(), 'local only')
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_only_rcfiles_copies_to_home(self, mock_ts):
-        """File only in rcfiles should be copied to home."""
-        mock_ts.return_value = self.new_time
-        self._track_file('myconfig.md')
-        self._setup_rcfile('myconfig.md', 'remote only')
-
-        result = dev.sync_tracked_files(self.home)
-
-        self.assertFalse(result)
-        home_file = self.home / 'myconfig.md'
-        self.assertTrue(home_file.exists())
-        self.assertEqual(home_file.read_text(), 'remote only')
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_no_git_timestamp_local_wins(self, mock_ts):
-        """No git timestamp (never committed) should default to local wins."""
-        mock_ts.return_value = None
-        self._track_file('myconfig.md')
-        self._setup_rcfile('myconfig.md', 'remote')
-        self._setup_home_file('myconfig.md', 'local', self.new_time)
-
-        result = dev.sync_tracked_files(self.home)
-
-        self.assertTrue(result)
-        rcfile = dev.RCFILES_DIR / 'myconfig.md'
-        self.assertEqual(rcfile.read_text(), 'local')
-
-    @patch('dev.git_path_deleted', return_value=True)
-    @patch('dev.get_rcfile_git_timestamp', return_value=None)
-    def test_remote_deletion_propagates_to_home(self, _mock_ts, _mock_del):
-        """Home file present, mirror deleted in git -> delete the home copy."""
-        self._track_file('docs/foo.md')
-        self._setup_home_file('docs/foo.md', 'stale', self.new_time)
-
-        result = dev.sync_tracked_files(self.home)
-
-        self.assertFalse(result)
-        self.assertFalse((self.home / 'docs' / 'foo.md').exists())
-        self.assertFalse((dev.RCFILES_DIR / 'docs' / 'foo.md').exists())
-
-    @patch('dev.git_path_deleted', return_value=True)
-    @patch('dev.get_rcfile_git_timestamp', return_value=None)
-    def test_remote_deletion_propagates_to_mirror(self, _mock_ts, _mock_del):
-        """Mirror present, home deleted in git -> delete the mirror copy."""
-        self._track_file('docs/foo.md')
-        self._setup_rcfile('docs/foo.md', 'stale mirror')
-
-        result = dev.sync_tracked_files(self.home)
-
-        self.assertFalse(result)
-        self.assertFalse((self.home / 'docs' / 'foo.md').exists())
-        self.assertFalse((dev.RCFILES_DIR / 'docs' / 'foo.md').exists())
-
-    @patch('dev.git_path_deleted', return_value=False)
-    @patch('dev.get_rcfile_git_timestamp', return_value=None)
-    def test_new_local_file_not_treated_as_deletion(self, _mock_ts, _mock_del):
-        """Home file with no git history -> pushed to rcfiles, not deleted."""
-        self._track_file('docs/new.md')
-        self._setup_home_file('docs/new.md', 'brand new', self.new_time)
-
-        result = dev.sync_tracked_files(self.home)
-
-        self.assertTrue(result)
-        self.assertTrue((self.home / 'docs' / 'new.md').exists())
-        self.assertEqual((dev.RCFILES_DIR / 'docs' / 'new.md').read_text(), 'brand new')
-
-    @patch('dev.run_git')
-    def test_git_path_deleted_detects_deletion(self, mock_git):
-        """Untracked path with a D commit in history is a deletion."""
-        mock_git.side_effect = [(False, ''), (True, 'deadbeefcafe')]
-        self.assertTrue(dev.git_path_deleted(self.home, 'foo.md'))
-
-    @patch('dev.run_git')
-    def test_git_path_deleted_false_when_tracked(self, mock_git):
-        """A path git still tracks is not a committed deletion."""
-        mock_git.side_effect = [(True, 'foo.md')]
-        self.assertFalse(dev.git_path_deleted(self.home, 'foo.md'))
-
-    @patch('dev.run_git')
-    def test_git_path_deleted_false_when_never_tracked(self, mock_git):
-        """A path with no git history at all is a new file, not a deletion."""
-        mock_git.side_effect = [(False, ''), (True, '')]
-        self.assertFalse(dev.git_path_deleted(self.home, 'brand-new.md'))
-
-    # --- Home mtime alignment tests ---
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_home_mtime_aligned_after_remote_wins(self, mock_ts):
-        """After remote wins, home file mtime should match remote timestamp."""
-        mock_ts.return_value = self.new_time
-        self._track_file('myconfig.md')
-        self._setup_rcfile('myconfig.md', 'new remote')
-        self._setup_home_file('myconfig.md', 'old local', self.old_time)
-
-        dev.sync_tracked_files(self.home)
-
-        home_file = self.home / 'myconfig.md'
-        home_mtime = datetime.fromtimestamp(home_file.stat().st_mtime, tz=timezone.utc)
-        self.assertAlmostEqual(home_mtime.timestamp(), self.new_time.timestamp(), delta=2)
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_home_mtime_aligned_when_identical(self, mock_ts):
-        """When content is identical, home file mtime should align to remote timestamp."""
-        mock_ts.return_value = self.new_time
-        self._track_file('myconfig.md')
-        content = '# Same content'
-        self._setup_rcfile('myconfig.md', content)
-        self._setup_home_file('myconfig.md', content, self.old_time)
-
-        dev.sync_tracked_files(self.home)
-
-        home_file = self.home / 'myconfig.md'
-        home_mtime = datetime.fromtimestamp(home_file.stat().st_mtime, tz=timezone.utc)
-        self.assertAlmostEqual(home_mtime.timestamp(), self.new_time.timestamp(), delta=2)
-
-    # --- Conflict marker tests ---
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_home_md_conflict_markers_skipped(self, mock_ts):
-        """Home .md with conflict markers should be skipped."""
-        mock_ts.return_value = self.old_time
-        self._track_file('myconfig.md')
-        conflict = "## Section\n<<<<<<< HEAD\nA\n=======\nB\n>>>>>>> branch\n"
-        self._setup_rcfile('myconfig.md', 'original')
-        self._setup_home_file('myconfig.md', conflict, self.new_time)
-
-        result = dev.sync_tracked_files(self.home)
-
-        self.assertFalse(result)
-        rcfile = dev.RCFILES_DIR / 'myconfig.md'
-        self.assertEqual(rcfile.read_text(), 'original')
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_rcfile_md_conflict_markers_skipped(self, mock_ts):
-        """Rcfile .md with conflict markers should be skipped."""
-        mock_ts.return_value = self.new_time
-        self._track_file('myconfig.md')
-        conflict = "## Section\n<<<<<<< HEAD\nA\n=======\nB\n>>>>>>> branch\n"
-        self._setup_rcfile('myconfig.md', conflict)
-        self._setup_home_file('myconfig.md', 'original', self.old_time)
-
-        result = dev.sync_tracked_files(self.home)
-
-        self.assertFalse(result)
-        home_file = self.home / 'myconfig.md'
-        self.assertEqual(home_file.read_text(), 'original')
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_non_md_files_skip_conflict_check(self, mock_ts):
-        """Non-.md files with conflict-like content should still sync."""
-        mock_ts.return_value = self.old_time
-        self._track_file('team/.gclient')
-        conflict = "<<<<<<< HEAD\nstuff\n=======\nother\n>>>>>>> branch\n"
-        self._setup_rcfile('team/.gclient', 'old')
-        team_dir = self.home / 'team'
-        team_dir.mkdir(exist_ok=True)
-        home_file = team_dir / '.gclient'
-        home_file.write_text(conflict)
-        self._set_mtime(home_file, self.new_time)
-
-        result = dev.sync_tracked_files(self.home)
-
-        self.assertTrue(result)
-        rcfile = dev.RCFILES_DIR / 'team' / '.gclient'
-        self.assertEqual(rcfile.read_text(), conflict)
-
-    # --- Parent directory creation tests ---
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_creates_parent_dirs_for_home(self, mock_ts):
-        """Remote -> home should create parent directories."""
-        mock_ts.return_value = self.new_time
-        self._track_file('subdir/config.md')
-        self._setup_rcfile('subdir/config.md', 'remote content')
-
-        dev.sync_tracked_files(self.home)
-
-        home_file = self.home / 'subdir' / 'config.md'
-        self.assertTrue(home_file.exists())
-        self.assertEqual(home_file.read_text(), 'remote content')
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_creates_parent_dirs_for_rcfiles(self, mock_ts):
-        """Home -> rcfiles should create parent directories."""
-        mock_ts.return_value = None
-        self._track_file('subdir/config.md')
-        self._setup_home_file('subdir/config.md', 'local content', self.new_time)
-
-        result = dev.sync_tracked_files(self.home)
-
-        self.assertTrue(result)
-        rcfile = dev.RCFILES_DIR / 'subdir' / 'config.md'
-        self.assertTrue(rcfile.exists())
-
-    # --- User file tests ---
-
-    def test_no_builtin_files(self):
-        all_files = dev._get_all_tracked_files()
-        self.assertEqual(all_files, [])
-
-    def test_user_files_tracked(self):
-        self._track_file('team/.gclient')
-        all_files = dev._get_all_tracked_files()
-        paths = [f['path'] for f in all_files]
-        self.assertIn('team/.gclient', paths)
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_user_file_local_newer(self, mock_ts):
-        """User-added files should follow the same timestamp logic."""
-        mock_ts.return_value = self.old_time
-        self._track_file('team/.gclient')
-        self._setup_rcfile('team/.gclient', 'old remote')
-        team_dir = self.home / 'team'
-        team_dir.mkdir(exist_ok=True)
-        home_file = team_dir / '.gclient'
-        home_file.write_text('new local')
-        self._set_mtime(home_file, self.new_time)
-
-        result = dev.sync_tracked_files(self.home)
-
-        self.assertTrue(result)
-        rcfile = dev.RCFILES_DIR / 'team' / '.gclient'
-        self.assertEqual(rcfile.read_text(), 'new local')
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_user_file_remote_newer(self, mock_ts):
-        """User-added files should follow the same timestamp logic."""
-        mock_ts.return_value = self.new_time
-        dev.save_config({
-            'repos': [],
-            'files': [{'path': 'team/.gclient'}]
-        })
-        self._setup_rcfile('team/.gclient', 'new remote')
-        team_dir = self.home / 'team'
-        team_dir.mkdir(exist_ok=True)
-        home_file = team_dir / '.gclient'
-        home_file.write_text('old local')
-        self._set_mtime(home_file, self.old_time)
-
-        result = dev.sync_tracked_files(self.home)
-
-        self.assertFalse(result)
-        self.assertEqual(home_file.read_text(), 'new remote')
-
-    @patch('dev.get_rcfile_git_timestamp')
-    def test_missing_file_skipped(self, mock_ts):
-        """Non-existent file with no rcfile should be skipped."""
-        mock_ts.return_value = None
-        dev.save_config({
-            'repos': [],
-            'files': [{'path': 'nonexistent.txt'}]
-        })
-        result = dev.sync_tracked_files(self.home)
-        self.assertFalse(result)
-
-
-
-class TestAddTrackedFile(unittest.TestCase):
-    """Test _add_tracked_file"""
-
-    def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
-        self.orig_config_dir = dev.CONFIG_DIR
-        self.orig_override_config_file = dev.OVERRIDE_CONFIG_FILE
-        self.orig_sample_config_file = dev.SAMPLE_CONFIG_FILE
-        self.orig_rcfiles_dir = dev.RCFILES_DIR
-        self.orig_home_dir = dev.HOME_DIR
-        dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
-        dev.CONFIG_DIR.mkdir(parents=True)
-        dev.OVERRIDE_CONFIG_FILE = dev.CONFIG_DIR / 'dev_config.json'
-        dev.SAMPLE_CONFIG_FILE = Path(self.temp_dir) / 'no-sample-here.json'
-        dev.RCFILES_DIR = dev.CONFIG_DIR / 'rcfiles'
-        dev.HOME_DIR = Path(self.temp_dir) / 'home'
-        dev.HOME_DIR.mkdir()
-
-        self.workspace = Path(self.temp_dir) / 'workspace'
-        self.workspace.mkdir()
-
-        dev.save_config({'repos': [],
-                         'workspaceRoots': {'test': str(self.workspace)}})
-
-    def tearDown(self):
-        dev.CONFIG_DIR = self.orig_config_dir
-        dev.OVERRIDE_CONFIG_FILE = self.orig_override_config_file
-        dev.SAMPLE_CONFIG_FILE = self.orig_sample_config_file
-        dev.RCFILES_DIR = self.orig_rcfiles_dir
-        dev.HOME_DIR = self.orig_home_dir
-        import shutil
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-
-    @patch.dict(os.environ, {'DEVCONFIG': 'test'})
-    def test_add_tracked_file(self):
-        """Adding a file should store it in config and rcfiles"""
-
-        team_dir = self.workspace / 'team'
-        team_dir.mkdir()
-        gclient = team_dir / '.gclient'
-        gclient.write_text('solutions = [{"name": "src"}]')
-
-        result = dev._add_tracked_file(gclient)
-
-        self.assertEqual(result, 0)
-        config = dev.load_config()
-        self.assertEqual(len(config.get('files', [])), 1)
-        self.assertEqual(config['files'][0]['path'], 'team/.gclient')
-
-        rcfile = dev.RCFILES_DIR / 'team' / '.gclient'
-        self.assertTrue(rcfile.exists())
-
-    @patch.dict(os.environ, {'DEVCONFIG': 'test'})
-    def test_add_file_replaces_existing(self):
-        """Adding same file again should replace the entry"""
-
-        team_dir = self.workspace / 'team'
-        team_dir.mkdir()
-        gclient = team_dir / '.gclient'
-        gclient.write_text('v1')
-
-        dev._add_tracked_file(gclient)
-        gclient.write_text('v2')
-        dev._add_tracked_file(gclient)
-
-        config = dev.load_config()
-        self.assertEqual(len(config.get('files', [])), 1)
-        rcfile = dev.RCFILES_DIR / 'team' / '.gclient'
-        self.assertEqual(rcfile.read_text(), 'v2')
-
-    @patch.dict(os.environ, {'DEVCONFIG': 'test'})
-    def test_add_file_outside_workspace_fails(self):
-        """Adding a file outside workspace should fail"""
-
-        outside = Path(self.temp_dir) / 'outside.txt'
-        outside.write_text('test')
-
-        result = dev._add_tracked_file(outside)
-        self.assertEqual(result, 1)
-
-    @patch.dict(os.environ, {'DEVCONFIG': 'test'})
-    def test_add_file_under_symlinked_dir(self):
-        """A file under a symlinked workspace subdir stays workspace-relative.
-
-        Regression: the workspace `docs/` is a symlink to a dir outside the
-        workspace; resolving symlinks would push the path outside the root.
-        """
-        external = Path(self.temp_dir) / 'external_docs'
-        external.mkdir()
-        (external / 'note.md').write_text('hi')
-        link = self.workspace / 'docs'
-        try:
-            os.symlink(external, link, target_is_directory=True)
-        except (OSError, NotImplementedError):
-            self.skipTest('symlink creation not permitted on this machine')
-
-        result = dev._add_tracked_file(link / 'note.md')
-
-        self.assertEqual(result, 0)
-        config = dev.load_config()
-        self.assertEqual([f['path'] for f in config['files']], ['docs/note.md'])
-
-    @patch.dict(os.environ, {'DEVCONFIG': 'test'})
-    def test_add_directory_tracks_whole_tree(self):
-        """Adding a directory records one entry and copies the tree to rcfiles."""
-        docs = self.workspace / 'docs'
-        (docs / 'sub').mkdir(parents=True)
-        (docs / 'a.md').write_text('a')
-        (docs / 'sub' / 'b.md').write_text('b')
-
-        result = dev._add_tracked_file(docs)
-
-        self.assertEqual(result, 0)
-        config = dev.load_config()
-        self.assertEqual([f['path'] for f in config['files']], ['docs'])
-        self.assertTrue((dev.RCFILES_DIR / 'docs' / 'a.md').exists())
-        self.assertTrue((dev.RCFILES_DIR / 'docs' / 'sub' / 'b.md').exists())
-
-    @patch.dict(os.environ, {'DEVCONFIG': 'test'})
-    def test_directory_entry_expands_loose_files(self):
-        """A tracked directory expands to every loose file, including new ones."""
-        docs = self.workspace / 'docs'
-        docs.mkdir()
-        (docs / 'a.md').write_text('a')
-        dev._add_tracked_file(docs)
-
-        paths = sorted(f['path'] for f in dev._get_all_tracked_files())
-        self.assertEqual(paths, ['docs/a.md'])
-
-        # A file added later (here, straight into rcfiles) is picked up with no re-add.
-        (dev.RCFILES_DIR / 'docs' / 'c.md').write_text('c')
-        paths = sorted(f['path'] for f in dev._get_all_tracked_files())
-        self.assertEqual(paths, ['docs/a.md', 'docs/c.md'])
-
-    @patch.dict(os.environ, {'DEVCONFIG': 'test'})
-    def test_directory_entry_dedupes_explicit_child(self):
-        """An explicit file entry also covered by a tracked dir isn't duplicated."""
-        docs = self.workspace / 'docs'
-        docs.mkdir()
-        (docs / 'a.md').write_text('a')
-        config = dev.load_config()
-        config['files'] = [{'path': 'docs/a.md'}, {'path': 'docs'}]
-        dev.save_config(config)
-        # Mirror into rcfiles so expansion sees the file.
-        (dev.RCFILES_DIR / 'docs').mkdir(parents=True)
-        (dev.RCFILES_DIR / 'docs' / 'a.md').write_text('a')
-
-        paths = [f['path'] for f in dev._get_all_tracked_files()]
-        self.assertEqual(paths, ['docs/a.md'])
-
-    @patch.dict(os.environ, {'DEVCONFIG': 'test'})
-    @patch('dev.run_git', return_value=(True, ''))
-    def test_delete_removes_both_copies(self, _mock_git):
-        """`delete` removes a dir-covered file from workspace and rcfiles."""
-        dev.HOME_DIR = self.workspace  # workspace/docs stands in for the ~/docs symlink
-        docs = self.workspace / 'docs'
-        docs.mkdir()
-        (docs / 'foo.md').write_text('foo')
-        (dev.RCFILES_DIR / 'docs').mkdir(parents=True)
-        (dev.RCFILES_DIR / 'docs' / 'foo.md').write_text('foo')
-        dev.save_config({'repos': [], 'files': [{'path': 'docs'}],
-                         'workspaceRoots': {'test': str(self.workspace)}})
-
-        args = argparse.Namespace(path='docs/foo.md')
-        result = dev.cmd_repo_delete(args)
-
-        self.assertEqual(result, 0)
-        self.assertFalse((docs / 'foo.md').exists())
-        self.assertFalse((dev.RCFILES_DIR / 'docs' / 'foo.md').exists())
-        # Not resurrected: expansion no longer lists it.
-        self.assertEqual([f['path'] for f in dev._get_all_tracked_files()], [])
-
-    @patch.dict(os.environ, {'DEVCONFIG': 'test'})
-    @patch('dev.run_git', return_value=(True, ''))
-    def test_delete_untracked_file_fails(self, _mock_git):
-        """`delete` refuses a path that isn't a tracked file."""
-        (self.workspace / 'loose.md').write_text('x')
-        result = dev.cmd_repo_delete(argparse.Namespace(path='loose.md'))
-        self.assertEqual(result, 1)
-        self.assertTrue((self.workspace / 'loose.md').exists())
-
-    @patch.dict(os.environ, {'DEVCONFIG': 'test'})
-    @patch('dev.run_git', return_value=(True, ''))
-    def test_delete_drops_explicit_entry(self, _mock_git):
-        """`delete` on an explicitly-tracked file also removes its config entry."""
-        dev.HOME_DIR = self.workspace
-        docs = self.workspace / 'docs'
-        docs.mkdir()
-        (docs / 'foo.md').write_text('foo')
-        (dev.RCFILES_DIR / 'docs').mkdir(parents=True)
-        (dev.RCFILES_DIR / 'docs' / 'foo.md').write_text('foo')
-        dev.save_config({'repos': [], 'files': [{'path': 'docs/foo.md'}],
-                         'workspaceRoots': {'test': str(self.workspace)}})
-
-        result = dev.cmd_repo_delete(argparse.Namespace(path='docs/foo.md'))
-
-        self.assertEqual(result, 0)
-        config = dev.load_config()
-        self.assertEqual(config.get('files', []), [])
-
-
 class TestAdoTokenCache(unittest.TestCase):
     """Tests for the ADO token cache helpers — especially the JWT-aware expiry."""
 
@@ -1285,9 +767,9 @@ class TestShellWorkspace(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name)
-        tool = self.home / 'dev_scripts'
+        tool = self.home / 'dev_cli'
         (tool / 'shell').mkdir(parents=True)
-        for name in ('dev', 'dev.py', 'dev_config.json', 'shell/zsh.sh'):
+        for name in ('dev', 'dev.py', 'dev_config.jsonc', 'shell/zsh.sh'):
             shutil.copy2(Path(__file__).parent / name, tool / name)
         tools = self.home / 'bin'
         tools.mkdir()
@@ -1303,7 +785,7 @@ class TestShellWorkspace(unittest.TestCase):
     def shell(self):
         return subprocess.run(
             [shutil.which('zsh'), '-f', '-c',
-             'source "$HOME/dev_scripts/shell/zsh.sh" || exit $?; '
+             'source "$HOME/dev_cli/shell/zsh.sh" || exit $?; '
              'printf "%s\\n" "$DEVCONFIG" "$DEV" "$PWD" "${PRIVATE_HOOK:-no}"'],
             env=self.env, text=True, capture_output=True)
 
@@ -1346,12 +828,16 @@ class TestShellWorkspace(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_copy_config_and_initialize_profile(self):
-        tool = self.home / 'dev_scripts'
-        sample_bytes = (tool / 'dev_config.json').read_bytes()
-        shutil.copy2(tool / 'dev_config.json', self.home / 'dev_config.json')
-        config = json.loads(sample_bytes)
+        tool = self.home / 'dev_cli'
+        subprocess.run(['git', 'init', str(tool)], check=True, capture_output=True)
+        subprocess.run(['git', '-C', str(tool), 'remote', 'add', 'origin',
+                        'https://example.com/dev_cli.git'], check=True, capture_output=True)
+        sample_bytes = (tool / 'dev_config.jsonc').read_bytes()
+        shutil.copy2(tool / 'dev_config.jsonc', self.home / 'dev_config.json')
+        config = dev.load_jsonc(tool / 'dev_config.jsonc')
         self.assertEqual(config['workspaceRoots']['example-machine'], '$HOME')
-        self.assertEqual(config['repos'], [])
+        self.assertEqual(config['repos'], [
+            {'path': 'dev_cli', 'pathLinksTo': '$HOME/dev_cli', 'bootstrap': True}])
         self.assertEqual(config['identity']['username'], '')
         result = subprocess.run(
             [sys.executable, str(tool / 'dev.py'), 'init'],
@@ -1363,8 +849,9 @@ class TestShellWorkspace(unittest.TestCase):
             env=self.env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(str(self.home), result.stdout)
-        self.assertIn('No repositories tracked yet', result.stdout)
-        self.assertEqual((tool / 'dev_config.json').read_bytes(), sample_bytes)
+        self.assertIn('dev_cli', result.stdout)
+        self.assertIn('https://example.com/dev_cli.git', result.stdout)
+        self.assertEqual((tool / 'dev_config.jsonc').read_bytes(), sample_bytes)
 
 
 class TestCmdInit(unittest.TestCase):
@@ -1402,7 +889,7 @@ class TestCmdInit(unittest.TestCase):
         bashrc = self.home / '.bashrc'
         with patch('dev.Path.home', return_value=self.home):
             self.assertEqual(dev._init_unix(), 0)
-        self.assertIn('dev_scripts/shell/bash.sh', bashrc.read_text())
+        self.assertIn('dev_cli/shell/bash.sh', bashrc.read_text())
 
     @patch.dict(os.environ, {'SHELL': '/bin/bash'})
     @patch('dev.get_os_type', return_value='linux')
@@ -1414,7 +901,7 @@ class TestCmdInit(unittest.TestCase):
             self.assertEqual(dev._init_unix(), 0)
         content = bashrc.read_text()
         self.assertIn('# existing', content)
-        self.assertIn('dev_scripts/shell/bash.sh', content)
+        self.assertIn('dev_cli/shell/bash.sh', content)
 
     @patch.dict(os.environ, {'SHELL': '/bin/bash'})
     @patch('dev.get_os_type', return_value='linux')
@@ -1424,7 +911,7 @@ class TestCmdInit(unittest.TestCase):
         bashrc.write_text(f'{dev.BASHRC_SOURCE_LINE}\n')
         with patch('dev.Path.home', return_value=self.home):
             self.assertEqual(dev._init_unix(), 0)
-        self.assertEqual(bashrc.read_text().count('dev_scripts/shell/bash.sh'), 2)
+        self.assertEqual(bashrc.read_text().count('dev_cli/shell/bash.sh'), 2)
 
     @patch.dict(os.environ, {'SHELL': '/bin/bash'})
     @patch('subprocess.run')
@@ -1468,8 +955,8 @@ class TestCmdInit(unittest.TestCase):
 class TestSelfUpdate(unittest.TestCase):
 
     def setUp(self):
-        for target, value in (('_sync_repo_dir', dev.SCRIPT_DIR),
-                              ('_sync_submodules', True),
+        self.repo_path = dev.SCRIPT_DIR
+        for target, value in (('_sync_submodules', True),
                               ('_sync_upstream', 'origin/main')):
             patcher = patch(f'dev.{target}', return_value=value)
             patcher.start()
@@ -1484,7 +971,7 @@ class TestSelfUpdate(unittest.TestCase):
                 return (True, '0\t0')
             return (True, '')
         mock_git.side_effect = side_effect
-        self.assertTrue(dev._self_update())
+        self.assertTrue(dev._self_update(self.repo_path))
         calls = [c[0][1:] for c in mock_git.call_args_list]
         self.assertIn(('rev-parse', 'HEAD'), calls)
         self.assertNotIn('rebase', str(calls))
@@ -1498,7 +985,7 @@ class TestSelfUpdate(unittest.TestCase):
                 return (True, 'abc123')
             return (True, '')
         mock_git.side_effect = side_effect
-        self.assertFalse(dev._self_update())
+        self.assertFalse(dev._self_update(self.repo_path))
 
     @patch('subprocess.run')
     @patch('dev.get_default_branch', return_value='main')
@@ -1524,7 +1011,7 @@ class TestSelfUpdate(unittest.TestCase):
         mock_subprocess.return_value = subprocess.CompletedProcess(args=[], returncode=0)
         os.environ.pop('_DEV_PULLED_RCFILES', None)
         with self.assertRaises(SystemExit) as ctx:
-            dev._self_update()
+            dev._self_update(self.repo_path)
         self.assertEqual(ctx.exception.code, 0)
         mock_subprocess.assert_called_once()
         self.assertEqual(os.environ.pop('_DEV_PULLED_RCFILES'), 'abc123 some commit')
@@ -1551,7 +1038,7 @@ class TestSelfUpdate(unittest.TestCase):
         mock_subprocess.return_value = subprocess.CompletedProcess(args=[], returncode=0)
         os.environ.pop('_DEV_PULLED_RCFILES', None)
         with self.assertRaises(SystemExit):
-            dev._self_update()
+            dev._self_update(self.repo_path)
         self.assertNotIn('_DEV_PULLED_RCFILES', os.environ)
 
 
@@ -1572,11 +1059,11 @@ class TestSyncSubmodules(unittest.TestCase):
 
     @patch('dev.run_git')
     def test_update_failure_skips_commit(self, mock_git):
-        (self.base_path / '.gitmodules').write_text('[submodule "dev_scripts"]\n')
+        (self.base_path / '.gitmodules').write_text('[submodule "dev_cli"]\n')
 
         def side_effect(repo, *args):
             if args[0] == 'config':
-                return (True, 'submodule.dev_scripts.path dev_scripts')
+                return (True, 'submodule.dev_cli.path dev_cli')
             if args[:2] == ('submodule', 'update'):
                 return (False, 'network error')
             self.fail(f"unexpected git call: {args}")
@@ -1608,8 +1095,8 @@ class TestSplitRepositorySync(unittest.TestCase):
         self.git(self.base, 'clone', '--bare', str(self.tool), str(self.remote))
         self.git(self.tool, 'remote', 'add', 'origin', str(self.remote))
         self.git(self.parent, '-c', 'protocol.file.allow=always', 'submodule', 'add',
-                 '-b', 'main', str(self.remote), 'dev_scripts')
-        self.child = self.parent / 'dev_scripts'
+                 '-b', 'main', str(self.remote), 'dev_cli')
+        self.child = self.parent / 'dev_cli'
         self.git(self.child, 'config', 'user.name', 'Test')
         self.git(self.child, 'config', 'user.email', 'test@example.com')
         self.git(self.parent, 'commit', '-am', 'add submodule')
@@ -1648,7 +1135,7 @@ class TestSplitRepositorySync(unittest.TestCase):
 
     def test_dirty_child_blocks_parent_sync(self):
         (self.child / 'dev.py').write_text('uncommitted work\n')
-        self.assertFalse(dev._self_update())
+        self.assertFalse(dev._self_update(self.parent))
         self.assertEqual((self.child / 'dev.py').read_text(), 'uncommitted work\n')
         self.assertEqual(self.git(self.parent, 'diff', '--cached'), '')
 
@@ -1664,7 +1151,7 @@ class TestSplitRepositorySync(unittest.TestCase):
         clone = self.base / 'fresh-home'
         self.git(self.base, 'clone', str(self.parent_remote), str(clone))
         self.assertTrue(dev._sync_submodules(clone))
-        self.assertTrue((clone / 'dev_scripts' / 'dev.py').is_file())
+        self.assertTrue((clone / 'dev_cli' / 'dev.py').is_file())
 
     def test_push_updates_parent_feature_branch_only(self):
         branch = 'user/test/split'
@@ -1679,6 +1166,23 @@ class TestSplitRepositorySync(unittest.TestCase):
         self.assertEqual(self.git(self.parent_remote, 'rev-parse', 'main'), main_before)
         self.assertEqual(self.git(self.remote, 'rev-parse', 'main'), tool_before)
         self.assertEqual(dev._sync_upstream(self.parent), f'origin/{branch}')
+
+    def test_bootstrap_entry_needs_no_url_or_second_sync(self):
+        config = {'repos': [{
+            'path': 'home',
+            'pathLinksTo': str(self.parent),
+            'bootstrap': True,
+        }]}
+        with patch('dev._self_update', return_value=True), \
+             patch('dev.sync_rcfiles_push', return_value=True), \
+             patch('dev.load_config', return_value=config), \
+             patch('dev.get_base_path', return_value=str(self.parent)), \
+             patch('dev._sync_repo_latest') as repo_sync, \
+             patch('dev._ensure_link'), \
+             patch('dev.emit_ok') as success:
+            self.assertEqual(dev.cmd_repo_sync(argparse.Namespace()), 0)
+        success.assert_called_once_with('home (updated during bootstrap)')
+        repo_sync.assert_not_called()
 
 
 class TestEnsureLink(unittest.TestCase):
@@ -2668,7 +2172,7 @@ class TestNormalizationSync(unittest.TestCase):
         self.assertEqual((self.repo / 'notes.txt').read_bytes(), b'local work\n')
 
     def test_repo_sync_command_reports_success_and_specific_skip_reasons(self):
-        config = {'repos': [{'path': 'repo', 'remoteUrl': str(self.upstream)}], 'files': []}
+        config = {'repos': [{'path': 'repo', 'remoteUrl': str(self.upstream)}]}
         with patch('dev._self_update'), patch('dev.sync_rcfiles_push'), \
              patch('dev.load_config', return_value=config), \
              patch('dev.get_base_path', return_value=str(self.root)), \

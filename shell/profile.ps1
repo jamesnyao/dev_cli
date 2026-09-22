@@ -1,7 +1,7 @@
 # Generic PowerShell environment. Sourced from ~/.psrc.ps1 (written by `dev init`).
 # Work-specific setup lives in a private hook sourced at the very end, if present.
 
-$SETUP = "$env:USERPROFILE\dev_scripts\setup"
+$SETUP = "$env:USERPROFILE\dev_cli\setup"
 $DevScripts = Split-Path $PSScriptRoot -Parent
 if (($env:PATH -split ';') -notcontains $DevScripts) {
   $env:PATH = "$DevScripts;$env:PATH"

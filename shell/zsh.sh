@@ -30,7 +30,7 @@ if [[ "$platform" == "linux" ]]; then
 fi
 
 # Dev CLI
-export PATH="$HOME/dev_scripts:$PATH"
+export PATH="$HOME/dev_cli:$PATH"
 export DEVCONFIG="${DEVCONFIG:-example-machine}"
 DEV="$(dev repo root)" || return
 export DEV
