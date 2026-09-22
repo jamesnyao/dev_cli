@@ -17,7 +17,7 @@ sample configuration one directory up, and edit that private copy. Replace
 
 ```bash
 git clone "<clone-url>" "$HOME/dev_cli"
-cp -n "$HOME/dev_cli/dev_config.jsonc" "$HOME/dev_config.json"
+cp -n "$HOME/dev_cli/dev_config.json" "$HOME/dev_config.json"
 ```
 
 Edit `~/dev_config.json`, then initialize the shell redirects:
@@ -33,7 +33,7 @@ In PowerShell:
 ```powershell
 git clone "<clone-url>" "$HOME\dev_cli"
 if (-not (Test-Path "$HOME\dev_config.json")) {
-  Copy-Item "$HOME\dev_cli\dev_config.jsonc" "$HOME\dev_config.json"
+  Copy-Item "$HOME\dev_cli\dev_config.json" "$HOME\dev_config.json"
 }
 notepad "$HOME\dev_config.json"
 py "$HOME\dev_cli\dev.py" init
@@ -63,7 +63,7 @@ set `DEVCONFIG=example-machine` when running workspace commands this way.
 
 ## Configuration
 
-`dev_config.jsonc` inside this repository is a read-only sample. Real settings
+`dev_config.json` inside this repository is a read-only sample. Real settings
 belong in `../dev_config.json`, or the file named by `DEV_CONFIG_OVERRIDE`.
 Override dictionary keys merge shallowly; the `repos` array replaces the sample
 list completely. CLI configuration writes target only the override.
@@ -105,12 +105,11 @@ Set `identity.username` to override the environment-derived username. A custom
 Git author name and email remain your Git settings; the CLI does not invent an
 email address or modify those settings during onboarding.
 
-Use `dev repo add <local-repo-path>` to track an existing Git checkout, or add
-`path` and `remoteUrl` entries to `repos`. `skipOn` can exclude a repository from
-selected machines. `remoteUrl` is required to clone a missing repository;
-existing checkouts use their own origin. Set `bootstrap: true` on at most one
-entry to update that checkout before other repositories. No bootstrap entry means
-no automatic tool update. The sample uses the tool checkout as its bootstrap.
+Use `dev repo add <local-repo-path>` to add existing Git checkouts to `repos`.
+It records the repository path and origin; run `dev repo add -h` for the
+repository-entry options. `bootstrap: true` is supported on at most one entry
+to update that checkout before other repositories. No bootstrap entry means no
+automatic tool update. The sample uses the tool checkout as its bootstrap.
 
 The loader accepts strict JSON and JSONC comments. `dev` writes only the private
 override and rewrites it as standard JSON, so keep explanatory comments in the
@@ -135,7 +134,7 @@ while reusing this repository as a submodule:
 │   ├── hooks.sh                # Optional zsh customization
 │   └── hooks.ps1               # Optional PowerShell customization
 └── dev_cli/                # This repository
-    ├── dev_config.jsonc        # Shared annotated sample, never rewritten
+    ├── dev_config.json         # Shared annotated sample, never rewritten
     ├── shell/
     └── setup/
 ```

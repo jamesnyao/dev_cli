@@ -769,7 +769,7 @@ class TestShellWorkspace(unittest.TestCase):
         self.home = Path(self.temp.name)
         tool = self.home / 'dev_cli'
         (tool / 'shell').mkdir(parents=True)
-        for name in ('dev', 'dev.py', 'dev_config.jsonc', 'shell/zsh.sh'):
+        for name in ('dev', 'dev.py', 'dev_config.json', 'shell/zsh.sh'):
             shutil.copy2(Path(__file__).parent / name, tool / name)
         tools = self.home / 'bin'
         tools.mkdir()
@@ -832,9 +832,9 @@ class TestShellWorkspace(unittest.TestCase):
         subprocess.run(['git', 'init', str(tool)], check=True, capture_output=True)
         subprocess.run(['git', '-C', str(tool), 'remote', 'add', 'origin',
                         'https://example.com/dev_cli.git'], check=True, capture_output=True)
-        sample_bytes = (tool / 'dev_config.jsonc').read_bytes()
-        shutil.copy2(tool / 'dev_config.jsonc', self.home / 'dev_config.json')
-        config = dev.load_jsonc(tool / 'dev_config.jsonc')
+        sample_bytes = (tool / 'dev_config.json').read_bytes()
+        shutil.copy2(tool / 'dev_config.json', self.home / 'dev_config.json')
+        config = dev.load_jsonc(tool / 'dev_config.json')
         self.assertEqual(config['workspaceRoots']['example-machine'], '$HOME')
         self.assertEqual(config['repos'], [
             {'path': 'dev_cli', 'pathLinksTo': '$HOME/dev_cli', 'bootstrap': True}])
@@ -851,7 +851,7 @@ class TestShellWorkspace(unittest.TestCase):
         self.assertIn(str(self.home), result.stdout)
         self.assertIn('dev_cli', result.stdout)
         self.assertIn('https://example.com/dev_cli.git', result.stdout)
-        self.assertEqual((tool / 'dev_config.jsonc').read_bytes(), sample_bytes)
+        self.assertEqual((tool / 'dev_config.json').read_bytes(), sample_bytes)
 
 
 class TestCmdInit(unittest.TestCase):

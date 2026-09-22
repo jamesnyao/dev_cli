@@ -129,7 +129,7 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 # schema) out of the box. Real, private values live in OVERRIDE_CONFIG_FILE,
 # one level up -- e.g. a private parent repo that has dev_cli as a git
 # submodule -- and win on top of the sample when both define the same key.
-SAMPLE_CONFIG_FILE = SCRIPT_DIR / 'dev_config.jsonc'
+SAMPLE_CONFIG_FILE = SCRIPT_DIR / 'dev_config.json'
 
 
 def expand_config_path(value):
@@ -1464,7 +1464,7 @@ def cmd_repo_root(args):
 
 def cmd_config_get(args):
     """Print a dotted-path value from the merged config (e.g. `identity.gitEmail`):
-    SAMPLE_CONFIG_FILE (dev_cli/dev_config.jsonc) overridden by
+    SAMPLE_CONFIG_FILE (dev_cli/dev_config.json) overridden by
     OVERRIDE_CONFIG_FILE (a private dev_config.json one level up).
 
     Lets non-Python callers (shell/PowerShell setup scripts) read the same
