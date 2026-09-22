@@ -1,4 +1,7 @@
-if [[ ! -d "$HOME/.oh-my-zsh" ]]; then
+if [[ ! -f "$HOME/.oh-my-zsh/oh-my-zsh.sh" ]]; then
+  if [[ -d "$HOME/.oh-my-zsh" ]]; then
+    mv "$HOME/.oh-my-zsh" "$HOME/.oh-my-zsh.bak.$(date +%Y%m%d%H%M%S)"
+  fi
   KEEP_ZSHRC=yes sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
 fi
 if [[ ! -d "$HOME/.oh-my-zsh/custom/plugins/zsh-autosuggestions" ]]; then
