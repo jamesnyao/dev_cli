@@ -82,6 +82,20 @@ than publishing a pointer other machines can't fetch.
 
 Commit and push tool changes before syncing the parent.
 
+Repository update or clone failures return a nonzero exit status; intentional
+skips do not. A cached `origin/HEAD` pointing to a deleted branch is ignored,
+allowing the existing `main` or `master` fallback after a remote change.
+
+`pathLinksTo` is the real checkout/clone destination, not another workspace
+clone. For a home dotfiles repository, configure `path: "home"` and
+`pathLinksTo: "~"`: with a separate workspace, `<workspace>/home` is only a
+link to the home checkout. Registering that link with `dev repo add` preserves
+the target and existing settings such as `bootstrap` and `skipOn`.
+
+Bootstrap checkouts must already be initialized at their configured destination.
+A nonempty home directory without Git is never overwritten or replaced by a
+workspace clone; initialize the home overlay explicitly before running sync.
+
 First migration or fresh parent clone:
 
 ```bash

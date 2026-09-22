@@ -290,8 +290,8 @@ def _bootstrap_repo_path(config):
     base_path = Path(get_base_path(config))
     path = entry.get('pathLinksTo')
     repo_path = Path(expand_config_path(path)) if path else base_path / entry['path']
-    if not repo_path.exists():
-        emit_error(f"Bootstrap repository is missing: {repo_path}")
+    if not (repo_path / '.git').exists():
+        emit_error(f"Bootstrap repository is not initialized at {repo_path}; initialize it there before syncing.")
         return False
     if repo_path.resolve() != _sync_repo_dir().resolve():
         emit_error(f"Bootstrap repository must be the sync repository: {repo_path}")
@@ -371,7 +371,9 @@ def get_default_branch(repo_path, configured=None):
             return configured
     success, ref = run_git(repo_path, 'symbolic-ref', 'refs/remotes/origin/HEAD')
     if success and ref:
-        return ref.replace('refs/remotes/origin/', '')
+        exists, _ = run_git(repo_path, 'show-ref', '--verify', '--quiet', ref)
+        if exists:
+            return ref.replace('refs/remotes/origin/', '')
     for branch in ['main', 'master']:
         success, _ = run_git(repo_path, 'show-ref', '--verify', '--quiet', f'refs/remotes/origin/{branch}')
         if success:
@@ -950,12 +952,17 @@ def cmd_repo_add(args):
 
     base_path = get_base_path()
     repo_name = compute_repo_name(display_path, base_path)
+    entry = next((dict(repo) for repo in config['repos'] if repo['path'] == repo_name), {})
     config['repos'] = [r for r in config['repos'] if r['path'] != repo_name]
 
-    entry = {
-        'path': repo_name,
-        'remoteUrl': remote_url,
-    }
+    entry.update(path=repo_name, remoteUrl=remote_url)
+    if display_path != target_path:
+        try:
+            relative = target_path.relative_to(Path.home().resolve())
+        except ValueError:
+            entry['pathLinksTo'] = str(target_path)
+        else:
+            entry['pathLinksTo'] = '~' if relative == Path('.') else f'$HOME/{relative.as_posix()}'
     if getattr(args, 'slow_sync', False):
         entry['slowSync'] = True
     if getattr(args, 'sync_command', None):
@@ -1323,7 +1330,13 @@ def cmd_repo_sync(args):
             skipped += 1
             continue
 
-        if repo_path.exists():
+        if repo_path.exists() and not (repo_path / '.git').exists():
+            if not repo_path.is_dir() or any(repo_path.iterdir()):
+                emit_error(f"Cannot clone {name}: {repo_path} is not an empty directory or a Git checkout")
+                failed += 1
+                continue
+
+        if (repo_path / '.git').exists():
             if link_to is not None:
                 _ensure_link(link_path, repo_path)
             if bootstrap_path and repo_path.resolve() == bootstrap_path.resolve():
@@ -1429,7 +1442,7 @@ def cmd_repo_sync(args):
     failed_str = f"{Colors.RED}{failed}{Colors.NC}" if failed > 0 else str(failed)
     print(f"Synced: {synced_str} | Skipped: {skipped_str} | Failed: {failed_str}")
 
-    return 0
+    return 1 if failed else 0
 
 
 def cmd_repo_status(args):
