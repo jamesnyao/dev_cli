@@ -23,19 +23,18 @@ py "$HOME\dev_cli\dev.py" init
 notepad "$HOME\dev_config.json"
 ```
 
-Open a new terminal and run `dev repo root` / `dev repo list`. The sample is
-usable as-is: workspace root is `$HOME`, the only repo is this `dev_cli`
-checkout, and identity is derived from the environment.
+Open a new terminal and run `dev repo root` / `dev repo list`. The sample
+works as-is (`$HOME` workspace, this checkout as its only repo).
 
-`dev init` sets up shell profile redirects, creates `~/dev_config.json` from
-the sample if it doesn't exist yet (prompting for a username if the terminal
-is interactive and none is configured), and warns if a python earlier on
-`PATH` would shadow the `python3` shim (see `DEV_PYTHON_SKIP` below). It's
-idempotent and preserves existing profile content and an existing override
-config. You can also invoke `python3 ~/dev_cli/dev.py` directly without shell
-profiles; set `DEVCONFIG=example-machine` when doing so.
+`dev init` is idempotent; see below for what it sets up. Or invoke
+`python3 ~/dev_cli/dev.py` directly without shell profiles, setting
+`DEVCONFIG=example-machine`.
 
 ## Configuration
+
+`dev init` also creates `~/dev_config.json` from the sample (prompting for a
+username if interactive and unset) and warns if a `python3` earlier on `PATH`
+would shadow the shim (see `DEV_PYTHON_SKIP` below).
 
 `dev_config.json` in this repo is a read-only sample. Real settings go in
 `../dev_config.json` (or the file named by `DEV_CONFIG_OVERRIDE`). Override
