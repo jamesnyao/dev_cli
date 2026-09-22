@@ -12,7 +12,6 @@ real repository lists, and custom shell hooks.
 ```bash
 git clone "<clone-url>" "$HOME/dev_cli"
 python3 "$HOME/dev_cli/dev.py" init
-# edit ~/dev_config.json
 ```
 
 Windows (PowerShell):
@@ -20,14 +19,12 @@ Windows (PowerShell):
 ```powershell
 git clone "<clone-url>" "$HOME\dev_cli"
 py "$HOME\dev_cli\dev.py" init
-notepad "$HOME\dev_config.json"
 ```
 
-Open a new terminal and run `dev repo root` / `dev repo list`. The sample
-works as-is (`$HOME` workspace, this checkout as its only repo).
-
-`dev init` is idempotent; see below for what it sets up. Or invoke
-`python3 ~/dev_cli/dev.py` directly without shell profiles, setting
+`dev init` prints its own next steps. It's idempotent and self-healing — safe
+to rerun any time, and it restores anything deleted (profile redirect,
+override config, hooks stub) without touching existing customizations. Or
+invoke `python3 ~/dev_cli/dev.py` directly without shell profiles, setting
 `DEVCONFIG=example-machine`.
 
 ## Configuration
@@ -52,10 +49,14 @@ next to the override; keep it gitignored.
 
 ## Private overlays
 
+`dev init` creates `~/dev_env/hooks.sh` (or `hooks.ps1` on Windows) as a stub
+if one doesn't exist — edit it for custom PATH/env/prompt setup; it's sourced
+last and never overwritten.
+
 ```text
 ~/
 ├── dev_config.json         # Your configuration, outside the tool repo
-├── work_scripts/
+├── dev_env/
 │   ├── hooks.sh             # Optional zsh customization
 │   └── hooks.ps1            # Optional PowerShell customization
 └── dev_cli/                 # This repository

@@ -801,7 +801,7 @@ class TestShellWorkspace(unittest.TestCase):
                          ['my-machine', str(workspace), str(workspace), 'no'])
 
     def test_private_hook_runs_after_generic_setup(self):
-        hooks = self.home / 'work_scripts'
+        hooks = self.home / 'dev_env'
         hooks.mkdir()
         (hooks / 'hooks.sh').write_text(
             '[[ "$DEVCONFIG" == "example-machine" ]] || return 1\n'
@@ -820,7 +820,7 @@ class TestShellWorkspace(unittest.TestCase):
     def test_configured_username_reaches_shell(self):
         (self.home / 'dev_config.json').write_text(json.dumps({
             'identity': {'username': 'configured-user'}}))
-        hooks = self.home / 'work_scripts'
+        hooks = self.home / 'dev_env'
         hooks.mkdir()
         (hooks / 'hooks.sh').write_text(
             '[[ "$DEV_PROMPT_USER" == "configured-user" ]] || return 1\n')
@@ -1040,6 +1040,78 @@ class TestCheckPython3Shim(unittest.TestCase):
         with patch('dev.emit_warn') as mock_warn:
             dev._check_python3_shim()
         mock_warn.assert_not_called()
+
+
+class TestCmdInitSelfHealing(unittest.TestCase):
+    """dev init is idempotent: re-running it restores anything deleted,
+    without touching content the user has since customized."""
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+        self.home = self.tmpdir / 'home'
+        self.home.mkdir()
+        home_patch = patch('dev.Path.home', return_value=self.home)
+        home_patch.start()
+        self.addCleanup(home_patch.stop)
+
+        self.orig_script_dir = dev.SCRIPT_DIR
+        self.orig_config_dir = dev.CONFIG_DIR
+        self.orig_override_config_file = dev.OVERRIDE_CONFIG_FILE
+        self.orig_sample_config_file = dev.SAMPLE_CONFIG_FILE
+        dev.SCRIPT_DIR = self.tmpdir / 'dev_cli'  # no real python3 shim here
+        dev.CONFIG_DIR = self.home
+        dev.OVERRIDE_CONFIG_FILE = self.home / 'dev_config.json'
+        dev.SAMPLE_CONFIG_FILE = self.tmpdir / 'dev_cli' / 'dev_config.json'
+        dev.SAMPLE_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        dev.SAMPLE_CONFIG_FILE.write_text(json.dumps({
+            'workspaceRoots': {'example-machine': '$HOME'}, 'identity': {'username': ''}}))
+
+    def tearDown(self):
+        dev.SCRIPT_DIR = self.orig_script_dir
+        dev.CONFIG_DIR = self.orig_config_dir
+        dev.OVERRIDE_CONFIG_FILE = self.orig_override_config_file
+        dev.SAMPLE_CONFIG_FILE = self.orig_sample_config_file
+        shutil.rmtree(self.tmpdir)
+
+    @patch.dict(os.environ, {'SHELL': '/bin/zsh'})
+    @patch('dev.get_os_type', return_value='linux')
+    @patch('sys.stdin')
+    def test_restores_deleted_artifacts(self, mock_stdin, _mock_os):
+        mock_stdin.isatty.return_value = False
+        self.assertEqual(dev.cmd_init(None), 0)
+        zshrc = self.home / '.zshrc'
+        hook_path = dev._hook_path()
+        self.assertTrue(zshrc.is_file())
+        self.assertTrue(dev.OVERRIDE_CONFIG_FILE.is_file())
+        self.assertTrue(hook_path.is_file())
+
+        # Simulate loss of each artifact independently of the others.
+        zshrc.unlink()
+        dev.OVERRIDE_CONFIG_FILE.unlink()
+        hook_path.unlink()
+
+        self.assertEqual(dev.cmd_init(None), 0)
+        self.assertIn(dev.ZSHRC_SOURCE_LINE, zshrc.read_text())
+        self.assertTrue(dev.OVERRIDE_CONFIG_FILE.is_file())
+        self.assertTrue(hook_path.is_file())
+
+    @patch.dict(os.environ, {'SHELL': '/bin/zsh'})
+    @patch('dev.get_os_type', return_value='linux')
+    @patch('sys.stdin')
+    def test_does_not_clobber_customizations(self, mock_stdin, _mock_os):
+        mock_stdin.isatty.return_value = False
+        self.assertEqual(dev.cmd_init(None), 0)
+        dev.OVERRIDE_CONFIG_FILE.write_text(json.dumps({'identity': {'username': 'kept'}}))
+        hook_path = dev._hook_path()
+        hook_path.write_text('export CUSTOM=1\n')
+        (self.home / '.zshrc').write_text(
+            f'export CUSTOM_RC=1\n{dev.ZSHRC_SOURCE_LINE}\n')
+
+        self.assertEqual(dev.cmd_init(None), 0)
+        self.assertEqual(json.loads(dev.OVERRIDE_CONFIG_FILE.read_text()),
+                         {'identity': {'username': 'kept'}})
+        self.assertEqual(hook_path.read_text(), 'export CUSTOM=1\n')
+        self.assertIn('export CUSTOM_RC=1', (self.home / '.zshrc').read_text())
 
 
 class TestSelfUpdate(unittest.TestCase):

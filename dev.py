@@ -2003,15 +2003,56 @@ def _check_python3_shim():
         print("     Set DEV_PYTHON_SKIP to a substring of its path to skip it.")
 
 
+def _hook_path():
+    """Path to the private hook file for this platform."""
+    name = 'hooks.ps1' if get_os_type() == 'windows' else 'hooks.sh'
+    return Path.home() / 'dev_env' / name
+
+
+def _init_hooks_stub():
+    """Create the private hook file that shell/zsh.sh, shell/bash.sh (via zsh),
+    and shell/profile.ps1 source last, if one doesn't already exist. This is
+    the one place custom PATH/env/prompt setup goes; it's never overwritten."""
+    hook_path = _hook_path()
+    if get_os_type() == 'windows':
+        stub = (
+            "# Custom environment setup, sourced last by dev_cli/shell/profile.ps1.\n"
+            "# Safe to edit; dev init never overwrites an existing file here.\n"
+            "# Example: $env:PATH = \"C:\\my\\tool\\bin;$env:PATH\"\n")
+    else:
+        stub = (
+            "# Custom environment setup, sourced last by dev_cli/shell/zsh.sh.\n"
+            "# Safe to edit; dev init never overwrites an existing file here.\n"
+            "# Example: export PATH=\"$HOME/my-tool/bin:$PATH\"\n")
+
+    if hook_path.is_file():
+        emit_ok(f"{hook_path} already exists")
+        return 0
+
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_path.write_text(stub, encoding='utf-8')
+    emit_ok(f"Created {hook_path}")
+    return 0
+
+
 def cmd_init(args):
-    """Bootstrap shell profile, override config, and the python3 shim on a fresh machine."""
+    """Bootstrap shell profile, override config, hooks stub, and the python3 shim
+    on a fresh machine."""
     rc = _init_windows() if get_os_type() == 'windows' else _init_unix()
     if rc != 0:
         return rc
     rc = _init_config()
     if rc != 0:
         return rc
+    rc = _init_hooks_stub()
+    if rc != 0:
+        return rc
     _check_python3_shim()
+
+    print(f"\n{Colors.BLUE}Next steps:{Colors.NC}")
+    print("  1. Open a new terminal to load the shell profile")
+    print(f"  2. Edit {OVERRIDE_CONFIG_FILE} to add repos and identity ('dev repo add -h')")
+    print(f"  3. Edit {_hook_path()} for custom PATH/env/prompt setup")
     return 0
 
 

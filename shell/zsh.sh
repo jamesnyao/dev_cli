@@ -61,6 +61,6 @@ command -v fzf &>/dev/null && source <(fzf --zsh) 2>/dev/null
 [[ -n "$DEV" ]] && cd "$DEV"
 
 # Private, work-specific setup -- runs last so it can override anything above.
-if [[ -f "$HOME/work_scripts/hooks.sh" ]]; then
-  source "$HOME/work_scripts/hooks.sh"
+if [[ -f "$HOME/dev_env/hooks.sh" ]]; then
+  source "$HOME/dev_env/hooks.sh"
 fi
