@@ -178,6 +178,57 @@ class TestGetBasePath(unittest.TestCase):
         self.assertEqual(dev.get_base_path(config=config), '/from-config')
 
 
+class TestTrustClaudeWorkspace(unittest.TestCase):
+    """Test auto-trusting the workspace root in ~/.claude.json"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.orig_claude_config_file = dev.CLAUDE_CONFIG_FILE
+        dev.CLAUDE_CONFIG_FILE = Path(self.temp_dir) / '.claude.json'
+
+    def tearDown(self):
+        dev.CLAUDE_CONFIG_FILE = self.orig_claude_config_file
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_noop_when_claude_config_missing(self):
+        dev.trust_claude_workspace('/workspace')
+        self.assertFalse(dev.CLAUDE_CONFIG_FILE.exists())
+
+    def test_marks_new_project_trusted(self):
+        dev.CLAUDE_CONFIG_FILE.write_text(json.dumps({'projects': {}}))
+        dev.trust_claude_workspace('/workspace')
+        config = json.loads(dev.CLAUDE_CONFIG_FILE.read_text())
+        self.assertTrue(config['projects']['/workspace']['hasTrustDialogAccepted'])
+
+    def test_preserves_other_project_fields(self):
+        dev.CLAUDE_CONFIG_FILE.write_text(json.dumps({
+            'projects': {'/workspace': {'hasTrustDialogAccepted': False, 'allowedTools': ['Bash']}}
+        }))
+        dev.trust_claude_workspace('/workspace')
+        config = json.loads(dev.CLAUDE_CONFIG_FILE.read_text())
+        self.assertTrue(config['projects']['/workspace']['hasTrustDialogAccepted'])
+        self.assertEqual(config['projects']['/workspace']['allowedTools'], ['Bash'])
+
+    def test_preserves_unrelated_top_level_keys(self):
+        dev.CLAUDE_CONFIG_FILE.write_text(json.dumps({'oauthAccount': {'id': 'abc'}, 'projects': {}}))
+        dev.trust_claude_workspace('/workspace')
+        config = json.loads(dev.CLAUDE_CONFIG_FILE.read_text())
+        self.assertEqual(config['oauthAccount'], {'id': 'abc'})
+
+    def test_already_trusted_is_noop(self):
+        dev.CLAUDE_CONFIG_FILE.write_text(json.dumps({
+            'projects': {'/workspace': {'hasTrustDialogAccepted': True}}
+        }))
+        mtime_before = dev.CLAUDE_CONFIG_FILE.stat().st_mtime_ns
+        dev.trust_claude_workspace('/workspace')
+        self.assertEqual(dev.CLAUDE_CONFIG_FILE.stat().st_mtime_ns, mtime_before)
+
+    def test_malformed_json_is_ignored(self):
+        dev.CLAUDE_CONFIG_FILE.write_text('{not valid json')
+        dev.trust_claude_workspace('/workspace')
+        self.assertEqual(dev.CLAUDE_CONFIG_FILE.read_text(), '{not valid json')
+
+
 class TestNormalizeGithubUrl(unittest.TestCase):
     """Test GitHub URL normalization to SSH with correct host aliases"""
     

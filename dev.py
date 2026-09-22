@@ -130,6 +130,7 @@ ADO_TOKEN_CACHE_SECONDS = 2400  # 40 minute fallback when JWT exp can't be parse
 ADO_TOKEN_EXPIRY_BUFFER = 60  # Treat token as expired this many seconds before its real exp
 ADO_API_VERSION = '7.1'  # ADO REST API version used for all requests
 RCFILES_DIR = CONFIG_DIR / 'rcfiles'
+CLAUDE_CONFIG_FILE = Path.home() / '.claude.json'
 
 def get_os_type():
     system = platform.system().lower()
@@ -161,6 +162,24 @@ def get_base_path(config=None):
     if devconfig and devconfig in roots:
         return os.path.expandvars(roots[devconfig])
     raise ValueError(f'No workspaceRoot found for DEVCONFIG={devconfig!r}. Check {CONFIG_FILE} workspaceRoots.')
+
+def trust_claude_workspace(base_path):
+    """Mark the workspace root trusted in ~/.claude.json so Claude Code
+    doesn't prompt for it (or any repo underneath it) on this machine."""
+    if not CLAUDE_CONFIG_FILE.exists():
+        return
+    key = str(Path(base_path))
+    try:
+        with open(CLAUDE_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            claude_config = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return
+    project = claude_config.setdefault('projects', {}).setdefault(key, {})
+    if project.get('hasTrustDialogAccepted'):
+        return
+    project['hasTrustDialogAccepted'] = True
+    with open(CLAUDE_CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(claude_config, f, indent=2)
 
 def run_git(repo_path, *args):
     try:
@@ -3100,6 +3119,11 @@ def main():
 
     if getattr(args, 'no_color', False):
         Colors.configure(False)
+
+    try:
+        trust_claude_workspace(get_base_path())
+    except (ValueError, KeyError):
+        pass
 
     if args.command == 'init':
         return cmd_init(args)
