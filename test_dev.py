@@ -132,6 +132,7 @@ class TestConfig(unittest.TestCase):
     def test_bootstrap_path_uses_linked_sync_repository(self, mock_base, mock_sync_root):
         tool = Path(self.temp_dir) / 'dev_cli'
         tool.mkdir()
+        (tool / '.git').mkdir()
         mock_base.return_value = self.temp_dir
         mock_sync_root.return_value = tool
         config = {'repos': [{
@@ -193,6 +194,27 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(dev.load_config(), {'repos': []})
         self.assertEqual(marker.read_text(), 'keep this file')
 
+    def test_registering_home_link_preserves_destination_and_bootstrap(self):
+        home = Path(self.temp_dir) / 'real-home'
+        workspace = Path(self.temp_dir) / 'workspace'
+        link = workspace / 'home'
+        subprocess.run(['git', 'init', str(home)], check=True, capture_output=True)
+        url = 'https://example.com/dotfiles.git'
+        subprocess.run(['git', '-C', str(home), 'remote', 'add', 'origin', url],
+                       check=True, capture_output=True)
+        dev._ensure_link(link, home)
+        (workspace / '.gclient').touch()
+        for existing in ([], [{'path': 'home', 'bootstrap': True, 'skipOn': ['other-machine']}]):
+            with self.subTest(existing=bool(existing)):
+                dev.save_config({'repos': existing})
+                with patch('dev.get_base_path', return_value=str(workspace)), \
+                     patch('dev.Path.home', return_value=home):
+                    self.assertEqual(dev.cmd_repo_add(argparse.Namespace(path=str(link))), 0)
+                expected = dict(existing[0]) if existing else {}
+                expected.update(path='home', remoteUrl=url, pathLinksTo='~')
+                self.assertEqual(dev.load_config()['repos'], [expected])
+        self.assertEqual(link.resolve(), home.resolve())
+
 
 class TestComputeRepoName(unittest.TestCase):
     """Test repo name computation"""
@@ -204,6 +226,12 @@ class TestComputeRepoName(unittest.TestCase):
             repo.mkdir()
             name = dev.compute_repo_name(repo)
             self.assertEqual(name, 'my-repo')
+
+    def test_workspace_gclient_does_not_prefix_top_level_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / '.gclient').touch()
+            self.assertEqual(dev.compute_repo_name(workspace / 'home', workspace), 'home')
     
     def test_nested_gclient_repo(self):
         """Repo under gclient enlistment should use parent/name format"""
@@ -1456,6 +1484,57 @@ class TestSplitRepositorySync(unittest.TestCase):
         success.assert_called_once_with('home (updated during bootstrap)')
         repo_sync.assert_not_called()
 
+    def test_home_bootstrap_uses_home_outside_workspace(self):
+        workspace = self.base / 'workspace'
+        config = {'repos': [{'path': 'home', 'pathLinksTo': '$HOME', 'bootstrap': True}]}
+        with patch('dev.Path.home', return_value=self.parent), \
+             patch('dev.load_config', return_value=config), \
+             patch('dev.get_base_path', return_value=str(workspace)):
+            self.assertEqual(dev.cmd_repo_sync(argparse.Namespace()), 0)
+        self.assertEqual((workspace / 'home').resolve(), self.parent.resolve())
+        self.assertEqual(dev._sync_repo_dir().resolve(), self.parent.resolve())
+
+    def test_linked_clone_uses_home_not_workspace(self):
+        workspace = self.base / 'workspace'
+        home = self.base / 'new-home'
+        home.mkdir()
+        config = {'repos': [{
+            'path': 'home', 'pathLinksTo': '$HOME', 'remoteUrl': str(self.parent_remote),
+        }]}
+        with patch('dev.Path.home', return_value=home), \
+             patch('dev.load_config', return_value=config), \
+             patch('dev.get_base_path', return_value=str(workspace)), \
+             patch('dev.confirm', return_value=True):
+            self.assertEqual(dev.cmd_repo_sync(argparse.Namespace()), 0)
+        self.assertTrue((home / '.git').is_dir())
+        self.assertEqual((workspace / 'home').resolve(), home.resolve())
+        self.assertEqual(self.git(home, 'rev-parse', 'HEAD'),
+                         self.git(self.parent_remote, 'rev-parse', 'main'))
+
+    def test_linked_non_git_home_preserves_existing_files(self):
+        workspace = self.base / 'workspace'
+        home = self.base / 'new-home'
+        home.mkdir()
+        profile = home / '.profile'
+        profile.write_text('keep my profile\n')
+        for bootstrap in (False, True):
+            config = {'repos': [{
+                'path': 'home', 'pathLinksTo': '$HOME',
+                'remoteUrl': str(self.parent_remote), 'bootstrap': bootstrap,
+            }]}
+            with self.subTest(bootstrap=bootstrap), \
+                 patch('dev.Path.home', return_value=home), \
+                 patch('dev.load_config', return_value=config), \
+                 patch('dev.get_base_path', return_value=str(workspace)), \
+                 patch('dev.confirm') as confirm, \
+                 patch('sys.stderr', new_callable=StringIO) as errors:
+                self.assertEqual(dev.cmd_repo_sync(argparse.Namespace()), 1)
+                self.assertIn(str(home), errors.getvalue())
+                confirm.assert_not_called()
+            self.assertEqual(profile.read_text(), 'keep my profile\n')
+            self.assertFalse((home / '.git').exists())
+            self.assertFalse((workspace / 'home').exists())
+
 
 class TestEnsureLink(unittest.TestCase):
     """Test _ensure_link symlink creation"""
@@ -2398,6 +2477,15 @@ class TestNormalizationSync(unittest.TestCase):
         self.assertEqual((self.repo / 'sample.cs').stat().st_mtime_ns, mtime)
         self.assertEqual(self._git(self.repo, 'stash', 'list'), b'')
 
+    def test_renamed_remote_default_preserves_current_branch(self):
+        self._git(self.upstream, 'branch', '-m', 'main', 'master')
+        self.assertEqual(dev._sync_repo_latest(self.repo), ('updated', 'master'))
+        self.assertEqual(self._git(self.repo, 'rev-parse', 'HEAD'), self.initial)
+        self.assertEqual(self._git(self.repo, 'branch', '--show-current'), b'main\n')
+        self.assertEqual(self._git(self.repo, 'rev-parse', 'master'),
+                         self._git(self.upstream, 'rev-parse', 'HEAD'))
+        self.assertEqual(dev._sync_repo_latest(self.repo), ('current', 'master'))
+
     def test_real_edits_including_line_endings_are_protected(self):
         for contents in (b'class Changed {}\r\n', b'class Sample {}\n', b'class Sample {} \r\n'):
             with self.subTest(contents=contents):
@@ -2469,6 +2557,30 @@ class TestNormalizationSync(unittest.TestCase):
                     self.assertIn('Synced: 0 | Skipped: 1 | Failed: 0', output.getvalue())
                     if status != 'dirty':
                         self.assertNotIn('newer than', output.getvalue())
+
+    def test_repo_sync_command_returns_failure_for_failed_update(self):
+        config = {'repos': [{'path': 'repo', 'remoteUrl': str(self.upstream)}]}
+        with patch('dev.sync_rcfiles_push', return_value=True), \
+             patch('dev.load_config', return_value=config), \
+             patch('dev.get_base_path', return_value=str(self.root)), \
+             patch('dev._report_background_sync_status', return_value=False), \
+             patch('dev._sync_repo_latest', return_value=('failed', None)), \
+             patch('dev.check_stale_branch'), \
+             patch('sys.stdout', new_callable=StringIO) as output:
+            self.assertEqual(dev.cmd_repo_sync(argparse.Namespace()), 1)
+            self.assertIn('Synced: 0 | Skipped: 0 | Failed: 1', output.getvalue())
+
+    def test_repo_sync_command_returns_failure_for_failed_clone(self):
+        config = {'repos': [{'path': 'missing', 'remoteUrl': str(self.upstream)}]}
+        with patch('dev.sync_rcfiles_push', return_value=True), \
+             patch('dev.load_config', return_value=config), \
+             patch('dev.get_base_path', return_value=str(self.root)), \
+             patch('dev._report_background_sync_status', return_value=False), \
+             patch('dev.confirm', return_value=True), \
+             patch('dev.subprocess.run', return_value=subprocess.CompletedProcess([], 1)), \
+             patch('sys.stdout', new_callable=StringIO) as output:
+            self.assertEqual(dev.cmd_repo_sync(argparse.Namespace()), 1)
+            self.assertIn('Synced: 0 | Skipped: 0 | Failed: 1', output.getvalue())
 
 
 class TestGetDirtyAgeDays(unittest.TestCase):
@@ -2552,6 +2664,15 @@ class TestGetDefaultBranch(unittest.TestCase):
     def test_falls_back_to_main_when_no_origin_head(self):
         with patch('dev.run_git', side_effect=self._rungit({'main'}, origin_head='')):
             self.assertEqual(dev.get_default_branch(Path('/tmp/repo')), 'main')
+
+    def test_stale_origin_head_falls_back_to_existing_branch(self):
+        with patch('dev.run_git', side_effect=self._rungit(
+                {'master'}, origin_head='refs/remotes/origin/main')):
+            self.assertEqual(dev.get_default_branch(Path('/tmp/repo')), 'master')
+
+    def test_stale_origin_head_without_fallback_returns_none(self):
+        with patch('dev.run_git', side_effect=self._rungit(set())):
+            self.assertIsNone(dev.get_default_branch(Path('/tmp/repo')))
 
 
 class TestCheckStaleBranchConfiguredDefault(unittest.TestCase):
