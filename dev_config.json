@@ -1,6 +1,8 @@
 {
   // Copy this file to ../dev_config.json and customize it. The private file
   // overrides these defaults, while this annotated sample is never rewritten.
+  // Run `dev repo add <local-repo-path>` to add entries here; see
+  // `dev repo add -h` for the available repository-entry options.
   "repos": [
     {
       "path": "dev_cli",
