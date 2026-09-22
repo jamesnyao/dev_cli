@@ -131,10 +131,17 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 # submodule -- and win on top of the sample when both define the same key.
 SAMPLE_CONFIG_FILE = SCRIPT_DIR / 'dev_config.json'
 
+
+def expand_config_path(value):
+    """Expand home and environment variables, including $HOME on Windows."""
+    value = re.sub(r'\$(?:HOME\b|\{HOME\})', lambda _: str(Path.home()), value)
+    return os.path.expandvars(os.path.expanduser(value))
+
+
 def _resolve_override_config_file():
     env_override = os.getenv('DEV_CONFIG_OVERRIDE')
     if env_override:
-        return Path(os.path.expandvars(os.path.expanduser(env_override)))
+        return Path(expand_config_path(env_override))
     return SCRIPT_DIR.parent / 'dev_config.json'
 
 OVERRIDE_CONFIG_FILE = _resolve_override_config_file()
@@ -189,7 +196,7 @@ def get_base_path(config=None):
     devconfig = os.getenv('DEVCONFIG', '')
     roots = config.get('workspaceRoots', {})
     if devconfig and devconfig in roots:
-        return os.path.expandvars(roots[devconfig])
+        return expand_config_path(roots[devconfig])
     raise ValueError(f'No workspaceRoot found for DEVCONFIG={devconfig!r}. Check {OVERRIDE_CONFIG_FILE} workspaceRoots.')
 
 def trust_claude_workspace(base_path):
@@ -1108,7 +1115,7 @@ def cmd_repo_list(args):
         repo_path = base_path / repo['path'].replace('/', os.sep)
         link_to = repo.get('pathLinksTo')
         if link_to:
-            repo_path = Path(os.path.expandvars(os.path.expanduser(link_to)))
+            repo_path = Path(expand_config_path(link_to))
         _, url = run_git(repo_path, 'remote', 'get-url', 'origin')
         url = url or repo.get('remoteUrl', 'N/A')
         print(f"  {repo['path']}  {Colors.CYAN}{url}{Colors.NC}")
@@ -1428,7 +1435,7 @@ def cmd_repo_sync(args):
         link_path = base_path / name.replace('/', os.sep)
 
         if link_to:
-            repo_path = Path(os.path.expandvars(os.path.expanduser(link_to)))
+            repo_path = Path(expand_config_path(link_to))
         else:
             repo_path = link_path
 
@@ -1573,7 +1580,7 @@ def _resolve_tracked_home_path(entry):
     """Home-side path for a tracked entry, honoring an optional pathLinksTo."""
     link_to = entry.get('pathLinksTo')
     if link_to:
-        return Path(os.path.expandvars(os.path.expanduser(link_to)))
+        return Path(expand_config_path(link_to))
     return HOME_DIR / entry['path'].replace('/', os.sep)
 
 
@@ -1649,7 +1656,7 @@ def sync_tracked_files(base_path):
         rel_path = entry['path']
         link_to = entry.get('pathLinksTo')
         if link_to:
-            target_file = Path(os.path.expandvars(os.path.expanduser(link_to)))
+            target_file = Path(expand_config_path(link_to))
         else:
             target_file = HOME_DIR / rel_path.replace('/', os.sep)
         rcfile = RCFILES_DIR / rel_path
@@ -2047,7 +2054,8 @@ def cmd_repo_old(args):
         identity = {}
 
     git_email = _git_config_value('user.email')
-    default_alias = (git_email.split('@')[0] if git_email else '') or getpass.getuser()
+    default_alias = (identity.get('username') or os.getenv('USERNAME')
+                     or os.getenv('USER') or getpass.getuser())
     prefix = args.prefix or identity.get('branchPrefix') or f'user/{default_alias}/'
     creator_email = identity.get('creatorEmail') or git_email
     if not creator_email:
@@ -3235,7 +3243,7 @@ def main():
     old_p.add_argument('--delete', action='store_true', help='Delete the old branches')
     old_p.add_argument('--prefix', default=None,
                        help="Branch prefix to filter (default: identity.branchPrefix in dev_config.json, "
-                            "else 'user/<git email local-part>/')")
+                            "else 'user/<identity.username or system username>/')")
     old_p.add_argument('--days', type=int, default=30, help='Age threshold in days (default: 30)')
     old_p.add_argument('path', nargs='?', help='Path to git repository (default: current directory)')
 

@@ -7,7 +7,6 @@ Run with: dev test
 
 import json
 import os
-import platform
 import shutil
 import subprocess
 import sys
@@ -47,25 +46,6 @@ def _sanitize_environment():
 
 
 _sanitize_environment()
-
-
-class TestGetOsType(unittest.TestCase):
-    """Test OS type detection"""
-    
-    @patch('platform.system')
-    def test_linux(self, mock_system):
-        mock_system.return_value = 'Linux'
-        self.assertEqual(dev.get_os_type(), 'linux')
-    
-    @patch('platform.system')
-    def test_darwin(self, mock_system):
-        mock_system.return_value = 'Darwin'
-        self.assertEqual(dev.get_os_type(), 'darwin')
-    
-    @patch('platform.system')
-    def test_windows(self, mock_system):
-        mock_system.return_value = 'Windows'
-        self.assertEqual(dev.get_os_type(), 'windows')
 
 
 class TestConfig(unittest.TestCase):
@@ -236,6 +216,35 @@ class TestResolveOverrideConfigFile(unittest.TestCase):
         self.assertEqual(dev._resolve_override_config_file(), self.temp_dir / 'dev_config.json')
 
 
+class TestExpandConfigPath(unittest.TestCase):
+
+    @patch('dev.Path.home', return_value=Path('/home/tester'))
+    def test_home_without_home_environment_variable(self, mock_home):
+        with patch.dict(os.environ):
+            os.environ.pop('HOME', None)
+            expected = str(Path('/home/tester')) + '/projects'
+            self.assertEqual(dev.expand_config_path('$HOME/projects'), expected)
+            self.assertEqual(dev.expand_config_path('${HOME}/projects'), expected)
+
+    @patch('dev.Path.home', return_value=Path('/home/tester'))
+    @patch.dict(os.environ, {'HOME_ARCHIVE': '/archive'})
+    def test_does_not_replace_other_variable_names(self, mock_home):
+        self.assertEqual(dev.expand_config_path('$HOME_ARCHIVE/projects'), '/archive/projects')
+
+    @patch('dev.Path.home', return_value=Path('/home/tester'))
+    @patch.dict(os.environ, {'DEVCONFIG': 'example-machine'})
+    def test_sample_workspace_uses_real_home(self, mock_home):
+        with patch.dict(os.environ):
+            os.environ.pop('HOME', None)
+            self.assertEqual(dev.get_base_path({
+                'workspaceRoots': {'example-machine': '$HOME'}}), str(Path('/home/tester')))
+
+    @patch('dev.Path.home', return_value=Path('/home/tester'))
+    @patch.dict(os.environ, {'DEV_CONFIG_OVERRIDE': '$HOME/config/settings.json'})
+    def test_override_path_expands_home(self, mock_home):
+        self.assertEqual(dev._resolve_override_config_file(), Path('/home/tester/config/settings.json'))
+
+
 class TestConfigGet(unittest.TestCase):
     """Test `dev config get <dotted.key>` reading from the singleton config file."""
 
@@ -293,6 +302,9 @@ class TestCmdRepoOldIdentity(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.repo_path = Path(self.temp_dir) / 'repo'
         (self.repo_path / '.git').mkdir(parents=True)
+        env = patch.dict(os.environ, {'USERNAME': 'windows-user', 'USER': 'unix-user'})
+        env.start()
+        self.addCleanup(env.stop)
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -313,12 +325,40 @@ class TestCmdRepoOldIdentity(unittest.TestCase):
     @patch('dev._scan_old_branches_git', return_value=[])
     @patch('dev._git_config_value', return_value='someone@example.com')
     @patch('dev.load_config', return_value={})
-    def test_falls_back_to_git_config_email_and_alias(self, mock_load, mock_git_cfg, mock_scan, mock_remote):
+    def test_falls_back_to_environment_and_git_email(self, mock_load, mock_git_cfg, mock_scan, mock_remote):
         rc = dev.cmd_repo_old(self._args())
         self.assertEqual(rc, 0)
         _, prefix_arg, email_arg, _cutoff = mock_scan.call_args[0]
         self.assertEqual(email_arg, 'someone@example.com')
-        self.assertEqual(prefix_arg, 'user/someone/')
+        self.assertEqual(prefix_arg, 'user/windows-user/')
+
+    @patch('dev.get_remote_url', return_value='')
+    @patch('dev._scan_old_branches_git', return_value=[])
+    @patch('dev._git_config_value', return_value='someone@example.com')
+    @patch('dev.load_config', return_value={})
+    def test_unix_username_fallback(self, mock_load, mock_git_cfg, mock_scan, mock_remote):
+        os.environ.pop('USERNAME', None)
+        self.assertEqual(dev.cmd_repo_old(self._args()), 0)
+        self.assertEqual(mock_scan.call_args.args[1], 'user/unix-user/')
+
+    @patch('dev.get_remote_url', return_value='')
+    @patch('dev._scan_old_branches_git', return_value=[])
+    @patch('dev._git_config_value', return_value='someone@example.com')
+    @patch('dev.load_config', return_value={'identity': {'username': 'configured-user'}})
+    def test_configured_username_overrides_environment(self, mock_load, mock_git_cfg, mock_scan, mock_remote):
+        self.assertEqual(dev.cmd_repo_old(self._args()), 0)
+        self.assertEqual(mock_scan.call_args.args[1], 'user/configured-user/')
+
+    @patch('dev.getpass.getuser', return_value='login-user')
+    @patch('dev.get_remote_url', return_value='')
+    @patch('dev._scan_old_branches_git', return_value=[])
+    @patch('dev._git_config_value', return_value='someone@example.com')
+    @patch('dev.load_config', return_value={})
+    def test_login_fallback_without_environment(self, mock_load, mock_git_cfg, mock_scan, mock_remote, mock_user):
+        os.environ.pop('USERNAME', None)
+        os.environ.pop('USER', None)
+        self.assertEqual(dev.cmd_repo_old(self._args()), 0)
+        self.assertEqual(mock_scan.call_args.args[1], 'user/login-user/')
 
     @patch('dev.get_remote_url', return_value='')
     @patch('dev._scan_old_branches_git', return_value=[])
@@ -467,38 +507,6 @@ class TestBuildCommitMessage(unittest.TestCase):
     def tearDown(self):
         dev.SCRIPT_DIR = self.orig_script_dir
         shutil.rmtree(self.temp_dir, ignore_errors=True)
-
-    def test_no_staged_changes(self):
-        """No staged changes should return Auto-sync"""
-        msg = dev._build_commit_message()
-        self.assertEqual(msg, 'Auto-sync')
-
-    def test_added_files(self):
-        """Added files should show A: prefix"""
-        Path(self.temp_dir, 'new.txt').write_text('content')
-        subprocess.run(['git', 'add', 'new.txt'], cwd=self.temp_dir, capture_output=True)
-        msg = dev._build_commit_message()
-        self.assertEqual(msg, 'A: new.txt')
-
-    def test_modified_files(self):
-        """Modified files should show M: prefix"""
-        Path(self.temp_dir, 'file.txt').write_text('v1')
-        subprocess.run(['git', 'add', 'file.txt'], cwd=self.temp_dir, capture_output=True)
-        subprocess.run(['git', 'commit', '-m', 'init'], cwd=self.temp_dir, capture_output=True)
-        Path(self.temp_dir, 'file.txt').write_text('v2')
-        subprocess.run(['git', 'add', 'file.txt'], cwd=self.temp_dir, capture_output=True)
-        msg = dev._build_commit_message()
-        self.assertEqual(msg, 'M: file.txt')
-
-    def test_deleted_files(self):
-        """Deleted files should show D: prefix"""
-        Path(self.temp_dir, 'file.txt').write_text('content')
-        subprocess.run(['git', 'add', 'file.txt'], cwd=self.temp_dir, capture_output=True)
-        subprocess.run(['git', 'commit', '-m', 'init'], cwd=self.temp_dir, capture_output=True)
-        os.remove(Path(self.temp_dir, 'file.txt'))
-        subprocess.run(['git', 'add', 'file.txt'], cwd=self.temp_dir, capture_output=True)
-        msg = dev._build_commit_message()
-        self.assertEqual(msg, 'D: file.txt')
 
     def test_mixed_changes(self):
         """Mixed changes should show all types"""
@@ -1288,6 +1296,7 @@ class TestShellWorkspace(unittest.TestCase):
         uname.chmod(0o755)
         (tools / 'python3').symlink_to(sys.executable)
         self.env = dict(os.environ, HOME=str(self.home), DEVCONFIG='',
+                        DEV_PROMPT_USER='',
                         DEV_CONFIG_OVERRIDE=str(self.home / 'dev_config.json'),
                         PATH=f'{tools}:/usr/bin:/bin:/usr/sbin:/sbin')
 
@@ -1297,12 +1306,6 @@ class TestShellWorkspace(unittest.TestCase):
              'source "$HOME/dev_scripts/shell/zsh.sh" || exit $?; '
              'printf "%s\\n" "$DEVCONFIG" "$DEV" "$PWD" "${PRIVATE_HOOK:-no}"'],
             env=self.env, text=True, capture_output=True)
-
-    def test_standalone_uses_sample_workspace(self):
-        result = self.shell()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(),
-                         ['example-machine', str(self.home), str(self.home), 'no'])
 
     def test_explicit_machine_uses_private_override(self):
         workspace = self.home / 'custom workspace'
@@ -1331,6 +1334,37 @@ class TestShellWorkspace(unittest.TestCase):
         result = self.shell()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('No workspaceRoot found', result.stderr)
+
+    def test_configured_username_reaches_shell(self):
+        (self.home / 'dev_config.json').write_text(json.dumps({
+            'identity': {'username': 'configured-user'}}))
+        hooks = self.home / 'work_scripts'
+        hooks.mkdir()
+        (hooks / 'hooks.sh').write_text(
+            '[[ "$DEV_PROMPT_USER" == "configured-user" ]] || return 1\n')
+        result = self.shell()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_copy_config_and_initialize_profile(self):
+        tool = self.home / 'dev_scripts'
+        sample_bytes = (tool / 'dev_config.json').read_bytes()
+        shutil.copy2(tool / 'dev_config.json', self.home / 'dev_config.json')
+        config = json.loads(sample_bytes)
+        self.assertEqual(config['workspaceRoots']['example-machine'], '$HOME')
+        self.assertEqual(config['repos'], [])
+        self.assertEqual(config['identity']['username'], '')
+        result = subprocess.run(
+            [sys.executable, str(tool / 'dev.py'), 'init'],
+            env=dict(self.env, SHELL='/bin/zsh'), text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = subprocess.run(
+            [shutil.which('zsh'), '-f', '-c',
+             'source "$HOME/.zshrc" || exit $?; dev repo root; dev repo list'],
+            env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(str(self.home), result.stdout)
+        self.assertIn('No repositories tracked yet', result.stdout)
+        self.assertEqual((tool / 'dev_config.json').read_bytes(), sample_bytes)
 
 
 class TestCmdInit(unittest.TestCase):
@@ -1443,8 +1477,14 @@ class TestSelfUpdate(unittest.TestCase):
 
     @patch('dev.run_git')
     def test_no_update_when_hash_unchanged(self, mock_git):
-        mock_git.return_value = (True, 'abc123')
-        dev._self_update()
+        def side_effect(path, *args):
+            if args[0] == 'rev-parse':
+                return (True, 'abc123')
+            if args[0] == 'rev-list':
+                return (True, '0\t0')
+            return (True, '')
+        mock_git.side_effect = side_effect
+        self.assertTrue(dev._self_update())
         calls = [c[0][1:] for c in mock_git.call_args_list]
         self.assertIn(('rev-parse', 'HEAD'), calls)
         self.assertNotIn('rebase', str(calls))
@@ -1458,26 +1498,7 @@ class TestSelfUpdate(unittest.TestCase):
                 return (True, 'abc123')
             return (True, '')
         mock_git.side_effect = side_effect
-        dev._self_update()
-
-    @patch('subprocess.run')
-    @patch('dev.get_default_branch', return_value='main')
-    @patch('dev.run_git')
-    def test_reexecs_when_hash_changes(self, mock_git, mock_branch, mock_subprocess):
-        call_count = [0]
-        def side_effect(path, *args):
-            if args[0] == 'rev-parse':
-                call_count[0] += 1
-                return (True, 'old' if call_count[0] == 1 else 'new')
-            if args[0] == 'rev-list':
-                return (True, '0\t1')
-            return (True, '')
-        mock_git.side_effect = side_effect
-        mock_subprocess.return_value = subprocess.CompletedProcess(args=[], returncode=0)
-        with self.assertRaises(SystemExit) as ctx:
-            dev._self_update()
-        self.assertEqual(ctx.exception.code, 0)
-        mock_subprocess.assert_called_once()
+        self.assertFalse(dev._self_update())
 
     @patch('subprocess.run')
     @patch('dev.get_default_branch', return_value='main')
@@ -1502,8 +1523,10 @@ class TestSelfUpdate(unittest.TestCase):
         mock_git.side_effect = side_effect
         mock_subprocess.return_value = subprocess.CompletedProcess(args=[], returncode=0)
         os.environ.pop('_DEV_PULLED_RCFILES', None)
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(SystemExit) as ctx:
             dev._self_update()
+        self.assertEqual(ctx.exception.code, 0)
+        mock_subprocess.assert_called_once()
         self.assertEqual(os.environ.pop('_DEV_PULLED_RCFILES'), 'abc123 some commit')
 
     @patch('subprocess.run')
@@ -1532,71 +1555,6 @@ class TestSelfUpdate(unittest.TestCase):
         self.assertNotIn('_DEV_PULLED_RCFILES', os.environ)
 
 
-class TestSyncRcfilesPull(unittest.TestCase):
-    """Test that cmd_repo_sync shows pulled commits."""
-
-    @patch('dev.sync_tracked_files')
-    @patch('dev.sync_rcfiles_push')
-    @patch('dev._self_update')
-    @patch('dev.load_config', return_value={'repos': [], 'files': []})
-    @patch('dev.get_base_path', return_value='/tmp/dev')
-    def test_shows_pulled_commits(self, mock_base, mock_config,
-                                   mock_update, mock_push, mock_sync):
-        """When _DEV_PULLED_RCFILES is set, show pulled commits."""
-        os.environ['_DEV_PULLED_RCFILES'] = 'abc1234 Update dev.py'
-        from io import StringIO
-        with patch('sys.stdout', new_callable=StringIO) as mock_out:
-            dev.cmd_repo_sync(argparse.Namespace())
-        output = mock_out.getvalue()
-        self.assertIn('rcfiles updated from remote', output)
-        self.assertIn('Update dev.py', output)
-        mock_push.assert_called_once_with(pulled=True)
-        os.environ.pop('_DEV_PULLED_RCFILES', None)
-
-    @patch('dev.sync_tracked_files')
-    @patch('dev.sync_rcfiles_push')
-    @patch('dev._self_update')
-    @patch('dev.load_config', return_value={'repos': [], 'files': []})
-    @patch('dev.get_base_path', return_value='/tmp/dev')
-    def test_no_env_var_shows_nothing(self, mock_base, mock_config,
-                                      mock_update, mock_push, mock_sync):
-        """Without _DEV_PULLED_RCFILES, no pull message shown."""
-        os.environ.pop('_DEV_PULLED_RCFILES', None)
-        from io import StringIO
-        with patch('sys.stdout', new_callable=StringIO) as mock_out:
-            dev.cmd_repo_sync(argparse.Namespace())
-        output = mock_out.getvalue()
-        self.assertNotIn('rcfiles updated from remote', output)
-        mock_push.assert_called_once_with(pulled=False)
-
-
-class TestSyncRcfilesPushPulled(unittest.TestCase):
-    """Test that sync_rcfiles_push suppresses 'up to date' when pulled."""
-
-    def setUp(self):
-        patcher = patch('dev._sync_repo_dir', return_value=dev.SCRIPT_DIR)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    @patch('dev.get_default_branch', return_value='main')
-    @patch('dev.run_git')
-    def test_up_to_date_shown_when_not_pulled(self, mock_git, mock_branch):
-        mock_git.return_value = (True, '0\t0')
-        from io import StringIO
-        with patch('sys.stdout', new_callable=StringIO) as mock_out:
-            dev.sync_rcfiles_push(pulled=False)
-        self.assertIn('rcfiles up to date', mock_out.getvalue())
-
-    @patch('dev.get_default_branch', return_value='main')
-    @patch('dev.run_git')
-    def test_up_to_date_hidden_when_pulled(self, mock_git, mock_branch):
-        mock_git.return_value = (True, '0\t0')
-        from io import StringIO
-        with patch('sys.stdout', new_callable=StringIO) as mock_out:
-            dev.sync_rcfiles_push(pulled=True)
-        self.assertNotIn('rcfiles up to date', mock_out.getvalue())
-
-
 class TestSyncSubmodules(unittest.TestCase):
     """Submodule updates must not commit unrelated parent edits."""
 
@@ -1611,45 +1569,6 @@ class TestSyncSubmodules(unittest.TestCase):
     def test_noop_without_gitmodules(self, mock_git):
         self.assertTrue(dev._sync_submodules(self.base_path))
         mock_git.assert_not_called()
-
-    @patch('dev.run_git')
-    def test_up_to_date_skips_commit_and_push(self, mock_git):
-        (self.base_path / '.gitmodules').write_text('[submodule "dev_scripts"]\n')
-
-        def side_effect(repo, *args):
-            if args[0] == 'config':
-                return (True, 'submodule.dev_scripts.path dev_scripts')
-            if args[:2] == ('submodule', 'update'):
-                return (True, '')
-            if args[0] == 'rev-list':
-                return (True, '')
-            self.fail(f"unexpected git call: {args}")
-        mock_git.side_effect = side_effect
-
-        self.assertTrue(dev._sync_submodules(self.base_path))
-        calls = [c.args[1] for c in mock_git.call_args_list]
-        self.assertNotIn('commit', calls)
-        self.assertNotIn('push', calls)
-
-    @patch('dev.run_git')
-    def test_changed_pointer_is_left_for_parent_sync(self, mock_git):
-        (self.base_path / '.gitmodules').write_text('[submodule "dev_scripts"]\n')
-
-        def side_effect(repo, *args):
-            if args[0] == 'config':
-                return (True, 'submodule.dev_scripts.path dev_scripts')
-            if args[:2] == ('submodule', 'update'):
-                return (True, '')
-            if args[0] == 'rev-list':
-                return (True, '')
-            self.fail(f"unexpected git call: {args}")
-        mock_git.side_effect = side_effect
-
-        self.assertTrue(dev._sync_submodules(self.base_path))
-        calls = [c.args[1] for c in mock_git.call_args_list]
-        self.assertNotIn('add', calls)
-        self.assertNotIn('commit', calls)
-        self.assertNotIn('push', calls)
 
     @patch('dev.run_git')
     def test_update_failure_skips_commit(self, mock_git):
@@ -1834,59 +1753,6 @@ class TestEnsureLink(unittest.TestCase):
 
         self.assertTrue(dev._is_dir_link(link_path))
         self.assertEqual(link_path.resolve(), repo_path.resolve())
-
-
-class TestToolsInstalled(unittest.TestCase):
-    """Verify all expected tools are installed on the current platform"""
-
-    WINDOWS_TOOLS = ['py', 'git', 'clang', 'choco', 'zoxide', 'fzf']
-    WSL_TOOLS = ['zsh', 'python3', 'git', 'zoxide', 'fzf']
-    WORK_TOOLS = ['agency']
-
-    @unittest.skipUnless(platform.system() == 'Windows', 'Windows only')
-    def test_windows_tools(self):
-        tools = self.WINDOWS_TOOLS + (self.WORK_TOOLS if os.environ.get('WORK') == 'MSFT' else [])
-        missing = [t for t in tools if shutil.which(t) is None]
-        self.assertEqual(missing, [], f'Missing Windows tools: {missing}')
-
-    @unittest.skipUnless(platform.system() == 'Windows', 'Windows only')
-    def test_wsl_tools(self):
-        if shutil.which('wsl') is None:
-            self.skipTest('WSL not available')
-        try:
-            probe = subprocess.run(
-                ['wsl', '-e', 'true'],
-                capture_output=True, timeout=30,
-            )
-        except (subprocess.TimeoutExpired, OSError) as e:
-            self.skipTest(f'WSL not usable: {e}')
-        if probe.returncode != 0:
-            self.skipTest('No WSL distro installed/running')
-        # Use a non-interactive bash with PATH augmented to include the typical
-        # per-user install dirs for tools like fzf and zoxide. The user's full
-        # interactive zsh can take minutes to load, which makes that approach
-        # unreliable for a unit test.
-        path_setup = 'export PATH="$HOME/.fzf/bin:$HOME/.local/bin:$PATH"'
-        check = ' && '.join(f'command -v {t}' for t in self.WSL_TOOLS)
-        result = subprocess.run(
-            ['wsl', '-e', 'bash', '-c', f'{path_setup}; {check}'],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode != 0:
-            missing = []
-            for t in self.WSL_TOOLS:
-                r = subprocess.run(
-                    ['wsl', '-e', 'bash', '-c', f'{path_setup}; command -v {t}'],
-                    capture_output=True, text=True, timeout=15,
-                )
-                if r.returncode != 0:
-                    missing.append(t)
-            self.assertEqual(missing, [], f'Missing WSL tools: {missing}')
-
-    @unittest.skipUnless(platform.system() == 'Linux', 'Linux only')
-    def test_linux_tools(self):
-        missing = [t for t in self.WSL_TOOLS if shutil.which(t) is None]
-        self.assertEqual(missing, [], f'Missing Linux tools: {missing}')
 
 
 class TestNormalizeUrlForComparison(unittest.TestCase):

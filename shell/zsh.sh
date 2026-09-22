@@ -34,6 +34,10 @@ export PATH="$HOME/dev_scripts:$PATH"
 export DEVCONFIG="${DEVCONFIG:-example-machine}"
 DEV="$(dev repo root)" || return
 export DEV
+if [[ -z "$DEV_PROMPT_USER" ]]; then
+  DEV_PROMPT_USER="$(dev config get identity.username)" || return
+  export DEV_PROMPT_USER="${DEV_PROMPT_USER:-${USERNAME:-$USER}}"
+fi
 
 # zoxide (replaces cd)
 if command -v zoxide &>/dev/null; then

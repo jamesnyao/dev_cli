@@ -1,18 +1,12 @@
 {
-  "description": "Tracked repos + settings for `dev`. This copy (inside dev_scripts/) ships with sample values so the tool works out of the box. Real values go in a private dev_config.json one level up -- see DEV_CONFIG_OVERRIDE / OVERRIDE_CONFIG_FILE in dev.py -- and win on top of this sample when both define the same key.",
-  "repos": [
-    {
-      "path": "example-repo",
-      "remoteUrl": "https://github.com/example/example-repo.git"
-    }
-  ],
+  "description": "Sample settings for dev. Copy to ../dev_config.json and customize; the private copy overrides these defaults.",
+  "repos": [],
   "files": [],
   "workspaceRoots": {
     "example-machine": "$HOME"
   },
   "identity": {
-    "branchPrefix": "user/you/",
-    "creatorEmail": "you@example.com"
+    "username": ""
   },
   "githubHostAliases": {}
 }
