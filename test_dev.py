@@ -88,6 +88,14 @@ class TestConfig(unittest.TestCase):
         sample = json.loads(dev.SAMPLE_CONFIG_FILE.read_text())
         self.assertEqual(sample, {'identity': {'gitEmail': 'sample@example.com'}})
 
+    def test_saved_config_has_stable_line_endings(self):
+        dev.save_config({'repos': [{'path': 'home', 'pathLinksTo': '~'}]})
+        contents = dev.OVERRIDE_CONFIG_FILE.read_bytes()
+        self.assertIn(b'\n', contents)
+        self.assertNotIn(b'\r', contents)
+        dev.save_config(dev.load_config())
+        self.assertEqual(dev.OVERRIDE_CONFIG_FILE.read_bytes(), contents)
+
     def test_override_wins_on_shared_dict_key(self):
         """Override values win per-key within a shared dict (e.g. identity)."""
         dev.SAMPLE_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
