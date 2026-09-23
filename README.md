@@ -1,122 +1,71 @@
 # dev_cli
 
-A Python CLI for synchronizing repositories, setting up shell profiles, and
-working with Azure DevOps pull requests.
+Set up your development shell, manage repositories, and work with Azure DevOps.
+Use it standalone; a private dotfiles repository is optional.
 
-Use it standalone, or as a submodule under a private dotfiles repo: this repo
-owns generic behavior and sample defaults; the parent owns machine identity,
-real repository lists, and custom shell hooks.
+## Install
 
-## Quick start
+Run one command. You do not need Python installed.
 
-```bash
-git clone "<clone-url>" "$HOME/dev_cli"
-"$HOME/dev_cli/dev" init
-```
-
-Windows (PowerShell):
+**Windows PowerShell:**
 
 ```powershell
-git clone "<clone-url>" "$HOME\dev_cli"
-& "$HOME\dev_cli\dev.ps1" init
+irm https://raw.githubusercontent.com/jamesnyao/dev_cli/main/install.ps1 | iex
 ```
 
-`dev init` prints its own next steps. It's idempotent and self-healing — safe
-to rerun any time, and it restores anything deleted (profile redirect,
-override config, hooks stub) without touching existing customizations. Or
-invoke `python3 ~/dev_cli/dev.py` directly without shell profiles, setting
-`DEVCONFIG=example-machine`.
+**macOS or Linux:**
 
-If Python isn't installed, the launchers print a message; run
-`dev python update` (bash) or `.\dev.ps1 python update` (PowerShell) to
-bootstrap it via your package manager (apt/dnf/brew or winget), then retry.
+```bash
+bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/jamesnyao/dev_cli/main/install.sh | bash'
+```
 
-## Configuration
+The installer clones `~/dev_cli` (or initializes an existing submodule), then
+runs `dev init`. It provisions Python through uv, creates your configuration,
+and registers PowerShell, bash, or zsh startup hooks. Existing files are preserved.
+On a fresh Mac, finish Apple's Command Line Tools prompt; installation resumes automatically.
+Open a new terminal to use `dev`, `python`, and `python3`.
 
-`dev init` also creates `~/dev_config.json` from the sample (prompting for a
-username if interactive and unset) and warns if a `python3` earlier on `PATH`
-would shadow the shim (see `DEV_PYTHON_SKIP` below).
+## Customize
 
-`dev_config.json` in this repo is a read-only sample; real settings go in
-`../dev_config.json` (or the file named by `DEV_CONFIG_OVERRIDE`). Dictionary
-keys merge shallowly, except `repos`, which replaces the sample list
-completely — CLI config writes target only the override file, which never
-carries comments since `dev` rewrites it as standard JSON.
+Edit `~/dev_config.json`. Set `pythonVersion` to an exact version such as
+`3.12.10`, then run `dev init`. This Python becomes the default on PATH;
+dev_cli never falls back to another installed Python.
 
-The sample is annotated with every supported setting and its default. Add
-repos with `dev repo add <path>` (`-h` for options); read any setting with
-`dev config get <dotted.key>`.
+Put custom settings in `~/dev_env/env_windows.ps1`, `env_mac.sh`, or
+`env_linux.sh` (also WSL). These hooks run **last**, after dev_cli sets up
+Python and PATH, so you can override either. Rerunning `dev init` preserves
+customizations, including legacy `env.ps1`/`env.sh` hooks.
 
-Only Git repositories are managed — loose files and directories belong in
-your dotfiles repo directly. Local credentials/caches live in `.dev_temp/`
-next to the override; keep it gitignored.
+Add a `workspaceRoots` entry for each machine and set `DEVCONFIG` to its key.
+See the annotated [configuration defaults](dev_config.json) for other settings.
+Keep `.dev_temp/` out of Git; it holds local runtimes, caches, and credentials.
 
-## Private overlays
+To install GitHub Copilot CLI and the bundled `dev-cli` skill, set
+`"ai": {"provider": "ghcopilot"}` and rerun `dev init`. Then run `copilot`
+and sign in. The default, `"none"`, leaves AI setup alone. Existing custom
+skills and personal/work skills stay yours. `ai.skills` selects bundled
+workflow skills (default `["dev-cli"]`); use `[]` to install none.
 
-`dev init` creates `~/dev_env/env.sh` (or `env.ps1` on Windows) as a stub
-if one doesn't exist — edit it for custom PATH/env/prompt setup; it's sourced
-last and never overwritten.
+## Sync
 
 ```text
-~/
-├── dev_config.json         # Your configuration, outside the tool repo
-├── dev_env/
-│   ├── env.sh               # Optional zsh customization
-│   └── env.ps1              # Optional PowerShell customization
-└── dev_cli/                 # This repository
-    ├── dev_config.json       # Shared annotated sample, never rewritten
-    ├── shell/
-    └── setup/
+dev repo add <local-repository>
+dev repo sync
 ```
 
-Private hooks run last and can override generic shell settings. Shell setup
-exposes `DEV_PROMPT_USER` for custom prompts. Python launcher shims can
-exclude a toolchain path substring via `DEV_PYTHON_SKIP`.
+Set `bootstrap: true` on the tool repository, or on its private parent when
+using a submodule. Sync updates that repository and its submodules **first**,
+restarts with the updated code, then processes only the other repositories.
+Omit `bootstrap` to disable self-updates.
 
-## Synchronization and submodules
+Sync can commit and push changes in the bootstrap repository. Commit and push
+tool submodule changes separately; dirty or unpublished submodules stop sync.
+Run `dev <command> -h` for options.
 
-As a submodule, `dev repo sync` also updates the parent repo: it uses the
-parent branch's upstream, initializes/updates submodules, and commits and
-pushes parent changes. Dirty or unpublished submodules stop the sync rather
-than publishing a pointer other machines can't fetch.
+## Develop
 
-Commit and push tool changes before syncing the parent.
+Install pylint with `python -m pip install pylint`, then run `dev test`.
+The suite covers onboarding, launchers, and sync using local Git repositories.
+Run it natively on Windows and Unix after changing shell behavior.
 
-Repository update or clone failures return a nonzero exit status; intentional
-skips do not. A cached `origin/HEAD` pointing to a deleted branch is ignored,
-allowing the existing `main` or `master` fallback after a remote change.
-
-`pathLinksTo` is the real checkout/clone destination, not another workspace
-clone. For a home dotfiles repository, configure `path: "home"` and
-`pathLinksTo: "~"`: with a separate workspace, `<workspace>/home` is only a
-link to the home checkout. Registering that link with `dev repo add` preserves
-the target and existing settings such as `bootstrap` and `skipOn`.
-
-Bootstrap checkouts must already be initialized at their configured destination.
-A nonempty home directory without Git is never overwritten or replaced by a
-workspace clone; initialize the home overlay explicitly before running sync.
-
-First migration or fresh parent clone:
-
-```bash
-git -C "$HOME" submodule update --init --recursive
-```
-
-Authenticate to both repos while this repo is private.
-
-## Tests
-
-```bash
-python3 test_dev.py           # full suite
-python3 test_dev.py TestConfig
-python3 test_dev.py TestConfig.test_save_never_writes_sample_file
-```
-
-Requires Python 3 and Git only; zsh startup tests need `zsh` and are skipped
-otherwise. Bash launcher tests run on Unix; batch and PowerShell launcher
-tests run on Windows. Run the suite natively on each platform after launcher
-changes. `dev test` runs the suite plus pylint (pylint required for that path only).
-
-## License
-
-[MIT](LICENSE).
+[MIT license](LICENSE).

@@ -1,11 +1,9 @@
 # Generic PowerShell environment. Sourced from ~/.psrc.ps1 (written by `dev init`).
 # Work-specific setup lives in a private hook sourced at the very end, if present.
 
-$SETUP = "$env:USERPROFILE\dev_cli\setup"
 $DevScripts = Split-Path $PSScriptRoot -Parent
-if (($env:PATH -split ';') -notcontains $DevScripts) {
-  $env:PATH = "$DevScripts;$env:PATH"
-}
+$SETUP = Join-Path $DevScripts "setup"
+$env:PATH = "$DevScripts;$env:PATH"
 
 . $SETUP\install_winget.ps1
 . $SETUP\install_prompt.ps1
@@ -17,6 +15,12 @@ if (($env:PATH -split ';') -notcontains $DevScripts) {
 . $SETUP\install_zoxide.ps1
 . $SETUP\install_fzf.ps1
 . $SETUP\install_pwsh.ps1
+
+$DevPython = & "$DevScripts\dev.ps1" python path
+if ($LASTEXITCODE -ne 0) {
+  throw "Could not provision the configured Python runtime"
+}
+$env:PATH = "$DevPython;$DevScripts;$env:PATH"
 
 if (-not $env:DEVCONFIG) {
   $env:DEVCONFIG = "example-machine"
@@ -37,7 +41,10 @@ if (-not $env:DEV_PROMPT_USER) {
 }
 
 # Private, work-specific setup -- runs last so it can override anything above.
-$WorkEnv = "$env:USERPROFILE\dev_env\env.ps1"
+$WorkEnv = "$HOME\dev_env\env_windows.ps1"
+if (-not (Test-Path $WorkEnv)) {
+  $WorkEnv = "$HOME\dev_env\env.ps1"
+}
 if (Test-Path $WorkEnv) {
   . $WorkEnv
 }

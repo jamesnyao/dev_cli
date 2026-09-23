@@ -1,27 +1,41 @@
-# Generic bash bootstrap. Sourced from ~/.bashrc (written by `dev init`).
-# Installs zsh + oh-my-zsh if missing, then hands off to it -- bash itself
-# is never used interactively here, so nothing below `exec zsh` matters.
-
+# Sourced by ~/.bashrc. The platform-specific custom hook runs last.
 case $- in
     *i*) ;;
-      *) return;;
+    *) return ;;
 esac
 
-if [ -t 1 ] && command -v apt-get >/dev/null 2>&1; then
-  if ! command -v zsh >/dev/null 2>&1; then
-    echo "Installing zsh..."
-    sudo apt-get update -qq && sudo apt-get install -y -qq zsh
-  fi
-  if command -v zsh >/dev/null 2>&1; then
-    if [ ! -d "$HOME/.oh-my-zsh" ]; then
-      echo "Installing oh-my-zsh..."
-      sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
-      git -C "$HOME" checkout .zshrc
+export platform="$(uname | tr '[:upper:]' '[:lower:]')"
+export PATH="$HOME/dev_cli:$HOME/.local/bin:$PATH"
+dev_python="$(dev python path)" || return
+export PATH="$dev_python:$PATH"
+unset dev_python
+export DEVCONFIG="${DEVCONFIG:-example-machine}"
+DEV="$(dev repo root)" || return
+export DEV
+if [[ -z "$DEV_PROMPT_USER" ]]; then
+    DEV_PROMPT_USER="$(dev config get identity.username)" || return
+    export DEV_PROMPT_USER="${DEV_PROMPT_USER:-${USERNAME:-$USER}}"
+fi
+
+if command -v zoxide >/dev/null 2>&1; then
+    eval "$(zoxide init --cmd cd bash)"
+fi
+
+if [[ "$platform" == "darwin" ]]; then
+    dev_hook="$HOME/dev_env/env_mac.sh"
+else
+    dev_hook="$HOME/dev_env/env_linux.sh"
+fi
+if [[ ! -f "$dev_hook" ]]; then
+    dev_hook="$HOME/dev_env/env.sh"
+    if [[ -f "$dev_hook" ]]; then
+        if ! command -v zsh >/dev/null 2>&1; then
+            echo "Legacy env.sh requires zsh; run dev init and migrate the platform hook." >&2
+            return 1
+        fi
+        exec zsh
     fi
-    if [ ! -d "$HOME/.oh-my-zsh/custom/plugins/zsh-autosuggestions" ]; then
-      echo "Installing zsh-autosuggestions..."
-      git clone --depth 1 https://github.com/zsh-users/zsh-autosuggestions "$HOME/.oh-my-zsh/custom/plugins/zsh-autosuggestions"
-    fi
-    exec zsh
-  fi
+fi
+if [[ -f "$dev_hook" ]]; then
+    source "$dev_hook"
 fi

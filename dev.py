@@ -21,6 +21,11 @@ from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 from pathlib import Path
 
+import ai
+import configuration
+import runtime
+from configuration import expand_config_path, load_jsonc
+
 # Ensure stdout/stderr can print unicode (e.g. arrows, checkmarks) on Windows
 # consoles where the default codec is cp1252.
 for _stream in (sys.stdout, sys.stderr):
@@ -132,55 +137,8 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 SAMPLE_CONFIG_FILE = SCRIPT_DIR / 'dev_config.json'
 
 
-def expand_config_path(value):
-    """Expand home and environment variables, including $HOME on Windows."""
-    value = re.sub(r'\$(?:HOME\b|\{HOME\})', lambda _: str(Path.home()), value)
-    return os.path.expandvars(os.path.expanduser(value))
-
-
-def load_jsonc(path):
-    """Load JSON with // and /* */ comments outside quoted strings."""
-    content = path.read_text(encoding='utf-8')
-    result = []
-    index = 0
-    in_string = False
-    escaped = False
-    while index < len(content):
-        current = content[index]
-        following = content[index + 1] if index + 1 < len(content) else ''
-        if in_string:
-            result.append(current)
-            if escaped:
-                escaped = False
-            elif current == '\\':
-                escaped = True
-            elif current == '"':
-                in_string = False
-        elif current == '"':
-            in_string = True
-            result.append(current)
-        elif current == '/' and following == '/':
-            index = content.find('\n', index)
-            if index == -1:
-                break
-            result.append('\n')
-        elif current == '/' and following == '*':
-            end = content.find('*/', index + 2)
-            if end == -1:
-                raise json.JSONDecodeError('Unterminated JSONC comment', content, index)
-            result.extend('\n' for char in content[index:end + 2] if char == '\n')
-            index = end + 1
-        else:
-            result.append(current)
-        index += 1
-    return json.loads(''.join(result))
-
-
 def _resolve_override_config_file():
-    env_override = os.getenv('DEV_CONFIG_OVERRIDE')
-    if env_override:
-        return Path(expand_config_path(env_override))
-    return SCRIPT_DIR.parent / 'dev_config.json'
+    return configuration.resolve_override_config_file(SCRIPT_DIR)
 
 OVERRIDE_CONFIG_FILE = _resolve_override_config_file()
 CONFIG_DIR = OVERRIDE_CONFIG_FILE.parent
@@ -201,17 +159,7 @@ def get_os_type():
     return 'linux'
 
 def load_config():
-    config = {}
-    if SAMPLE_CONFIG_FILE.is_file():
-        config = load_jsonc(SAMPLE_CONFIG_FILE)
-    if OVERRIDE_CONFIG_FILE != SAMPLE_CONFIG_FILE and OVERRIDE_CONFIG_FILE.is_file():
-        override = load_jsonc(OVERRIDE_CONFIG_FILE)
-        for key, value in override.items():
-            if isinstance(value, dict) and isinstance(config.get(key), dict):
-                config[key] = {**config[key], **value}
-            else:
-                config[key] = value
-    return config
+    return configuration.load_config(SAMPLE_CONFIG_FILE, OVERRIDE_CONFIG_FILE)
 
 def save_config(config):
     """Write real values to OVERRIDE_CONFIG_FILE. SAMPLE_CONFIG_FILE (inside
@@ -293,7 +241,12 @@ def _bootstrap_repo_path(config):
     if not (repo_path / '.git').exists():
         emit_error(f"Bootstrap repository is not initialized at {repo_path}; initialize it there before syncing.")
         return False
-    if repo_path.resolve() != _sync_repo_dir().resolve():
+    try:
+        sync_root = _sync_repo_dir()
+    except RuntimeError as exc:
+        emit_error(str(exc))
+        return False
+    if repo_path.resolve() != sync_root.resolve():
         emit_error(f"Bootstrap repository must be the sync repository: {repo_path}")
         return False
     return repo_path
@@ -1205,8 +1158,24 @@ def _ensure_link(link_path, repo_path):
 
 def _self_update(repo_path):
     """Update the parent and its submodules, then restart with the updated tool."""
-    _, old_hash = run_git(repo_path, 'rev-parse', 'HEAD')
-    old_source = (SCRIPT_DIR / 'dev.py').read_bytes()
+    success, old_hash = run_git(repo_path, 'rev-parse', 'HEAD')
+    if not success:
+        emit_error(f"Cannot inspect bootstrap repository: {old_hash}")
+        return False
+    success, branch = run_git(repo_path, 'symbolic-ref', '--quiet', '--short', 'HEAD')
+    if not success:
+        emit_error("Bootstrap repository has a detached HEAD; switch to a branch before syncing.")
+        return False
+    try:
+        old_source = (SCRIPT_DIR / 'dev.py').read_bytes()
+    except OSError as exc:
+        emit_error(f"Cannot read the bootstrap tool: {exc}")
+        return False
+    _, remote = run_git(repo_path, 'config', '--get', f'branch.{branch}.remote')
+    success, output = run_git(repo_path, 'fetch', remote or 'origin')
+    if not success:
+        emit_error(f"Cannot fetch bootstrap repository: {output}")
+        return False
     if not _sync_submodules(repo_path):
         return False
 
@@ -1225,11 +1194,6 @@ def _self_update(repo_path):
             return False
 
     _, pre_fetch_hash = run_git(repo_path, 'rev-parse', 'HEAD')
-
-    success, output = run_git(repo_path, 'fetch', 'origin')
-    if not success:
-        emit_error(f"Cannot fetch rcfiles: {output}")
-        return False
 
     upstream = _sync_upstream(repo_path)
     success, ahead_behind = run_git(repo_path, 'rev-list', '--left-right', '--count', f'HEAD...{upstream}')
@@ -1252,7 +1216,10 @@ def _self_update(repo_path):
 
     if behind > 0 and not _sync_submodules(repo_path):
         return False
-    _, new_hash = run_git(repo_path, 'rev-parse', 'HEAD')
+    success, new_hash = run_git(repo_path, 'rev-parse', 'HEAD')
+    if not success:
+        emit_error(f"Cannot inspect bootstrap repository after update: {new_hash}")
+        return False
 
     if old_hash != new_hash or old_source != (SCRIPT_DIR / 'dev.py').read_bytes():
         if pre_fetch_hash != new_hash:
@@ -1260,8 +1227,16 @@ def _self_update(repo_path):
             _, log = run_git(repo_path, 'log', '--oneline', f'{pre_fetch_hash}..{new_hash}')
             if log:
                 os.environ['_DEV_PULLED_RCFILES'] = log
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT_DIR / 'dev.py')] + sys.argv[1:])
+        runtime_path = SCRIPT_DIR / 'runtime.py'
+        command = ([sys.executable, '-I', str(runtime_path), '--dev'] if runtime_path.is_file()
+                   else [sys.executable, str(SCRIPT_DIR / 'dev.py')])
+        environment = os.environ.copy()
+        environment['_DEV_BOOTSTRAP_UPDATED'] = json.dumps([str(repo_path.resolve()), new_hash])
+        try:
+            result = subprocess.run(command + sys.argv[1:], env=environment)
+        except OSError as exc:
+            emit_error(f"Cannot restart the updated bootstrap tool: {exc}")
+            return False
         sys.exit(result.returncode)
     return True
 
@@ -1270,29 +1245,31 @@ def cmd_repo_sync(args):
     """Update the sync repository, its submodules, and tracked repositories."""
     assume_yes = getattr(args, 'force', False)
     config = load_config()
-    base_path = Path(get_base_path())
     bootstrap_path = _bootstrap_repo_path(config)
     if bootstrap_path is False:
         return 1
-    if bootstrap_path and _self_update(bootstrap_path) is False:
-        return 1
+    continuation = os.environ.pop('_DEV_BOOTSTRAP_UPDATED', None)
+    if bootstrap_path:
+        success, head = run_git(bootstrap_path, 'rev-parse', 'HEAD')
+        already_updated = success and continuation == json.dumps([str(bootstrap_path.resolve()), head])
+        if not already_updated and _self_update(bootstrap_path) is False:
+            return 1
     config = load_config()
     base_path = Path(get_base_path(config))
     bootstrap_path = _bootstrap_repo_path(config)
     if bootstrap_path is False:
         return 1
 
-    print(f"{Colors.BLUE}Syncing rcfiles...{Colors.NC}")
-    pulled = False
     pulled_log = os.environ.pop('_DEV_PULLED_RCFILES', None)
-    if pulled_log:
-        pulled = True
-        emit_ok("rcfiles updated from remote:")
-        for line in pulled_log.strip().splitlines():
-            print(f"     {Colors.YELLOW}{line}{Colors.NC}")
-    if sync_rcfiles_push(pulled=pulled) is False:
-        return 1
-    print()
+    if bootstrap_path:
+        print(f"{Colors.BLUE}Syncing bootstrap repository: {bootstrap_path}{Colors.NC}")
+        if pulled_log:
+            emit_ok("Bootstrap repository updated from remote:")
+            for line in pulled_log.strip().splitlines():
+                print(f"     {Colors.YELLOW}{line}{Colors.NC}")
+        if sync_rcfiles_push(pulled=bool(pulled_log)) is False:
+            return 1
+        print()
 
     print(f"{Colors.BLUE}Syncing repositories to: {base_path}{Colors.NC}")
 
@@ -1328,6 +1305,13 @@ def cmd_repo_sync(args):
             skipped += 1
             continue
 
+        if bootstrap_path and repo_path.resolve() == bootstrap_path.resolve():
+            if link_to is not None:
+                _ensure_link(link_path, repo_path)
+            emit_ok(f"{name} (updated during bootstrap)")
+            synced += 1
+            continue
+
         if _report_background_sync_status(name):
             skipped += 1
             continue
@@ -1341,10 +1325,6 @@ def cmd_repo_sync(args):
         if (repo_path / '.git').exists():
             if link_to is not None:
                 _ensure_link(link_path, repo_path)
-            if bootstrap_path and repo_path.resolve() == bootstrap_path.resolve():
-                emit_ok(f"{name} (updated during bootstrap)")
-                synced += 1
-                continue
             actual_url = get_remote_url(repo_path)
             fixed_remote = False
             if (url and actual_url and _parse_ado_remote(url)
@@ -1900,7 +1880,7 @@ def cmd_repo_old(args):
 BASHRC_SOURCE_LINE = '[ -f "$HOME/dev_cli/shell/bash.sh" ] && source "$HOME/dev_cli/shell/bash.sh"'
 ZSHRC_SOURCE_LINE = '[[ -f "$HOME/dev_cli/shell/zsh.sh" ]] && source "$HOME/dev_cli/shell/zsh.sh"'
 PSRC_SOURCE_LINE = '. "$HOME\\dev_cli\\shell\\profile.ps1"'
-PSRC_CONTENT = '$profile = "$HOME\\.psrc.ps1"\n. $profile\n'
+PSRC_CONTENT = '. "$HOME\\.psrc.ps1"\n'
 
 
 def _ensure_profile_source(path, source):
@@ -1913,61 +1893,41 @@ def _ensure_profile_source(path, source):
 
 
 def _init_windows():
-    """Ensure $PROFILE sources .psrc.ps1."""
-    result = subprocess.run(
-        ['powershell', '-NoProfile', '-Command', '$PROFILE'],
-        capture_output=True, text=True)
-    if result.returncode != 0:
-        emit_error("Could not determine $PROFILE path")
+    """Register the redirect for both installed PowerShell editions."""
+    shells = [shell for shell in ('pwsh', 'powershell') if shutil.which(shell)]
+    if not shells:
+        emit_error("PowerShell is required to install the shell profile")
         return 1
 
-    profile_path = Path(result.stdout.strip())
     _ensure_profile_source(Path.home() / '.psrc.ps1', PSRC_SOURCE_LINE)
-
-    if profile_path.exists():
-        content = profile_path.read_text(encoding='utf-8')
-        if '.psrc.ps1' in content:
-            emit_ok("$PROFILE already sources .psrc.ps1")
-            return 0
-
-    _ensure_profile_source(profile_path, PSRC_CONTENT)
-    emit_ok(f"Wrote $PROFILE -> .psrc.ps1 ({profile_path})")
+    for shell in shells:
+        result = subprocess.run(
+            [shell, '-NoProfile', '-Command',
+             '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); '
+             '$PROFILE.CurrentUserCurrentHost'],
+            capture_output=True, text=True, encoding='utf-8')
+        if result.returncode != 0 or not result.stdout.strip():
+            emit_error(f"Could not determine {shell} $PROFILE: {result.stderr.strip()}")
+            return 1
+        profile_path = Path(result.stdout.strip())
+        content = profile_path.read_text(encoding='utf-8') if profile_path.exists() else ''
+        if '.psrc.ps1' not in content:
+            _ensure_profile_source(profile_path, PSRC_CONTENT)
+        emit_ok(f"{shell} profile -> .psrc.ps1 ({profile_path})")
     return 0
 
 
 def _init_unix():
-    """Ensure zsh is the running shell, or .bashrc execs into it."""
+    """Register native bash and zsh setup without changing the user's shell."""
     _ensure_profile_source(Path.home() / '.zshrc', ZSHRC_SOURCE_LINE)
-    shell = os.environ.get('SHELL', '')
-
-    if 'zsh' in shell:
-        emit_ok("zsh is the default shell")
-        return 0
-
-    if get_os_type() == 'linux' and not shutil.which('zsh'):
-        print(f"{Colors.BLUE}Installing zsh...{Colors.NC}")
-        result = subprocess.run(
-            ['sudo', 'apt-get', 'install', '-y', 'zsh'],
-            capture_output=True, text=True)
-        if result.returncode != 0:
-            emit_error(f"Failed to install zsh: {result.stderr}")
-            return 1
-        emit_ok("zsh installed")
-
-    bashrc = Path.home() / '.bashrc'
-    if not bashrc.exists():
-        bashrc.write_text(f"{BASHRC_SOURCE_LINE}\n", encoding='utf-8')
-        emit_ok("Created .bashrc with zsh exec")
-        return 0
-
-    content = bashrc.read_text(encoding='utf-8')
-    if BASHRC_SOURCE_LINE in content:
-        emit_ok(".bashrc already execs into zsh")
-        return 0
-
-    with open(bashrc, 'a', encoding='utf-8') as f:
-        f.write(f"\n{BASHRC_SOURCE_LINE}\n")
-    emit_ok("Added zsh exec to .bashrc")
+    _ensure_profile_source(Path.home() / '.bashrc', BASHRC_SOURCE_LINE)
+    # Login bash reads only the first existing file in this order.
+    login_profiles = [Path.home() / name for name in ('.bash_profile', '.bash_login', '.profile')]
+    login_profile = next((path for path in login_profiles if path.exists()), login_profiles[0])
+    _ensure_profile_source(
+        login_profile,
+        '[ -n "$BASH_VERSION" ] && [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"')
+    emit_ok("Registered bash and zsh shell profiles")
     return 0
 
 
@@ -1996,40 +1956,21 @@ def _init_config():
     return 0
 
 
-def _check_python3_shim():
-    """Warn if the python3 shim on PATH would not resolve to a working
-    interpreter, e.g. a broken or unwanted toolchain python earlier on PATH."""
-    shim_name = 'python3.cmd' if get_os_type() == 'windows' else 'python3'
-    shim_path = SCRIPT_DIR / shim_name
-    if not shim_path.is_file():
-        return
-
-    simulated_path = os.pathsep.join([str(SCRIPT_DIR), os.environ.get('PATH', '')])
-    env = dict(os.environ, PATH=simulated_path)
-    try:
-        result = subprocess.run(
-            [str(shim_path), '--version'], capture_output=True, text=True,
-            env=env, timeout=10, shell=get_os_type() == 'windows')
-    except OSError:
-        return
-
-    if result.returncode != 0:
-        emit_warn("The python3 shim could not find a working interpreter")
-        print("     A python earlier on PATH may be broken or unwanted for this tool.")
-        print("     Set DEV_PYTHON_SKIP to a substring of its path to skip it.")
-
-
 def _env_path():
     """Path to the private environment file for this platform."""
-    name = 'env.ps1' if get_os_type() == 'windows' else 'env.sh'
+    name = {
+        'windows': 'env_windows.ps1',
+        'darwin': 'env_mac.sh',
+        'linux': 'env_linux.sh',
+    }[get_os_type()]
     return Path.home() / 'dev_env' / name
 
 
 def _init_env_stub():
-    """Create the private environment file that shell/zsh.sh, shell/bash.sh (via
-    zsh), and shell/profile.ps1 source last, if one doesn't already exist. This
-    is the one place custom PATH/env/prompt setup goes; it's never overwritten."""
+    """Create the custom hook, sourced last and never overwritten."""
     env_path = _env_path()
+    legacy_name = 'env.ps1' if get_os_type() == 'windows' else 'env.sh'
+    legacy = env_path.parent / legacy_name
     if get_os_type() == 'windows':
         stub = (
             "# Custom environment setup, sourced last by dev_cli/shell/profile.ps1.\n"
@@ -2037,38 +1978,62 @@ def _init_env_stub():
             "# Example: $env:PATH = \"C:\\my\\tool\\bin;$env:PATH\"\n")
     else:
         stub = (
-            "# Custom environment setup, sourced last by dev_cli/shell/zsh.sh.\n"
+            "# Custom environment setup, sourced last by dev_cli's bash/zsh profiles.\n"
             "# Safe to edit; dev init never overwrites an existing file here.\n"
             "# Example: export PATH=\"$HOME/my-tool/bin:$PATH\"\n")
 
     if env_path.is_file():
         emit_ok(f"{env_path} already exists")
         return 0
+    if legacy.is_file():
+        if get_os_type() == 'windows':
+            source = '. "$HOME\\dev_env\\env.ps1"'
+        else:
+            source = (
+                'if [ -n "${BASH_VERSION:-}" ]; then\n'
+                '    if ! command -v zsh >/dev/null 2>&1; then\n'
+                '        echo "Legacy env.sh requires zsh; install it or migrate this platform hook." >&2\n'
+                '        return 1\n'
+                '    fi\n'
+                '    exec zsh\n'
+                'fi\n'
+                'source "$HOME/dev_env/env.sh"')
+        stub = f"# Keep existing customizations during the platform-hook migration.\n{source}\n"
 
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text(stub, encoding='utf-8')
-    emit_ok(f"Created {env_path}")
+    emit_ok(f"Created {env_path}" + (f" -> {legacy}" if legacy.is_file() else ''))
     return 0
 
 
 def cmd_init(args):
-    """Bootstrap shell profile, override config, env stub, and the python3 shim
-    on a fresh machine."""
-    rc = _init_windows() if get_os_type() == 'windows' else _init_unix()
+    """Provision pinned Python, then register profiles and last-running hooks."""
+    python = runtime.ensure_python()
+    rc = _init_config()
     if rc != 0:
         return rc
-    rc = _init_config()
+    rc = _init_windows() if get_os_type() == 'windows' else _init_unix()
     if rc != 0:
         return rc
     rc = _init_env_stub()
     if rc != 0:
         return rc
-    _check_python3_shim()
+    rc = ai.setup_ai(load_config(), sys.modules[__name__])
+    if rc != 0:
+        return rc
+    emit_ok(f"Default Python: {python}")
+    print(f"Customize {_env_path()}; it runs LAST, after dev_cli sets PATH.")
+    print(f"Edit {OVERRIDE_CONFIG_FILE} for Python version, machines, and repositories.")
+    print("Open a new terminal to use dev, python, and python3.")
+    return 0
 
-    print(f"\n{Colors.BLUE}Next steps:{Colors.NC}")
-    print("  1. Open a new terminal to load the shell profile")
-    print(f"  2. Edit {OVERRIDE_CONFIG_FILE} to add repos and identity ('dev repo add -h')")
-    print(f"  3. Edit {_env_path()} for custom PATH/env/prompt setup")
+
+def cmd_python(args):
+    """Use the exact configured Python, never an interpreter discovered on PATH."""
+    if args.python_command == 'path':
+        print(runtime.python_bin())
+    else:
+        emit_ok(f"Configured Python is ready: {runtime.ensure_python()}")
     return 0
 
 
@@ -2081,14 +2046,14 @@ def cmd_test(args):
 
     print(f"{Colors.BLUE}Running tests...{Colors.NC}", flush=True)
     result = subprocess.run(
-        [sys.executable, '-u', '-m', 'unittest', 'test_dev', '-b'],
+        [sys.executable, '-u', '-m', 'unittest', 'discover', '-p', 'test_*.py', '-b'],
         cwd=str(SCRIPT_DIR))
     if result.returncode != 0:
         return result.returncode
 
     print(f"\n{Colors.BLUE}Running pylint...{Colors.NC}", flush=True)
     lint = subprocess.run(
-        [sys.executable, '-u', '-m', 'pylint', 'dev.py'],
+        [sys.executable, '-u', '-m', 'pylint', 'dev.py', 'configuration.py', 'runtime.py', 'ai.py'],
         cwd=str(SCRIPT_DIR))
     return lint.returncode
 
@@ -3103,7 +3068,12 @@ def main():
     config_get_p.add_argument('key')
 
     # Init command
-    subparsers.add_parser('init', help='Bootstrap shell profile ($PROFILE on Windows, .bashrc→zsh on Linux)')
+    subparsers.add_parser('init', help='Set up pinned Python, shell profiles, and custom hooks')
+
+    python_parser = subparsers.add_parser('python', help='Manage the configured Python runtime')
+    python_sub = python_parser.add_subparsers(dest='python_command', required=True)
+    python_sub.add_parser('path', help='Print the managed Python directory for PATH')
+    python_sub.add_parser('update', help='Install the exact pythonVersion in dev_config.json')
 
     # Test command
     subparsers.add_parser('test', help='Run dev.py unit tests')
@@ -3126,6 +3096,8 @@ def main():
         return cmd_init(args)
     elif args.command == 'test':
         return cmd_test(args)
+    elif args.command == 'python':
+        return cmd_python(args)
     elif args.command == 'config':
         if args.config_command == 'get':
             return cmd_config_get(args)

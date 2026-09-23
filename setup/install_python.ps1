@@ -1,4 +1,4 @@
-$PYTHON_VERSION = Get-Content "$SETUP\PYTHON_VERSION"
-if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
-  winget install "Python.Python.$PYTHON_VERSION" --source winget --accept-package-agreements --accept-source-agreements
+& "$PSScriptRoot\..\runtime.ps1" --ensure
+if ($LASTEXITCODE -ne 0) {
+    throw "Managed Python installation failed (exit $LASTEXITCODE)"
 }
