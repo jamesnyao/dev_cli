@@ -42,9 +42,6 @@ if (-not $env:DEV_PROMPT_USER) {
 
 # Private, work-specific setup -- runs last so it can override anything above.
 $WorkEnv = "$HOME\dev_env\env_windows.ps1"
-if (-not (Test-Path $WorkEnv)) {
-  $WorkEnv = "$HOME\dev_env\env.ps1"
-}
 if (Test-Path $WorkEnv) {
   . $WorkEnv
 }

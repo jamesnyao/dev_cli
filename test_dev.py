@@ -814,7 +814,10 @@ class TestShellWorkspace(unittest.TestCase):
             'from pathlib import Path\nimport sys\n'
             'def ensure_python(): return Path(sys.executable)\n'
             'def python_bin(): return Path(sys.executable).parent\n')
-        (tool / 'ai.py').write_text('def setup_ai(config, reporter): return 0\n')
+        (tool / 'ai.py').write_text(
+            "PROVIDERS = {'ghcopilot': None, 'claude': None, 'none': None}\n"
+            "def provider_name(config): return config.get('ai', {}).get('provider', 'ghcopilot')\n"
+            'def setup_ai(config, reporter): return 0\n')
         tools = self.home / 'bin'
         tools.mkdir()
         uname = tools / 'uname'
@@ -847,7 +850,7 @@ class TestShellWorkspace(unittest.TestCase):
     def test_private_hook_runs_after_generic_setup(self):
         hooks = self.home / 'dev_env'
         hooks.mkdir()
-        (hooks / 'env.sh').write_text(
+        (hooks / 'env_mac.sh').write_text(
             '[[ "$DEVCONFIG" == "example-machine" ]] || return 1\n'
             'export DEVCONFIG=private-machine\nexport PRIVATE_HOOK=yes\n')
         result = self.shell()
@@ -866,7 +869,7 @@ class TestShellWorkspace(unittest.TestCase):
             'identity': {'username': 'configured-user'}}))
         hooks = self.home / 'dev_env'
         hooks.mkdir()
-        (hooks / 'env.sh').write_text(
+        (hooks / 'env_mac.sh').write_text(
             '[[ "$DEV_PROMPT_USER" == "configured-user" ]] || return 1\n')
         result = self.shell()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1105,6 +1108,76 @@ class TestInitConfig(unittest.TestCase):
         self.assertEqual(saved['identity']['username'], 'bob')
 
 
+class TestInitAI(unittest.TestCase):
+    def setUp(self):
+        self.config = {'ai': {'provider': 'ghcopilot', 'skills': ['dev-cli']}, 'repos': []}
+        self.enterContext(patch('dev.load_config', side_effect=lambda: self.config))
+        self.enterContext(patch('dev.OVERRIDE_CONFIG_FILE'))
+        self.enterContext(patch('dev.load_jsonc', side_effect=lambda _: dict(self.config)))
+        self.save = self.enterContext(patch('dev.save_config'))
+        self.setup = self.enterContext(patch('dev.ai.setup_ai', return_value=0))
+        self.interactive = self.enterContext(patch('sys.stdin.isatty', return_value=True))
+        self.answer = self.enterContext(patch('builtins.input', return_value=''))
+        self.error = self.enterContext(patch('dev.emit_error'))
+
+    def test_enter_accepts_suggested_copilot(self):
+        self.assertEqual(dev._init_ai(), 0)
+        self.assertIn('[ghcopilot]', self.answer.call_args.args[0])
+        self.assertEqual(self.setup.call_args.args[0], self.config)
+        self.save.assert_not_called()
+
+    def test_claude_choice_is_saved_and_dispatched(self):
+        self.answer.return_value = 'claude'
+        self.setup.return_value = 1
+        self.assertEqual(dev._init_ai(), 1)
+        selected = self.save.call_args.args[0]
+        self.assertEqual(selected['ai'], {'provider': 'claude', 'skills': ['dev-cli']})
+        self.assertEqual(self.setup.call_args.args[0], selected)
+        self.assertEqual(self.config['ai']['provider'], 'ghcopilot')
+
+    def test_none_choice_disables_setup_and_is_saved(self):
+        self.answer.return_value = 'none'
+        self.assertEqual(dev._init_ai(), 0)
+        self.assertEqual(self.save.call_args.args[0]['ai']['provider'], 'none')
+        self.assertEqual(self.setup.call_args.args[0]['ai']['provider'], 'none')
+
+    def test_existing_choice_is_suggested_without_overwriting_it(self):
+        self.config['ai']['provider'] = 'none'
+        self.assertEqual(dev._init_ai(), 0)
+        self.assertIn('[none]', self.answer.call_args.args[0])
+        self.assertEqual(self.setup.call_args.args[0]['ai']['provider'], 'none')
+        self.save.assert_not_called()
+
+    def test_noninteractive_uses_default_without_prompt(self):
+        self.config = {}
+        self.interactive.return_value = False
+        self.assertEqual(dev._init_ai(), 0)
+        self.answer.assert_not_called()
+        self.assertEqual(self.save.call_args.args[0]['ai']['provider'], 'ghcopilot')
+
+    def test_noninteractive_preserves_saved_opt_out(self):
+        self.config['ai']['provider'] = 'none'
+        self.interactive.return_value = False
+        self.assertEqual(dev._init_ai(), 0)
+        self.answer.assert_not_called()
+        self.save.assert_not_called()
+        self.assertEqual(self.setup.call_args.args[0]['ai']['provider'], 'none')
+
+    def test_invalid_choice_does_not_save_or_install(self):
+        self.answer.return_value = 'unknown'
+        self.assertEqual(dev._init_ai(), 1)
+        self.save.assert_not_called()
+        self.setup.assert_not_called()
+        self.error.assert_called_once()
+
+    def test_closed_prompt_does_not_install_default(self):
+        self.answer.side_effect = EOFError
+        self.assertEqual(dev._init_ai(), 1)
+        self.save.assert_not_called()
+        self.setup.assert_not_called()
+        self.assertIn('input closed', self.error.call_args.args[0])
+
+
 class TestCmdInitSelfHealing(unittest.TestCase):
     """dev init is idempotent: re-running it restores anything deleted,
     without touching content the user has since customized."""
@@ -1178,7 +1251,7 @@ class TestCmdInitSelfHealing(unittest.TestCase):
 
         self.assertEqual(dev.cmd_init(None), 0)
         self.assertEqual(json.loads(dev.OVERRIDE_CONFIG_FILE.read_text()),
-                         {'identity': {'username': 'kept'}})
+                         {'identity': {'username': 'kept'}, 'ai': {'provider': 'ghcopilot'}, 'repos': []})
         self.assertEqual(env_path.read_text(), 'export CUSTOM=1\n')
         self.assertIn('export CUSTOM_RC=1', (self.home / '.zshrc').read_text())
 
@@ -1190,7 +1263,7 @@ class TestCmdInitSelfHealing(unittest.TestCase):
         self.assertFalse((self.home / '.psrc.ps1').exists())
         self.assertFalse(dev.OVERRIDE_CONFIG_FILE.exists())
 
-    def test_platform_hooks_preserve_existing_private_customizations(self):
+    def test_platform_hooks_do_not_adopt_legacy_files(self):
         for system, name, legacy in (
                 ('windows', 'env_windows.ps1', 'env.ps1'),
                 ('darwin', 'env_mac.sh', 'env.sh'),
@@ -1203,10 +1276,9 @@ class TestCmdInitSelfHealing(unittest.TestCase):
                 self.assertEqual(dev._init_env_stub(), 0)
                 hook = hooks / name
                 self.assertEqual(dev._env_path(), hook)
-                self.assertIn(legacy, hook.read_text())
-                if system != 'windows':
-                    self.assertIn('exec zsh', hook.read_text())
-                    self.assertIn('${BASH_VERSION:-}', hook.read_text())
+                self.assertNotIn(legacy, hook.read_text())
+                self.assertNotIn('exec zsh', hook.read_text())
+                self.assertNotIn('# custom settings', hook.read_text())
                 self.assertEqual(original.read_text(), '# custom settings\n')
                 hook.write_text('# customized platform hook\n', encoding='utf-8')
                 self.assertEqual(dev._init_env_stub(), 0)

@@ -26,16 +26,16 @@ settings without printing credentials or the entire configuration.
   Run `dev python update` after changing it; `dev python path` prints its directory.
 - `workspaceRoots` maps machine names to workspace paths. `DEVCONFIG` selects
   the machine; `dev repo root` reports the resulting workspace.
-- `ai.provider` defaults to `"none"`. Set it to `"ghcopilot"` and run `dev init`
-  only when the user wants GitHub Copilot CLI installed. `ai.skills` selects
-  bundled skills, defaults to `["dev-cli"]`, and accepts `[]` to skip skills.
+- `dev init` prompts for `ai.provider`, suggesting `"ghcopilot"` by default
+  or the saved choice on later runs. Choose `"none"` to skip AI setup.
+  `"claude"` has a separate, not-yet-implemented handler that reports an error
+  without installing Copilot. Noninteractive runs use the configured default.
+  `ai.skills` selects bundled skills, defaults to `["dev-cli"]`, and accepts `[]` to skip skills.
   Only `dev-cli` is currently bundled; personal skill libraries stay untouched.
   Authentication remains user-controlled: run `copilot`, then `/login` if needed.
 - Custom settings belong in `~/dev_env/env_windows.ps1` on Windows,
   `~/dev_env/env_mac.sh` on macOS, or `~/dev_env/env_linux.sh` on Linux, including
   WSL. The platform-specific hook runs last and can override Python and PATH.
-  `dev init` preserves legacy `env.ps1`/`env.sh` through compatibility adapters;
-  startup also falls back to the legacy hook before initialization.
 
 Shared CLI guidance belongs in this bundled skill, not duplicated private
 overrides. Keep private configuration, custom hooks, and personal/company skill

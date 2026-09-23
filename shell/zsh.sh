@@ -69,9 +69,6 @@ if [[ "$platform" == "darwin" ]]; then
 else
   dev_hook="$HOME/dev_env/env_linux.sh"
 fi
-if [[ ! -f "$dev_hook" ]]; then
-  dev_hook="$HOME/dev_env/env.sh"
-fi
 if [[ -f "$dev_hook" ]]; then
   source "$dev_hook"
 fi

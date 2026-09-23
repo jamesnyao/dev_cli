@@ -1,4 +1,4 @@
-"""Opt-in AI tooling and selected bundled, public skills."""
+"""Provider-specific AI setup and selected bundled, public skills."""
 
 import hashlib
 import http.client
@@ -192,32 +192,56 @@ def _install_skill(dev, name, source, digest):
     dev.emit_ok(f"Installed {name} skill: {directory}")
 
 
+def _setup_ghcopilot(names, dev):
+    selected = _selected_skills(names)
+    command = _copilot_command()
+    if command:
+        _verify_copilot(command)
+    else:
+        dev.emit_info("Installing GitHub Copilot CLI using its native installer.")
+        command = _install_copilot()
+    dev.emit_ok(f"Copilot CLI is runnable: {command}")
+    for name, source, digest in selected:
+        _install_skill(dev, name, source, digest)
+    dev.emit_info(
+        "Authentication was not changed or checked. Run copilot and use /login if sign-in is required.")
+
+
+def _setup_claude(names, dev):
+    raise NotImplementedError("Claude setup is not implemented yet. Choose ghcopilot or none.")
+
+
+def _setup_none(names, dev):
+    dev.emit_info("AI setup disabled (ai.provider: none).")
+
+
+PROVIDERS = {
+    'ghcopilot': _setup_ghcopilot,
+    'claude': _setup_claude,
+    'none': _setup_none,
+}
+DEFAULT_PROVIDER = 'ghcopilot'
+
+
+def provider_name(config):
+    """Validate AI options and resolve the selected provider."""
+    if not isinstance(config, dict):
+        raise ValueError("Configuration must be an object.")
+    options = config.get('ai', {})
+    if not isinstance(options, dict) or set(options) - {'provider', 'skills'}:
+        raise ValueError('ai must be an object containing only provider and skills.')
+    provider = options.get('provider', DEFAULT_PROVIDER)
+    if not isinstance(provider, str) or provider not in PROVIDERS:
+        raise ValueError(f"ai.provider must be one of: {', '.join(PROVIDERS)}.")
+    _skill_names(options)
+    return provider
+
+
 def setup_ai(config, dev):
-    """Return 0 on success or opt-out, or 1 on explicit configuration/setup failure."""
+    """Run the selected provider's setup, reporting unavailable providers explicitly."""
     try:
-        if not isinstance(config, dict):
-            raise ValueError("Configuration must be an object.")
-        options = config.get('ai', {})
-        if not isinstance(options, dict) or set(options) - {'provider', 'skills'}:
-            raise ValueError('ai must be an object containing only provider ("none" or "ghcopilot") and skills.')
-        provider = options.get('provider', 'none')
-        if provider not in ('none', 'ghcopilot'):
-            raise ValueError('ai.provider must be "none" or "ghcopilot".')
-        names = _skill_names(options)
-        if provider == 'none':
-            return 0
-        selected = _selected_skills(names)
-        command = _copilot_command()
-        if command:
-            _verify_copilot(command)
-        else:
-            dev.emit_info("Installing GitHub Copilot CLI using its native installer.")
-            command = _install_copilot()
-        dev.emit_ok(f"Copilot CLI is runnable: {command}")
-        for name, source, digest in selected:
-            _install_skill(dev, name, source, digest)
-        dev.emit_info(
-            "Authentication was not changed or checked. Run copilot and use /login if sign-in is required.")
+        provider = provider_name(config)
+        PROVIDERS[provider](_skill_names(config.get('ai', {})), dev)
         return 0
     except (OSError, ValueError, RuntimeError, http.client.HTTPException, subprocess.SubprocessError) as error:
         dev.emit_error(f"AI setup failed: {error}")

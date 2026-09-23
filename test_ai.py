@@ -1,4 +1,4 @@
-"""Network-free tests for opt-in Copilot installation and skill ownership."""
+"""Network-free tests for AI provider setup and skill ownership."""
 
 import http.client
 import json
@@ -56,7 +56,7 @@ class TestAI(unittest.TestCase):
         return bundled
 
     def test_opt_out_does_not_touch_ai_files_or_download(self):
-        for config in ({}, {'ai': {}}, {'ai': {'provider': 'none'}}):
+        for config in ({'ai': {'provider': 'none'}}, {'ai': {'provider': 'none', 'skills': []}}):
             with self.subTest(config=config), patch.object(ai.Path, 'home') as home:
                 self.assertEqual(self.setup_ai(config), 0)
                 home.assert_not_called()
@@ -64,6 +64,24 @@ class TestAI(unittest.TestCase):
         self.which.assert_not_called()
         self.download.assert_not_called()
         self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_missing_provider_defaults_to_copilot(self):
+        for config in ({}, {'ai': {}}, {'ai': {'skills': []}}):
+            with self.subTest(config=config), patch.dict(
+                    ai.PROVIDERS, {'ghcopilot': Mock()}) as providers:
+                self.assertEqual(self.setup_ai(config), 0)
+                providers['ghcopilot'].assert_called_once_with(
+                    config.get('ai', {}).get('skills', ['dev-cli']), self.dev)
+
+    def test_claude_reaches_unimplemented_handler_without_copilot_side_effects(self):
+        with patch.object(ai, 'BUNDLED_SKILLS') as bundled, patch.object(ai.Path, 'home') as home:
+            self.assertEqual(self.setup_ai({'ai': {'provider': 'claude'}}), 1)
+            bundled.__truediv__.assert_not_called()
+            home.assert_not_called()
+        self.assertIn('Claude setup is not implemented', self.dev.emit_error.call_args.args[0])
+        self.run.assert_not_called()
+        self.which.assert_not_called()
+        self.download.assert_not_called()
 
     def test_opt_out_does_not_inspect_selected_skill_directories(self):
         with patch.object(ai, 'BUNDLED_SKILLS') as bundled, patch.object(ai.Path, 'home') as home:

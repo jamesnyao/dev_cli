@@ -1969,8 +1969,6 @@ def _env_path():
 def _init_env_stub():
     """Create the custom hook, sourced last and never overwritten."""
     env_path = _env_path()
-    legacy_name = 'env.ps1' if get_os_type() == 'windows' else 'env.sh'
-    legacy = env_path.parent / legacy_name
     if get_os_type() == 'windows':
         stub = (
             "# Custom environment setup, sourced last by dev_cli/shell/profile.ps1.\n"
@@ -1985,25 +1983,32 @@ def _init_env_stub():
     if env_path.is_file():
         emit_ok(f"{env_path} already exists")
         return 0
-    if legacy.is_file():
-        if get_os_type() == 'windows':
-            source = '. "$HOME\\dev_env\\env.ps1"'
-        else:
-            source = (
-                'if [ -n "${BASH_VERSION:-}" ]; then\n'
-                '    if ! command -v zsh >/dev/null 2>&1; then\n'
-                '        echo "Legacy env.sh requires zsh; install it or migrate this platform hook." >&2\n'
-                '        return 1\n'
-                '    fi\n'
-                '    exec zsh\n'
-                'fi\n'
-                'source "$HOME/dev_env/env.sh"')
-        stub = f"# Keep existing customizations during the platform-hook migration.\n{source}\n"
-
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text(stub, encoding='utf-8')
-    emit_ok(f"Created {env_path}" + (f" -> {legacy}" if legacy.is_file() else ''))
+    emit_ok(f"Created {env_path}")
     return 0
+
+
+def _init_ai():
+    """Prompt for an AI provider and persist changes before invoking its setup."""
+    config = load_config()
+    try:
+        provider = ai.provider_name(config)
+        if sys.stdin.isatty():
+            choices = ', '.join(ai.PROVIDERS)
+            answer = input(f"AI provider ({choices}; claude setup not implemented) [{provider}]: ").strip()
+            provider = answer or provider
+        selected = {**config, 'ai': {**config.get('ai', {}), 'provider': provider}}
+        ai.provider_name(selected)
+    except (ValueError, EOFError) as error:
+        emit_error(f"AI provider selection failed: {str(error) or 'input closed before selection'}")
+        return 1
+
+    if selected != config:
+        override = load_jsonc(OVERRIDE_CONFIG_FILE) if OVERRIDE_CONFIG_FILE.is_file() else {}
+        override['ai'] = {**override.get('ai', {}), 'provider': provider}
+        save_config(override)
+    return ai.setup_ai(selected, sys.modules[__name__])
 
 
 def cmd_init(args):
@@ -2018,7 +2023,7 @@ def cmd_init(args):
     rc = _init_env_stub()
     if rc != 0:
         return rc
-    rc = ai.setup_ai(load_config(), sys.modules[__name__])
+    rc = _init_ai()
     if rc != 0:
         return rc
     emit_ok(f"Default Python: {python}")

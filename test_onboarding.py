@@ -192,20 +192,25 @@ class TestPowerShellProfile(unittest.TestCase):
                 '$env:HOOK_SEEN = "yes"\n', encoding='utf-8')
             env = dict(os.environ, USERPROFILE=str(home), MANAGED_TEST_BIN=str(managed),
                        OVERRIDE_TEST_BIN=str(override), DEVCONFIG='example-machine')
+            env.pop('HOOK_SEEN', None)
             quoted_home = str(home).replace("'", "''")
-            result = subprocess.run(
-                [POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-                 '-Command', f"$ErrorActionPreference='Stop'; Set-Variable HOME '{quoted_home}' -Force; "
-                 '. "$HOME\\dev_cli\\shell\\profile.ps1"; '
-                 '@($env:HOOK_SEEN, (Get-Command python).Source) | ConvertTo-Json -Compress'],
-                env=env, text=True, capture_output=True)
+            command = [
+                POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                '-Command', f"$ErrorActionPreference='Stop'; Set-Variable HOME '{quoted_home}' -Force; "
+                '. "$HOME\\dev_cli\\shell\\profile.ps1"; '
+                '@($env:HOOK_SEEN, (Get-Command python).Source) | ConvertTo-Json -Compress']
+            result = subprocess.run(command, env=env, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout), ['yes', str(override / 'python.cmd')])
+            (hooks / 'env_windows.ps1').unlink()
+            result = subprocess.run(command, env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), [None, str(managed / 'python.cmd')])
 
 
 @unittest.skipIf(os.name == 'nt', 'requires native Unix shells')
 class TestUnixProfiles(unittest.TestCase):
-    def test_legacy_zsh_hook_keeps_its_shell_before_migration(self):
+    def test_legacy_hook_does_not_run_or_switch_shells(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)
             tool = home / 'dev_cli'
@@ -223,11 +228,11 @@ class TestUnixProfiles(unittest.TestCase):
             (hooks / 'env.sh').write_text('echo "must not run zsh settings in bash"; return 42\n')
             result = subprocess.run(
                 ['/bin/bash', '--noprofile', '--norc', '-ic',
-                 f'source "{ROOT / "shell" / "bash.sh"}"'],
+                 f'source "{ROOT / "shell" / "bash.sh"}" || exit $?; printf "bash-retained\\n"'],
                 env=dict(os.environ, HOME=str(home), DEVCONFIG='example-machine',
                          PATH='/usr/bin:/bin'), text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.strip(), 'legacy-zsh')
+            self.assertEqual(result.stdout.strip(), 'bash-retained')
 
     def test_python_is_primary_and_hook_can_override_it(self):
         for shell_name, platform in (
@@ -270,13 +275,17 @@ class TestUnixProfiles(unittest.TestCase):
                 env = dict(os.environ, HOME=str(home), MANAGED_TEST_BIN=str(managed),
                            OVERRIDE_TEST_BIN=str(override), DEVCONFIG='example-machine',
                            PATH=f'{tools}:/usr/bin:/bin')
+                env.pop('HOOK_SEEN', None)
                 flags = ['--noprofile', '--norc', '-ic'] if shell_name == 'bash' else ['-f', '-c']
-                result = subprocess.run(
-                    [shell, *flags, f'source "$HOME/dev_cli/shell/{shell_name}.sh" || exit $?; '
-                     'printf "%s\\n" "$HOOK_SEEN" "$(command -v python)"'],
-                    env=env, text=True, capture_output=True)
+                command = [shell, *flags, f'source "$HOME/dev_cli/shell/{shell_name}.sh" || exit $?; '
+                           'printf "%s\\n" "$HOOK_SEEN" "$(command -v python)"']
+                result = subprocess.run(command, env=env, text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout.splitlines(), ['yes', str(override / 'python')])
+                (hooks / hook_name).unlink()
+                result = subprocess.run(command, env=env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), ['', str(managed / 'python')])
 
 
 if __name__ == '__main__':

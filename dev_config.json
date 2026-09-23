@@ -5,9 +5,9 @@
   // `dev repo add -h` for the available repository-entry options.
   // Exact version installed locally by dev init; no system Python is used.
   "pythonVersion": "3.12.10",
-  // Set provider to "ghcopilot" to install Copilot CLI and the dev-cli skill.
+  // dev init prompts with this default. Use "none" to skip AI; "claude" is not implemented yet.
   "ai": {
-    "provider": "none",
+    "provider": "ghcopilot",
     "skills": ["dev-cli"]
   },
   "repos": [

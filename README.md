@@ -34,17 +34,19 @@ dev_cli never falls back to another installed Python.
 Put custom settings in `~/dev_env/env_windows.ps1`, `env_mac.sh`, or
 `env_linux.sh` (also WSL). These hooks run **last**, after dev_cli sets up
 Python and PATH, so you can override either. Rerunning `dev init` preserves
-customizations, including legacy `env.ps1`/`env.sh` hooks.
+your platform-specific customizations.
 
 Add a `workspaceRoots` entry for each machine and set `DEVCONFIG` to its key.
 See the annotated [configuration defaults](dev_config.json) for other settings.
 Keep `.dev_temp/` out of Git; it holds local runtimes, caches, and credentials.
 
-To install GitHub Copilot CLI and the bundled `dev-cli` skill, set
-`"ai": {"provider": "ghcopilot"}` and rerun `dev init`. Then run `copilot`
-and sign in. The default, `"none"`, leaves AI setup alone. Existing custom
-skills and personal/work skills stay yours. `ai.skills` selects bundled
-workflow skills (default `["dev-cli"]`); use `[]` to install none.
+`dev init` prompts for an AI provider, suggesting `ghcopilot` by default.
+Press Enter to install GitHub Copilot CLI and the `dev-cli` skill, or choose
+`none` to skip AI setup. Choose `claude` to select its separate setup path
+(not implemented yet; it reports an error without installing Copilot).
+Later runs suggest your saved choice; noninteractive runs use the configured default.
+Run `copilot` and sign in yourself. `ai.skills` selects bundled workflow skills
+(default `["dev-cli"]`); use `[]` to install none. Personal skills stay untouched.
 
 ## Sync
 

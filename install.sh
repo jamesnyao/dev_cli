@@ -59,4 +59,7 @@ if [[ ! -f "$destination/dev" || ! -f "$destination/dev.py" ]]; then
     exit 1
 fi
 
+if [[ ! -t 0 && -t 1 && -r /dev/tty ]]; then
+    exec bash "$destination/dev" init </dev/tty
+fi
 exec bash "$destination/dev" init

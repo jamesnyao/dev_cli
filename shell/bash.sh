@@ -26,16 +26,6 @@ if [[ "$platform" == "darwin" ]]; then
 else
     dev_hook="$HOME/dev_env/env_linux.sh"
 fi
-if [[ ! -f "$dev_hook" ]]; then
-    dev_hook="$HOME/dev_env/env.sh"
-    if [[ -f "$dev_hook" ]]; then
-        if ! command -v zsh >/dev/null 2>&1; then
-            echo "Legacy env.sh requires zsh; run dev init and migrate the platform hook." >&2
-            return 1
-        fi
-        exec zsh
-    fi
-fi
 if [[ -f "$dev_hook" ]]; then
     source "$dev_hook"
 fi
