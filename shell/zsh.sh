@@ -30,7 +30,10 @@ if [[ "$platform" == "linux" ]]; then
 fi
 
 # Dev CLI
-export PATH="$HOME/dev_cli:$PATH"
+export PATH="$HOME/dev_cli:$HOME/.local/bin:$PATH"
+dev_python="$(dev python path)" || return
+export PATH="$dev_python:$PATH"
+unset dev_python
 export DEVCONFIG="${DEVCONFIG:-example-machine}"
 DEV="$(dev repo root)" || return
 export DEV
@@ -61,6 +64,11 @@ command -v fzf &>/dev/null && source <(fzf --zsh) 2>/dev/null
 [[ -n "$DEV" ]] && cd "$DEV"
 
 # Private, work-specific setup -- runs last so it can override anything above.
-if [[ -f "$HOME/dev_env/env.sh" ]]; then
-  source "$HOME/dev_env/env.sh"
+if [[ "$platform" == "darwin" ]]; then
+  dev_hook="$HOME/dev_env/env_mac.sh"
+else
+  dev_hook="$HOME/dev_env/env_linux.sh"
+fi
+if [[ -f "$dev_hook" ]]; then
+  source "$dev_hook"
 fi

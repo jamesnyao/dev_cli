@@ -806,8 +806,18 @@ class TestShellWorkspace(unittest.TestCase):
         self.home = Path(self.temp.name)
         tool = self.home / 'dev_cli'
         (tool / 'shell').mkdir(parents=True)
-        for name in ('dev', 'dev.py', 'dev_config.json', 'shell/zsh.sh'):
+        for name in ('dev', 'dev.py', 'configuration.py', 'dev_config.json', 'shell/zsh.sh'):
             shutil.copy2(Path(__file__).parent / name, tool / name)
+        (tool / 'dev').write_text(
+            f'#!/bin/sh\nexec "{sys.executable}" "{tool / "dev.py"}" "$@"\n')
+        (tool / 'runtime.py').write_text(
+            'from pathlib import Path\nimport sys\n'
+            'def ensure_python(): return Path(sys.executable)\n'
+            'def python_bin(): return Path(sys.executable).parent\n')
+        (tool / 'ai.py').write_text(
+            "PROVIDERS = {'ghcopilot': None, 'claude': None, 'none': None}\n"
+            "def provider_name(config): return config.get('ai', {}).get('provider', 'ghcopilot')\n"
+            'def setup_ai(config, reporter): return 0\n')
         tools = self.home / 'bin'
         tools.mkdir()
         uname = tools / 'uname'
@@ -840,7 +850,7 @@ class TestShellWorkspace(unittest.TestCase):
     def test_private_hook_runs_after_generic_setup(self):
         hooks = self.home / 'dev_env'
         hooks.mkdir()
-        (hooks / 'env.sh').write_text(
+        (hooks / 'env_mac.sh').write_text(
             '[[ "$DEVCONFIG" == "example-machine" ]] || return 1\n'
             'export DEVCONFIG=private-machine\nexport PRIVATE_HOOK=yes\n')
         result = self.shell()
@@ -859,7 +869,7 @@ class TestShellWorkspace(unittest.TestCase):
             'identity': {'username': 'configured-user'}}))
         hooks = self.home / 'dev_env'
         hooks.mkdir()
-        (hooks / 'env.sh').write_text(
+        (hooks / 'env_mac.sh').write_text(
             '[[ "$DEV_PROMPT_USER" == "configured-user" ]] || return 1\n')
         result = self.shell()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -891,110 +901,6 @@ class TestShellWorkspace(unittest.TestCase):
         self.assertEqual((tool / 'dev_config.json').read_bytes(), sample_bytes)
 
 
-@unittest.skipIf(os.name == 'nt', 'the bash launcher requires a Unix host')
-class TestDevLauncherPythonBootstrap(unittest.TestCase):
-    """The `dev` bash launcher bootstraps python3 via the OS package manager
-    when it's missing from PATH, and otherwise guides the user to opt in."""
-
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.home = Path(self.temp.name)
-        self.tool = self.home / 'dev_cli'
-        self.tool.mkdir()
-        for name in ('dev', 'dev.py'):
-            shutil.copy2(Path(__file__).parent / name, self.tool / name)
-        (self.tool / 'dev').chmod(0o755)
-        # A curated PATH with the handful of external tools `dev` and its
-        # fake package managers need (dirname/readlink for SCRIPT_DIR, ln for
-        # the fake brew), and nothing that could resolve a real python3.
-        self.bin = self.home / 'bin'
-        self.bin.mkdir()
-        for tool in ('dirname', 'readlink', 'ln', 'mkdir', 'chmod'):
-            (self.bin / tool).symlink_to(shutil.which(tool))
-        self.env = dict(os.environ, HOME=str(self.home), PATH=str(self.bin))
-
-    def _fake_cmd(self, name, script):
-        path = self.bin / name
-        path.write_text(f'#!/bin/sh\n{script}\n')
-        path.chmod(0o755)
-        return path
-
-    def run_dev(self, *args):
-        return subprocess.run([str(self.tool / 'dev'), *args],
-                               env=self.env, text=True, capture_output=True)
-
-    def test_guides_user_when_python_and_no_package_manager(self):
-        result = self.run_dev('repo', 'root')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Run 'dev python update' to bootstrap it", result.stdout)
-
-    def test_bootstrap_installs_and_reruns_with_brew(self):
-        # A fake brew that "installs" python3 by dropping a working shim on PATH.
-        self._fake_cmd('brew', f'''
-if [ "$1" = "install" ]; then
-  ln -sf "{sys.executable}" "{self.bin}/python3"
-  exit 0
-fi
-exit 1
-''')
-        result = self.run_dev('python', 'update')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('Bootstrapping', result.stdout)
-        self.assertIn('Run your dev command again', result.stdout)
-
-    def test_bootstrap_reports_failure_when_install_fails(self):
-        self._fake_cmd('brew', 'exit 1')
-        result = self.run_dev('python', 'update')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('Failed to install Python', result.stdout)
-
-    def test_bootstrap_warns_when_python3_still_missing_after_install(self):
-        # brew "succeeds" but doesn't actually put a python3 on PATH.
-        self._fake_cmd('brew', 'exit 0')
-        result = self.run_dev('python', 'update')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("still isn't on PATH", result.stdout)
-
-
-@unittest.skipUnless(os.name == 'nt', 'Windows launchers require a Windows host')
-class TestWindowsDevLaunchers(unittest.TestCase):
-
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='dev launcher ')
-        self.addCleanup(self.temp.cleanup)
-        self.tool = Path(self.temp.name)
-        for name in ('dev.cmd', 'dev.ps1'):
-            shutil.copy2(Path(__file__).parent / name, self.tool / name)
-        (self.tool / 'dev.py').write_text(
-            'import json, sys\n'
-            'print(json.dumps(sys.argv[2:]))\n'
-            'sys.exit(int(sys.argv[1]))\n')
-        self.env = dict(os.environ, PATH=os.pathsep.join(
-            [str(Path(sys.executable).parent), os.environ.get('PATH', '')]))
-
-    def test_cmd_preserves_arguments_and_exit_status(self):
-        for code in (0, 7):
-            with self.subTest(code=code):
-                result = subprocess.run(
-                    [str(self.tool / 'dev.cmd'), str(code), 'space argument', '!literal!'],
-                    shell=True, env=self.env, text=True, capture_output=True)
-                self.assertEqual(result.returncode, code, result.stderr)
-                self.assertEqual(json.loads(result.stdout), ['space argument', '!literal!'])
-
-    def test_powershell_preserves_arguments_and_exit_status(self):
-        powershell = shutil.which('pwsh') or shutil.which('powershell')
-        self.assertIsNotNone(powershell)
-        for code in (0, 7):
-            with self.subTest(code=code):
-                result = subprocess.run(
-                    [powershell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-                     '-File', str(self.tool / 'dev.ps1'), str(code), 'space argument', '!literal!'],
-                    env=self.env, text=True, capture_output=True)
-                self.assertEqual(result.returncode, code, result.stderr)
-                self.assertEqual(json.loads(result.stdout), ['space argument', '!literal!'])
-
-
 class TestCmdInit(unittest.TestCase):
 
     def setUp(self):
@@ -1004,6 +910,9 @@ class TestCmdInit(unittest.TestCase):
         home_patch = patch('dev.Path.home', return_value=self.home)
         home_patch.start()
         self.addCleanup(home_patch.stop)
+        shell_patch = patch('dev.shutil.which', return_value='shell')
+        shell_patch.start()
+        self.addCleanup(shell_patch.stop)
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
@@ -1058,11 +967,12 @@ class TestCmdInit(unittest.TestCase):
     @patch('subprocess.run')
     @patch('dev.get_os_type', return_value='linux')
     @patch('shutil.which', return_value=None)
-    def test_unix_installs_zsh(self, mock_which, mock_os, mock_run):
+    def test_unix_does_not_require_or_install_zsh(self, mock_which, mock_os, mock_run):
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr='')
         with patch('dev.Path.home', return_value=self.home):
             self.assertEqual(dev._init_unix(), 0)
-        self.assertIn('zsh', mock_run.call_args[0][0])
+        mock_run.assert_not_called()
+        self.assertIn(dev.BASHRC_SOURCE_LINE, (self.home / '.bashrc').read_text())
 
     @patch('subprocess.run')
     def test_windows_profile_already_set(self, mock_run):
@@ -1091,6 +1001,55 @@ class TestCmdInit(unittest.TestCase):
         self.assertEqual(dev._init_windows(), 0)
         self.assertTrue(profile.read_text().startswith('$env:MY_SETTING = "value"\n'))
         self.assertIn('.psrc.ps1', profile.read_text())
+
+    @patch('subprocess.run')
+    def test_windows_registers_both_editions_without_duplicate_redirects(self, mock_run):
+        profiles = {
+            'pwsh': self.tmpdir / 'PowerShell' / 'profile.ps1',
+            'powershell': self.tmpdir / 'WindowsPowerShell' / 'profile.ps1',
+        }
+        mock_run.side_effect = lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 0, stdout=str(profiles[command[0]]) + '\n', stderr='')
+        self.assertEqual(dev._init_windows(), 0)
+        self.assertEqual(dev._init_windows(), 0)
+        for profile in profiles.values():
+            self.assertEqual(profile.read_text().count('.psrc.ps1'), 1)
+        self.assertEqual(
+            (self.home / '.psrc.ps1').read_text().count(dev.PSRC_SOURCE_LINE), 1)
+
+    @patch('subprocess.run')
+    def test_windows_profile_discovery_failure_is_reported(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(
+            [], 1, stdout='', stderr='profile discovery failed')
+        with patch('dev.emit_error') as error:
+            self.assertEqual(dev._init_windows(), 1)
+        self.assertIn('profile discovery failed', error.call_args.args[0])
+
+    @unittest.skipUnless(os.name == 'nt', 'requires native Windows PowerShell')
+    def test_windows_preserves_unicode_profile_paths_from_both_shells(self):
+        profile = self.tmpdir / 'Jos\u00e9' / 'profile.ps1'
+        original_run = subprocess.run
+
+        def discover(command, **kwargs):
+            quoted = str(profile).replace("'", "''")
+            command = [*command[:-1], command[-1].replace(
+                '$PROFILE.CurrentUserCurrentHost', f"'{quoted}'")]
+            return original_run(command, **kwargs)
+
+        with patch('dev.subprocess.run', side_effect=discover):
+            self.assertEqual(dev._init_windows(), 0)
+        self.assertTrue(profile.exists())
+        self.assertEqual(profile.read_text().count('.psrc.ps1'), 1)
+
+    def test_unix_preserves_login_profile_and_does_not_change_shell(self):
+        login = self.home / '.bash_login'
+        login.write_text('export KEEP=1\n', encoding='utf-8')
+        self.assertEqual(dev._init_unix(), 0)
+        self.assertEqual(dev._init_unix(), 0)
+        self.assertTrue(login.read_text().startswith('export KEEP=1\n'))
+        self.assertEqual(login.read_text().count('. "$HOME/.bashrc"'), 1)
+        self.assertFalse((self.home / '.bash_profile').exists())
+        self.assertNotIn('exec zsh', (self.home / '.bashrc').read_text())
 
 
 class TestInitConfig(unittest.TestCase):
@@ -1149,43 +1108,74 @@ class TestInitConfig(unittest.TestCase):
         self.assertEqual(saved['identity']['username'], 'bob')
 
 
-class TestCheckPython3Shim(unittest.TestCase):
-
+class TestInitAI(unittest.TestCase):
     def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
-        self.orig_script_dir = dev.SCRIPT_DIR
-        dev.SCRIPT_DIR = Path(self.temp_dir)
+        self.config = {'ai': {'provider': 'ghcopilot', 'skills': ['dev-cli']}, 'repos': []}
+        self.enterContext(patch('dev.load_config', side_effect=lambda: self.config))
+        self.enterContext(patch('dev.OVERRIDE_CONFIG_FILE'))
+        self.enterContext(patch('dev.load_jsonc', side_effect=lambda _: dict(self.config)))
+        self.save = self.enterContext(patch('dev.save_config'))
+        self.setup = self.enterContext(patch('dev.ai.setup_ai', return_value=0))
+        self.interactive = self.enterContext(patch('sys.stdin.isatty', return_value=True))
+        self.answer = self.enterContext(patch('builtins.input', return_value=''))
+        self.error = self.enterContext(patch('dev.emit_error'))
 
-    def tearDown(self):
-        dev.SCRIPT_DIR = self.orig_script_dir
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
+    def test_enter_accepts_suggested_copilot(self):
+        self.assertEqual(dev._init_ai(), 0)
+        self.assertIn('[ghcopilot]', self.answer.call_args.args[0])
+        self.assertEqual(self.setup.call_args.args[0], self.config)
+        self.save.assert_not_called()
 
-    def test_noop_without_shim_file(self):
-        # No exception, no output, when the shim file isn't present.
-        dev._check_python3_shim()
+    def test_claude_choice_is_saved_and_dispatched(self):
+        self.answer.return_value = 'claude'
+        self.setup.return_value = 1
+        self.assertEqual(dev._init_ai(), 1)
+        selected = self.save.call_args.args[0]
+        self.assertEqual(selected['ai'], {'provider': 'claude', 'skills': ['dev-cli']})
+        self.assertEqual(self.setup.call_args.args[0], selected)
+        self.assertEqual(self.config['ai']['provider'], 'ghcopilot')
 
-    def test_warns_when_shim_finds_no_working_interpreter(self):
-        for platform, name in (('darwin', 'python3'), ('windows', 'python3.cmd')):
-            with self.subTest(platform=platform):
-                shim = dev.SCRIPT_DIR / name
-                shim.touch()
-                with patch('dev.get_os_type', return_value=platform), \
-                     patch('dev.subprocess.run', return_value=subprocess.CompletedProcess([], 1)) as mock_run, \
-                     patch('dev.emit_warn') as mock_warn:
-                    dev._check_python3_shim()
-                mock_warn.assert_called_once()
-                self.assertEqual(mock_run.call_args.args[0], [str(shim), '--version'])
-                self.assertEqual(mock_run.call_args.kwargs['shell'], platform == 'windows')
+    def test_none_choice_disables_setup_and_is_saved(self):
+        self.answer.return_value = 'none'
+        self.assertEqual(dev._init_ai(), 0)
+        self.assertEqual(self.save.call_args.args[0]['ai']['provider'], 'none')
+        self.assertEqual(self.setup.call_args.args[0]['ai']['provider'], 'none')
 
-    def test_silent_when_shim_finds_working_interpreter(self):
-        for platform, name in (('darwin', 'python3'), ('windows', 'python3.cmd')):
-            with self.subTest(platform=platform):
-                (dev.SCRIPT_DIR / name).touch()
-                with patch('dev.get_os_type', return_value=platform), \
-                     patch('dev.subprocess.run', return_value=subprocess.CompletedProcess([], 0)), \
-                     patch('dev.emit_warn') as mock_warn:
-                    dev._check_python3_shim()
-                mock_warn.assert_not_called()
+    def test_existing_choice_is_suggested_without_overwriting_it(self):
+        self.config['ai']['provider'] = 'none'
+        self.assertEqual(dev._init_ai(), 0)
+        self.assertIn('[none]', self.answer.call_args.args[0])
+        self.assertEqual(self.setup.call_args.args[0]['ai']['provider'], 'none')
+        self.save.assert_not_called()
+
+    def test_noninteractive_uses_default_without_prompt(self):
+        self.config = {}
+        self.interactive.return_value = False
+        self.assertEqual(dev._init_ai(), 0)
+        self.answer.assert_not_called()
+        self.assertEqual(self.save.call_args.args[0]['ai']['provider'], 'ghcopilot')
+
+    def test_noninteractive_preserves_saved_opt_out(self):
+        self.config['ai']['provider'] = 'none'
+        self.interactive.return_value = False
+        self.assertEqual(dev._init_ai(), 0)
+        self.answer.assert_not_called()
+        self.save.assert_not_called()
+        self.assertEqual(self.setup.call_args.args[0]['ai']['provider'], 'none')
+
+    def test_invalid_choice_does_not_save_or_install(self):
+        self.answer.return_value = 'unknown'
+        self.assertEqual(dev._init_ai(), 1)
+        self.save.assert_not_called()
+        self.setup.assert_not_called()
+        self.error.assert_called_once()
+
+    def test_closed_prompt_does_not_install_default(self):
+        self.answer.side_effect = EOFError
+        self.assertEqual(dev._init_ai(), 1)
+        self.save.assert_not_called()
+        self.setup.assert_not_called()
+        self.assertIn('input closed', self.error.call_args.args[0])
 
 
 class TestCmdInitSelfHealing(unittest.TestCase):
@@ -1199,6 +1189,12 @@ class TestCmdInitSelfHealing(unittest.TestCase):
         home_patch = patch('dev.Path.home', return_value=self.home)
         home_patch.start()
         self.addCleanup(home_patch.stop)
+        runtime_patch = patch('dev.runtime.ensure_python', return_value=Path(sys.executable))
+        runtime_patch.start()
+        self.addCleanup(runtime_patch.stop)
+        ai_patch = patch('dev.ai.setup_ai', return_value=0)
+        ai_patch.start()
+        self.addCleanup(ai_patch.stop)
 
         self.orig_script_dir = dev.SCRIPT_DIR
         self.orig_config_dir = dev.CONFIG_DIR
@@ -1255,9 +1251,38 @@ class TestCmdInitSelfHealing(unittest.TestCase):
 
         self.assertEqual(dev.cmd_init(None), 0)
         self.assertEqual(json.loads(dev.OVERRIDE_CONFIG_FILE.read_text()),
-                         {'identity': {'username': 'kept'}})
+                         {'identity': {'username': 'kept'}, 'ai': {'provider': 'ghcopilot'}, 'repos': []})
         self.assertEqual(env_path.read_text(), 'export CUSTOM=1\n')
         self.assertIn('export CUSTOM_RC=1', (self.home / '.zshrc').read_text())
+
+    def test_python_failure_does_not_register_broken_profiles(self):
+        with patch('dev.runtime.ensure_python', side_effect=RuntimeError('download failed')):
+            with self.assertRaisesRegex(RuntimeError, 'download failed'):
+                dev.cmd_init(None)
+        self.assertFalse((self.home / '.zshrc').exists())
+        self.assertFalse((self.home / '.psrc.ps1').exists())
+        self.assertFalse(dev.OVERRIDE_CONFIG_FILE.exists())
+
+    def test_platform_hooks_do_not_adopt_legacy_files(self):
+        for system, name, legacy in (
+                ('windows', 'env_windows.ps1', 'env.ps1'),
+                ('darwin', 'env_mac.sh', 'env.sh'),
+                ('linux', 'env_linux.sh', 'env.sh')):
+            with self.subTest(system=system), patch('dev.get_os_type', return_value=system):
+                hooks = self.home / 'dev_env'
+                hooks.mkdir(exist_ok=True)
+                original = hooks / legacy
+                original.write_text('# custom settings\n', encoding='utf-8')
+                self.assertEqual(dev._init_env_stub(), 0)
+                hook = hooks / name
+                self.assertEqual(dev._env_path(), hook)
+                self.assertNotIn(legacy, hook.read_text())
+                self.assertNotIn('exec zsh', hook.read_text())
+                self.assertNotIn('# custom settings', hook.read_text())
+                self.assertEqual(original.read_text(), '# custom settings\n')
+                hook.write_text('# customized platform hook\n', encoding='utf-8')
+                self.assertEqual(dev._init_env_stub(), 0)
+                self.assertEqual(hook.read_text(), '# customized platform hook\n')
 
 
 class TestSelfUpdate(unittest.TestCase):

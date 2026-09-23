@@ -1,8 +1,15 @@
 {
   // Copy this file to ../dev_config.json and customize it. The private file
   // overrides these defaults, while this annotated sample is never rewritten.
-  // Run `dev repo add <local-repo-path>` to add entries here; see
+  // Run `dev repo add <local-repo-path>` to add tracked repos; see
   // `dev repo add -h` for the available repository-entry options.
+  // Exact version installed locally by dev init; no system Python is used.
+  "pythonVersion": "3.12.10",
+  // dev init prompts with this default. Use "none" to skip AI; "claude" is not implemented yet.
+  "ai": {
+    "provider": "ghcopilot",
+    "skills": ["dev-cli"]
+  },
   "repos": [
     {
       "path": "dev_cli",
