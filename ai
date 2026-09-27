@@ -1,0 +1,34 @@
+#!/bin/bash
+set -eo pipefail
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+    DIRECTORY="$(CDPATH= cd -- "$(dirname -- "$SOURCE")" && pwd -P)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ "$SOURCE" = /* ]] || SOURCE="$DIRECTORY/$SOURCE"
+done
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$SOURCE")" && pwd -P)"
+case "$OSTYPE" in
+    msys*|cygwin*)
+        # Avoid MSYS/Windows command-line quoting and path conversion of prompts.
+        DEV_AI_ARGUMENTS=""
+        if [[ $# -gt 0 ]]; then
+            DEV_AI_ARGUMENTS="$(printf '%s\0' "$@" | base64 | tr -d '\r\n')"
+        fi
+        DEV_AI_SCRIPT="$(cygpath -w "$SCRIPT_DIR/ai.ps1")"
+        export DEV_AI_ARGUMENTS DEV_AI_SCRIPT
+        exec powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '
+            $ErrorActionPreference = [System.Management.Automation.ActionPreference]::Stop
+            $Arguments = @()
+            if ($env:DEV_AI_ARGUMENTS) {
+                $Value = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:DEV_AI_ARGUMENTS))
+                $Arguments = @($Value.Substring(0, $Value.Length - 1).Split([char]0))
+            }
+            $Script = $env:DEV_AI_SCRIPT
+            $env:DEV_AI_ARGUMENTS = $null
+            $env:DEV_AI_SCRIPT = $null
+            & $Script @Arguments
+            exit $LASTEXITCODE
+        '
+        ;;
+    *) exec /bin/bash "$SCRIPT_DIR/dev" ai -- "$@" ;;
+esac

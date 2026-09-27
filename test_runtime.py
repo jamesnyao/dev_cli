@@ -4,6 +4,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -409,6 +410,72 @@ class LauncherTests(unittest.TestCase):
             'print("child diagnostic",file=sys.stderr)\n'
             'sys.exit(27)\n', encoding='utf-8')
         shutil.copyfile(self.source / 'dev.ps1', self.directory / 'dev.ps1')
+
+    @unittest.skipUnless(os.name == 'nt', 'native Windows shell test')
+    def test_ai_windows_launchers_forward_arguments_input_and_status(self):
+        self.create_native_runtime_fixture()
+        for name in ('ai', 'ai.ps1'):
+            shutil.copyfile(self.source / name, self.directory / name)
+        powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+        arguments = ['--resume', '-p', 'space and \u00e9!', 'print("quoted")', '', 'ending\\', '*',
+                     '/literal/path', '$HOME; echo not-a-command', 'line one\nline two']
+        commands = [
+            [str(powershell), '-NoProfile', '-ExecutionPolicy', 'Bypass',
+             '-File', str(self.directory / 'ai.ps1'), *arguments],
+        ]
+        bash = Path(os.environ.get('ProgramFiles', 'C:\\Program Files')) / 'Git/bin/bash.exe'
+        invocation = self.directory / 'ai-invocation.sh'
+        if bash.is_file():
+            invocation.write_text(
+                'exec "$AI_TEST_LAUNCHER" ' + shlex.join(arguments) + '\n',
+                encoding='utf-8', newline='\n')
+            commands.append([str(bash), '--noprofile', '--norc', '-c',
+                             'source "$AI_TEST_SCRIPT"'])
+        for command in commands:
+            with self.subTest(command=command[0]):
+                result = subprocess.run(
+                    command, input=b'pipeline input\n', capture_output=True, check=False,
+                    env=dict(os.environ, AI_TEST_LAUNCHER=self.directory.joinpath('ai').as_posix(),
+                             AI_TEST_SCRIPT=invocation.as_posix()))
+                self.assertEqual(result.returncode, 27, result.stderr)
+                self.assertEqual(json.loads(result.stdout.splitlines()[1]),
+                                 [['--dev', 'ai', '--', *arguments], 'pipeline input\n'])
+
+    @unittest.skipUnless(os.name == 'nt', 'native Windows shell test')
+    def test_ai_powershell_pipeline_forwards_input_and_keeps_caller_alive(self):
+        self.create_native_runtime_fixture()
+        shutil.copyfile(self.source / 'ai.ps1', self.directory / 'ai.ps1')
+        invocation = self.directory / 'ai-pipeline.ps1'
+        invocation.write_text(
+            '$Value = @("pipeline input" | & "$PSScriptRoot\\ai.ps1" --resume)\n'
+            '$Status = $LASTEXITCODE\n'
+            '[Console]::Out.Write((ConvertTo-Json -InputObject @{value=$Value;code=$Status} -Compress))\n',
+            encoding='utf-8')
+        powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+        result = subprocess.run(
+            [str(powershell), '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(invocation)],
+            capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output['code'], 27)
+        self.assertEqual(json.loads(output['value'][1]),
+                         [['--dev', 'ai', '--', '--resume'], 'pipeline input\n'])
+
+    @unittest.skipIf(os.name == 'nt', 'native Unix shell test')
+    def test_ai_unix_launcher_forwards_arguments_input_directory_and_status(self):
+        for name in ('ai', 'dev'):
+            shutil.copyfile(self.source / name, self.directory / name)
+        (self.directory / 'runtime.sh').write_text(
+            '#!/bin/bash\nprintf "%s\\0" "$@" "$PWD" "$(cat)"\nexit 29\n', encoding='utf-8')
+        link = Path(self.scratch.name) / 'ai-link'
+        link.symlink_to(self.directory / 'ai')
+        arguments = ['--resume', '-p', '', 'space and \u00e9!', 'print("quoted")', 'ending\\', '*']
+        result = subprocess.run(
+            ['/bin/bash', str(link), *arguments], cwd=self.directory,
+            input=b'pipeline input\n', capture_output=True, check=False)
+        self.assertEqual(result.returncode, 29, result.stderr)
+        self.assertEqual(result.stdout.decode().split('\0')[:-1],
+                         ['--dev', 'ai', '--', *arguments, str(self.directory), 'pipeline input'])
 
     @unittest.skipUnless(os.name == 'nt', 'native Windows shell test')
     def test_windows_no_newline_prompt_is_visible_before_input(self):

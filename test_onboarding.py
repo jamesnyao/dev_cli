@@ -210,6 +210,44 @@ class TestPowerShellProfile(unittest.TestCase):
 
 @unittest.skipIf(os.name == 'nt', 'requires native Unix shells')
 class TestUnixProfiles(unittest.TestCase):
+    def test_git_bash_uses_windows_launchers_and_hook(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            tool = home / 'dev_cli'
+            (tool / 'shell').mkdir(parents=True)
+            shutil.copy2(ROOT / 'shell' / 'bash.sh', tool / 'shell')
+            managed = home / 'managed'
+            managed.mkdir()
+            (managed / 'python').write_text('#!/bin/sh\nexit 0\n')
+            (managed / 'python').chmod(0o755)
+            tools = home / 'bin'
+            tools.mkdir()
+            (tools / 'uname').write_text('#!/bin/sh\nprintf "MINGW64_NT-test\\n"\n')
+            (tools / 'uname').chmod(0o755)
+            (tools / 'cygpath').write_text('#!/bin/sh\nprintf "%s\\n" "$2"\n')
+            (tools / 'cygpath').chmod(0o755)
+            (tool / 'dev.cmd').write_text(
+                '#!/bin/sh\ncase "$1" in\n'
+                'python) printf "%s\\n" "$MANAGED_TEST_BIN";;\n'
+                'repo) printf "%s\\n" "$HOME";;\n'
+                'config) :;;\nesac\n')
+            (tool / 'dev.cmd').chmod(0o755)
+            hooks = home / 'dev_env'
+            hooks.mkdir()
+            (hooks / 'env_windows.sh').write_text('export WINDOWS_HOOK_SEEN=yes\n')
+            command = [
+                '/bin/bash', '--noprofile', '--norc', '-ic',
+                f'source "{tool / "shell" / "bash.sh"}" || exit $?; '
+                'printf "%s\\n" "$WINDOWS_HOOK_SEEN" "$(command -v python)"',
+            ]
+            result = subprocess.run(
+                command,
+                env=dict(os.environ, HOME=str(home), MANAGED_TEST_BIN=str(managed),
+                         DEVCONFIG='example-machine', PATH=f'{tools}:/usr/bin:/bin'),
+                text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.splitlines(), ['yes', str(managed / 'python')])
+
     def test_legacy_hook_does_not_run_or_switch_shells(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)

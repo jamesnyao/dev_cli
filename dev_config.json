@@ -5,6 +5,9 @@
   // `dev repo add -h` for the available repository-entry options.
   // Exact version installed locally by dev init; no system Python is used.
   "pythonVersion": "3.12.10",
+  // Windows only: "bash" adds Git Bash to Windows Terminal and makes it the default.
+  // Use "system" to preserve the current Windows Terminal default.
+  "defaultShell": "system",
   // dev init prompts with this default. Use "none" to skip AI; "claude" is not implemented yet.
   "ai": {
     "provider": "ghcopilot",

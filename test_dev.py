@@ -1170,12 +1170,12 @@ class TestInitAI(unittest.TestCase):
         self.setup.assert_not_called()
         self.error.assert_called_once()
 
-    def test_closed_prompt_does_not_install_default(self):
+    def test_closed_prompt_uses_suggested_provider(self):
         self.answer.side_effect = EOFError
-        self.assertEqual(dev._init_ai(), 1)
+        self.assertEqual(dev._init_ai(), 0)
         self.save.assert_not_called()
-        self.setup.assert_not_called()
-        self.assertIn('input closed', self.error.call_args.args[0])
+        self.assertEqual(self.setup.call_args.args[0], self.config)
+        self.error.assert_not_called()
 
 
 class TestCmdInitSelfHealing(unittest.TestCase):

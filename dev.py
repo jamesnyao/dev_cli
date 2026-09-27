@@ -24,6 +24,7 @@ from pathlib import Path
 import ai
 import configuration
 import runtime
+import terminal
 from configuration import expand_config_path, load_jsonc
 
 # Ensure stdout/stderr can print unicode (e.g. arrows, checkmarks) on Windows
@@ -1919,7 +1920,14 @@ def _init_windows():
 
 def _init_unix():
     """Register native bash and zsh setup without changing the user's shell."""
+    _init_bash()
     _ensure_profile_source(Path.home() / '.zshrc', ZSHRC_SOURCE_LINE)
+    emit_ok("Registered bash and zsh shell profiles")
+    return 0
+
+
+def _init_bash():
+    """Register the interactive and login Bash profiles."""
     _ensure_profile_source(Path.home() / '.bashrc', BASHRC_SOURCE_LINE)
     # Login bash reads only the first existing file in this order.
     login_profiles = [Path.home() / name for name in ('.bash_profile', '.bash_login', '.profile')]
@@ -1927,8 +1935,6 @@ def _init_unix():
     _ensure_profile_source(
         login_profile,
         '[ -n "$BASH_VERSION" ] && [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"')
-    emit_ok("Registered bash and zsh shell profiles")
-    return 0
 
 
 def _init_config():
@@ -1966,10 +1972,10 @@ def _env_path():
     return Path.home() / 'dev_env' / name
 
 
-def _init_env_stub():
+def _init_env_stub(env_path=None):
     """Create the custom hook, sourced last and never overwritten."""
-    env_path = _env_path()
-    if get_os_type() == 'windows':
+    env_path = env_path or _env_path()
+    if env_path.suffix == '.ps1':
         stub = (
             "# Custom environment setup, sourced last by dev_cli/shell/profile.ps1.\n"
             "# Safe to edit; dev init never overwrites an existing file here.\n"
@@ -1996,12 +2002,16 @@ def _init_ai():
         provider = ai.provider_name(config)
         if sys.stdin.isatty():
             choices = ', '.join(ai.PROVIDERS)
-            answer = input(f"AI provider ({choices}; claude setup not implemented) [{provider}]: ").strip()
+            try:
+                answer = input(
+                    f"AI provider ({choices}; claude setup not implemented) [{provider}]: ").strip()
+            except EOFError:
+                answer = ''
             provider = answer or provider
         selected = {**config, 'ai': {**config.get('ai', {}), 'provider': provider}}
         ai.provider_name(selected)
-    except (ValueError, EOFError) as error:
-        emit_error(f"AI provider selection failed: {str(error) or 'input closed before selection'}")
+    except ValueError as error:
+        emit_error(f"AI provider selection failed: {error}")
         return 1
 
     if selected != config:
@@ -2017,9 +2027,20 @@ def cmd_init(args):
     rc = _init_config()
     if rc != 0:
         return rc
-    rc = _init_windows() if get_os_type() == 'windows' else _init_unix()
+    system = get_os_type()
+    config = load_config()
+    rc = _init_windows() if system == 'windows' else _init_unix()
     if rc != 0:
         return rc
+    if system == 'windows':
+        rc = terminal.setup_windows_terminal(config, sys.modules[__name__])
+        if rc != 0:
+            return rc
+        if config.get('defaultShell', 'system') == 'bash':
+            _init_bash()
+            rc = _init_env_stub(Path.home() / 'dev_env' / 'env_windows.sh')
+            if rc != 0:
+                return rc
     rc = _init_env_stub()
     if rc != 0:
         return rc
@@ -2027,7 +2048,10 @@ def cmd_init(args):
     if rc != 0:
         return rc
     emit_ok(f"Default Python: {python}")
-    print(f"Customize {_env_path()}; it runs LAST, after dev_cli sets PATH.")
+    hooks = [str(_env_path())]
+    if system == 'windows' and config.get('defaultShell', 'system') == 'bash':
+        hooks.append(str(Path.home() / 'dev_env' / 'env_windows.sh'))
+    print(f"Customize {' or '.join(hooks)}; it runs LAST, after dev_cli sets PATH.")
     print(f"Edit {OVERRIDE_CONFIG_FILE} for Python version, machines, and repositories.")
     print("Open a new terminal to use dev, python, and python3.")
     return 0
@@ -3075,6 +3099,10 @@ def main():
     # Init command
     subparsers.add_parser('init', help='Set up pinned Python, shell profiles, and custom hooks')
 
+    ai_parser = subparsers.add_parser('ai', help='Launch the configured AI with full permissions')
+    ai_parser.add_argument('ai_args', nargs=argparse.REMAINDER,
+                           help='AI CLI arguments (use -- before flags)')
+
     python_parser = subparsers.add_parser('python', help='Manage the configured Python runtime')
     python_sub = python_parser.add_subparsers(dest='python_command', required=True)
     python_sub.add_parser('path', help='Print the managed Python directory for PATH')
@@ -3091,6 +3119,16 @@ def main():
 
     if getattr(args, 'no_color', False):
         Colors.configure(False)
+
+    if args.command == 'ai':
+        arguments = args.ai_args[1:] if args.ai_args[:1] == ['--'] else args.ai_args
+        try:
+            config = load_config()
+            workspace = get_base_path(config)
+        except (OSError, ValueError) as error:
+            emit_error(f"AI configuration failed: {error}")
+            return 1
+        return ai.run_chat(config, arguments, workspace, sys.modules[__name__])
 
     try:
         trust_claude_workspace(get_base_path())

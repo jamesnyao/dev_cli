@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 import urllib.error
 
 import ai
+import dev
 
 
 ROOT = Path(__file__).resolve().parent
@@ -272,6 +273,14 @@ class TestAI(unittest.TestCase):
                 target.write_bytes(b'fixture')
                 self.assertEqual(ai._copilot_command(), str(target))
 
+    def test_windows_winget_package_is_discovered_before_path_refresh(self):
+        target = self.home / 'local' / 'Microsoft' / 'WinGet' / 'Packages' / \
+            'GitHub.Copilot_Microsoft.Winget.Source_fixture' / 'copilot.exe'
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b'fixture')
+        with patch.object(ai.platform, 'system', return_value='Windows'):
+            self.assertEqual(ai._copilot_command(), str(target))
+
     def test_idempotent_install_does_not_rewrite_skill(self):
         self.assertEqual(self.setup_existing(), 0)
         before = (self.target.stat().st_mtime_ns, self.metadata.stat().st_mtime_ns)
@@ -466,6 +475,100 @@ class TestAI(unittest.TestCase):
                 ai._write_atomic(target, b'replacement')
         self.assertEqual(staging.read_bytes(), b'keep')
         self.assertFalse(target.exists())
+
+    def test_chat_defaults_to_copilot_with_yolo_from_workspace_root(self):
+        arguments = ['--resume', '-p', 'space and "quotes"', '', '--', '*']
+        workspace = self.home / 'workspace root'
+        workspace.mkdir()
+        self.which.return_value = 'native-copilot'
+        self.run.return_value.returncode = 23
+        for config in ({}, self.config):
+            with self.subTest(config=config):
+                self.run.reset_mock()
+                self.assertEqual(ai.run_chat(config, arguments, workspace, self.dev), 23)
+                self.run.assert_called_once_with(
+                    ['native-copilot', '--allow-all', '--add-dir', str(workspace), *arguments],
+                    cwd=workspace, check=False)
+        self.download.assert_not_called()
+        self.dev.emit_ok.assert_not_called()
+        self.assertFalse(self.target.exists())
+
+    def test_chat_bootstraps_missing_copilot_and_skills_then_launches(self):
+        with patch.object(ai, '_install_copilot', return_value='installed-copilot') as install:
+            self.assertEqual(ai.run_chat(self.config, [], self.home, self.dev), 0)
+        install.assert_called_once_with()
+        self.assertTrue(self.target.is_file())
+        self.run.assert_called_once_with(
+            ['installed-copilot', '--allow-all', '--add-dir', str(self.home)],
+            cwd=self.home, check=False)
+
+    def test_chat_does_not_launch_after_failed_bootstrap(self):
+        for error in (OSError('offline'), RuntimeError('installer failed'),
+                      subprocess.CalledProcessError(7, 'installer')):
+            with self.subTest(error=error), patch.object(ai, '_install_copilot', side_effect=error):
+                self.assertEqual(ai.run_chat(self.config, [], self.home, self.dev), 1)
+        self.run.assert_not_called()
+        self.assertEqual(self.dev.emit_error.call_count, 3)
+
+    def test_chat_does_not_launch_after_failed_skill_setup(self):
+        with patch.object(ai, '_install_copilot', return_value='installed-copilot'), \
+                patch.object(ai, '_install_skill', side_effect=OSError('skill write failed')):
+            self.assertEqual(ai.run_chat(self.config, [], self.home, self.dev), 1)
+        self.run.assert_not_called()
+        self.assertIn('skill write failed', self.dev.emit_error.call_args.args[0])
+
+    def test_chat_disabled_invalid_and_unimplemented_providers_do_not_fall_back(self):
+        for config, message in (
+                ({'ai': {'provider': 'none'}}, 'AI is disabled'),
+                ({'ai': {'provider': 'claude'}}, 'Claude chat is not implemented'),
+                ({'ai': {'provider': 'invalid'}}, 'ai.provider must be'),
+                ({'ai': None}, 'ai must be')):
+            with self.subTest(config=config):
+                self.assertEqual(ai.run_chat(config, [], self.home, self.dev), 1)
+                self.assertIn(message, self.dev.emit_error.call_args.args[0])
+        self.which.assert_not_called()
+        self.run.assert_not_called()
+        self.download.assert_not_called()
+
+    def test_chat_launch_error_and_interrupt_propagate(self):
+        self.which.return_value = 'native-copilot'
+        for error, expected in ((OSError('not executable'), 1), (KeyboardInterrupt(), 130)):
+            with self.subTest(error=error):
+                self.run.side_effect = error
+                self.assertEqual(ai.run_chat(self.config, [], self.home, self.dev), expected)
+        self.assertIn('not executable', self.dev.emit_error.call_args.args[0])
+
+    def test_chat_rejects_missing_workspace_before_bootstrap(self):
+        missing = self.home / 'missing workspace'
+        self.assertEqual(ai.run_chat(self.config, [], missing, self.dev), 1)
+        self.assertIn('Workspace root does not exist', self.dev.emit_error.call_args.args[0])
+        self.which.assert_not_called()
+        self.run.assert_not_called()
+        self.download.assert_not_called()
+
+
+class TestChatCommand(unittest.TestCase):
+    def test_dispatch_preserves_provider_arguments_without_claude_trust_changes(self):
+        for arguments in ([], ['--', '--help'], ['--', '-p', 'quoted "prompt"', '', '--', '--version']):
+            with self.subTest(arguments=arguments), \
+                    patch('sys.argv', ['dev', 'ai', *arguments]), \
+                    patch.object(dev, 'load_config', return_value={'ai': {'provider': 'ghcopilot'}}), \
+                    patch.object(dev, 'get_base_path', return_value='configured workspace'), \
+                    patch.object(dev, 'trust_claude_workspace') as trust, \
+                    patch.object(ai, 'run_chat', return_value=27) as chat:
+                self.assertEqual(dev.main(), 27)
+                chat.assert_called_once_with(
+                    {'ai': {'provider': 'ghcopilot'}}, arguments[1:] if arguments else [],
+                    'configured workspace', dev)
+                trust.assert_not_called()
+
+    def test_configuration_error_is_reported_without_launching(self):
+        with patch('sys.argv', ['dev', 'ai']), \
+                patch.object(dev, 'load_config', side_effect=ValueError('invalid configuration')), \
+                patch.object(dev, 'emit_error') as error, patch.object(ai, 'run_chat') as chat:
+            self.assertEqual(dev.main(), 1)
+        error.assert_called_once_with('AI configuration failed: invalid configuration')
+        chat.assert_not_called()
 
 
 if __name__ == '__main__':

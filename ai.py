@@ -26,6 +26,8 @@ def _copilot_command():
     if platform.system() == 'Windows':
         local = Path(os.environ.get('LOCALAPPDATA', home / 'AppData' / 'Local'))
         candidates = [local / 'Microsoft' / 'WinGet' / 'Links' / 'copilot.exe']
+        packages = local / 'Microsoft' / 'WinGet' / 'Packages'
+        candidates.extend(packages.glob('GitHub.Copilot_*/copilot.exe'))
         if os.environ.get('ProgramFiles'):
             candidates.append(Path(os.environ['ProgramFiles']) / 'WinGet' / 'Links' / 'copilot.exe')
     else:
@@ -205,6 +207,7 @@ def _setup_ghcopilot(names, dev):
         _install_skill(dev, name, source, digest)
     dev.emit_info(
         "Authentication was not changed or checked. Run copilot and use /login if sign-in is required.")
+    return command
 
 
 def _setup_claude(names, dev):
@@ -246,3 +249,27 @@ def setup_ai(config, dev):
     except (OSError, ValueError, RuntimeError, http.client.HTTPException, subprocess.SubprocessError) as error:
         dev.emit_error(f"AI setup failed: {error}")
         return 1
+
+
+def run_chat(config, arguments, workspace, dev):
+    """Bootstrap the configured chat CLI and launch it from the workspace root."""
+    try:
+        provider = provider_name(config)
+        if provider == 'none':
+            raise ValueError("AI is disabled. Set ai.provider to ghcopilot in dev_config.json.")
+        if provider == 'claude':
+            raise NotImplementedError("Claude chat is not implemented yet. Choose ghcopilot.")
+        workspace = Path(workspace)
+        if not workspace.is_dir():
+            raise ValueError(f"Workspace root does not exist or is not a directory: {workspace}")
+        command = _copilot_command()
+        if not command:
+            command = _setup_ghcopilot(_skill_names(config.get('ai', {})), dev)
+        return subprocess.run(
+            [command, '--allow-all', '--add-dir', str(workspace), *arguments],
+            cwd=workspace, check=False).returncode
+    except (OSError, ValueError, RuntimeError, http.client.HTTPException, subprocess.SubprocessError) as error:
+        dev.emit_error(f"AI chat failed: {error}")
+        return 1
+    except KeyboardInterrupt:
+        return 130
