@@ -9,6 +9,8 @@
   // Use "system" to preserve the current Windows Terminal default.
   "defaultShell": "system",
   // dev init prompts with this default. Use "none" to skip AI; "claude" is not implemented yet.
+  // `ai <tier>` runs that tier's model; "auto" is built in. Add tiers under
+  // "models" (e.g. {"high": "<model-id>"}) and pick one with "defaultModel".
   "ai": {
     "provider": "ghcopilot",
     "skills": true

@@ -13,6 +13,8 @@ import urllib.request
 
 BUNDLED_SKILLS = Path(__file__).parent / 'skills'
 MODE_FLAGS = {'--mode', '--autopilot', '--plan'}
+MODEL_TIERS = {'auto': 'auto'}
+AI_OPTIONS = {'provider', 'skills', 'models', 'defaultModel'}
 COPILOT_INSTALL_URL = 'https://gh.io/copilot-install'
 COPILOT_DOCS = 'https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli'
 
@@ -216,13 +218,40 @@ def provider_name(config):
     if not isinstance(config, dict):
         raise ValueError("Configuration must be an object.")
     options = config.get('ai', {})
-    if not isinstance(options, dict) or set(options) - {'provider', 'skills'}:
-        raise ValueError('ai must be an object containing only provider and skills.')
+    if not isinstance(options, dict) or set(options) - AI_OPTIONS:
+        raise ValueError(f"ai must be an object containing only {', '.join(sorted(AI_OPTIONS))}.")
     provider = options.get('provider', DEFAULT_PROVIDER)
     if not isinstance(provider, str) or provider not in PROVIDERS:
         raise ValueError(f"ai.provider must be one of: {', '.join(PROVIDERS)}.")
     _skills_enabled(options)
+    _model_tiers(options)
     return provider
+
+
+def _model_tiers(options):
+    """Return the tier-to-model map (built-ins plus ai.models) and the default tier."""
+    configured = options.get('models', {})
+    if not isinstance(configured, dict) or not all(
+            isinstance(model, str) and model for model in configured.values()):
+        raise ValueError('ai.models must map tier names to model names.')
+    tiers = {**MODEL_TIERS, **configured}
+    default = options.get('defaultModel')
+    if default is not None and default not in tiers:
+        raise ValueError(f"ai.defaultModel must be one of: {', '.join(tiers)}.")
+    return tiers, default
+
+
+def _model_arguments(options, arguments):
+    """Replace a leading tier name with --model, falling back to ai.defaultModel."""
+    tiers, tier = _model_tiers(options)
+    explicit = any(arg == '--model' or arg.startswith('--model=') for arg in arguments)
+    if arguments and arguments[0] in tiers:
+        if explicit:
+            raise ValueError(f"Choose either the '{arguments[0]}' tier or --model, not both.")
+        tier, arguments = arguments[0], arguments[1:]
+    elif explicit:
+        tier = None
+    return ([] if tier is None else ['--model', tiers[tier]]), arguments
 
 
 def setup_ai(config, dev):
@@ -247,13 +276,14 @@ def run_chat(config, arguments, workspace, dev):
         workspace = Path(workspace)
         if not workspace.is_dir():
             raise ValueError(f"Workspace root does not exist or is not a directory: {workspace}")
+        model, arguments = _model_arguments(config.get('ai', {}), list(arguments))
         command = _copilot_command()
         if not command:
             command = _setup_ghcopilot(_skills_enabled(config.get('ai', {})), dev)
         mode = [] if any(arg in MODE_FLAGS or arg.startswith('--mode=') for arg in arguments) \
             else ['--mode', 'autopilot']
         return subprocess.run(
-            [command, '--allow-all', *mode, '--add-dir', str(workspace), *arguments],
+            [command, '--allow-all', *mode, *model, '--add-dir', str(workspace), *arguments],
             cwd=workspace, check=False).returncode
     except (OSError, ValueError, RuntimeError, http.client.HTTPException, subprocess.SubprocessError) as error:
         dev.emit_error(f"AI chat failed: {error}")

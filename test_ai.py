@@ -120,6 +120,8 @@ class TestAI(unittest.TestCase):
             [], {'ai': None}, {'ai': 'ghcopilot'}, {'ai': []},
             {'ai': {'provider': 'other'}}, {'ai': {'provider': None}},
             {'ai': {'provider': []}}, {'ai': {'provider': 'none', 'unexpected': True}},
+            {'ai': {'models': []}}, {'ai': {'models': {'high': ''}}}, {'ai': {'models': {'high': None}}},
+            {'ai': {'defaultModel': 'missing'}}, {'ai': {'models': {'high': 'm'}, 'defaultModel': 'low'}},
         ]
         for config in choices:
             with self.subTest(config=config):
@@ -326,6 +328,33 @@ class TestAI(unittest.TestCase):
                     ['native-copilot', '--allow-all', '--mode', 'autopilot', '--add-dir', str(workspace), *arguments],
                     cwd=workspace, check=False)
         self.download.assert_not_called()
+
+    def test_chat_resolves_model_tiers(self):
+        self.which.return_value = 'native-copilot'
+        self.run.return_value.returncode = 0
+        tiered = {'models': {'high': 'strong-model'}, 'defaultModel': 'high'}
+        for options, arguments, model, rest in (
+                ({}, ['auto', '-p', 'x'], ['--model', 'auto'], ['-p', 'x']),
+                ({}, ['high'], [], ['high']),
+                (tiered, [], ['--model', 'strong-model'], []),
+                (tiered, ['auto', '--resume'], ['--model', 'auto'], ['--resume']),
+                (tiered, ['high'], ['--model', 'strong-model'], []),
+                (tiered, ['--model', 'other'], [], ['--model', 'other']),
+                (tiered, ['--model=other'], [], ['--model=other']),
+                ({'models': {'auto': 'pinned'}}, ['auto'], ['--model', 'pinned'], [])):
+            with self.subTest(options=options, arguments=arguments):
+                self.run.reset_mock()
+                self.assertEqual(ai.run_chat({'ai': options}, arguments, self.home, self.dev), 0)
+                self.run.assert_called_once_with(
+                    ['native-copilot', '--allow-all', '--mode', 'autopilot', *model,
+                     '--add-dir', str(self.home), *rest],
+                    cwd=self.home, check=False)
+
+    def test_chat_rejects_a_tier_with_an_explicit_model(self):
+        self.which.return_value = 'native-copilot'
+        self.assertEqual(ai.run_chat({}, ['auto', '--model', 'other'], self.home, self.dev), 1)
+        self.assertIn('not both', self.dev.emit_error.call_args.args[0])
+        self.run.assert_not_called()
 
     def test_chat_keeps_an_explicit_mode(self):
         self.which.return_value = 'native-copilot'

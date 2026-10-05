@@ -1982,6 +1982,9 @@ def _init_bash():
     # Login bash reads only the first existing file in this order.
     login_profiles = [Path.home() / name for name in ('.bash_profile', '.bash_login', '.profile')]
     login_profile = next((path for path in login_profiles if path.exists()), login_profiles[0])
+    content = login_profile.read_text(encoding='utf-8') if login_profile.exists() else ''
+    if '.bashrc' in content:
+        return
     _ensure_profile_source(
         login_profile,
         '[ -n "$BASH_VERSION" ] && [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"')

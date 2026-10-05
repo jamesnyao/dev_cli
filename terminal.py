@@ -67,7 +67,7 @@ def _configure_git_bash(settings, bash):
     profile = next((entry for entry in entries if isinstance(entry, dict)
                     and (entry.get('guid') == GIT_BASH_GUID
                          or (isinstance(entry.get('commandline'), str)
-                             and 'git\\bin\\bash.exe' in entry['commandline'].lower()))), None)
+                             and 'git\\bin\\bash.exe' in entry['commandline'].lower().replace('/', '\\')))), None)
     if profile is None:
         profile = {
             'commandline': commandline,

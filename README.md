@@ -115,8 +115,19 @@ are forwarded, and the provider's exit status is preserved.
 
 ```text
 ai
+ai auto
 ai --resume
 ai -p "Explain this repository"
+```
+
+A leading tier name picks the model: `ai auto` passes `--model auto` so Copilot
+chooses. Add tiers with `ai.models` (tier name to model name) and set
+`ai.defaultModel` to the tier used when none is given; without it, Copilot's own
+default applies. An explicit `--model` overrides the default tier; combining it
+with a tier name is an error.
+
+```jsonc
+"ai": {"models": {"high": "<model-id>"}, "defaultModel": "high"}
 ```
 
 Use `copilot` directly when you want its normal permission prompts.

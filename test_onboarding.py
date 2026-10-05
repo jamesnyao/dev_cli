@@ -248,6 +248,39 @@ class TestUnixProfiles(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.splitlines(), ['yes', str(managed / 'python')])
 
+    def test_bash_profile_caches_dev_answers_and_loads_once(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            tool = home / 'dev_cli'
+            (tool / 'shell').mkdir(parents=True)
+            shutil.copy2(ROOT / 'shell' / 'bash.sh', tool / 'shell')
+            (tool / 'dev').write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$1" >> "$HOME/dev-calls"\ncase "$1" in\n'
+                'python) printf "%s/dev_cli\\n" "$HOME";;\n'
+                'repo) printf "%s\\n" "$HOME";;\n'
+                'config) printf "cached-user\\n";;\nesac\n')
+            (tool / 'dev').chmod(0o755)
+            hooks = home / 'dev_env'
+            hooks.mkdir()
+            (hooks / 'env_linux.sh').write_text('printf "hook\\n" >> "$HOME/hook-runs"\n')
+            source = f'source "{tool / "shell" / "bash.sh"}" || exit $?; '
+            command = ['/bin/bash', '--noprofile', '--norc', '-ic',
+                       source + source + 'printf "%s\\n" "$DEV" "$DEV_PROMPT_USER"']
+            env = dict(os.environ, HOME=str(home), DEVCONFIG='example-machine',
+                       PATH='/usr/bin:/bin')
+            env.pop('DEV_PROMPT_USER', None)
+            calls = home / 'dev-calls'
+            for expected_calls in (3, 3):
+                result = subprocess.run(command, env=env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [str(home), 'cached-user'])
+                self.assertEqual(len(calls.read_text().splitlines()), expected_calls)
+            self.assertEqual(len((home / 'hook-runs').read_text().splitlines()), 2)
+            result = subprocess.run(command, env=dict(env, DEVCONFIG='other'),
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(calls.read_text().splitlines()), 6)
+
     def test_legacy_hook_does_not_run_or_switch_shells(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)

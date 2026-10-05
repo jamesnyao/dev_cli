@@ -806,8 +806,8 @@ class TestShellWorkspace(unittest.TestCase):
         self.home = Path(self.temp.name)
         tool = self.home / 'dev_cli'
         (tool / 'shell').mkdir(parents=True)
-        for name in ('dev', 'dev.py', 'configuration.py', 'environments.py', 'dev_config.json',
-                     'shell/zsh.sh'):
+        for name in ('dev', 'dev.py', 'configuration.py', 'environments.py', 'terminal.py',
+                     'dev_config.json', 'shell/zsh.sh'):
             shutil.copy2(Path(__file__).parent / name, tool / name)
         (tool / 'dev').write_text(
             f'#!/bin/sh\nexec "{sys.executable}" "{tool / "dev.py"}" "$@"\n')
@@ -1051,6 +1051,13 @@ class TestCmdInit(unittest.TestCase):
         self.assertEqual(login.read_text().count('. "$HOME/.bashrc"'), 1)
         self.assertFalse((self.home / '.bash_profile').exists())
         self.assertNotIn('exec zsh', (self.home / '.bashrc').read_text())
+
+    def test_bash_keeps_existing_login_source_of_bashrc(self):
+        login = self.home / '.bash_profile'
+        original = 'test -f ~/.bashrc && . ~/.bashrc\n'
+        login.write_text(original, encoding='utf-8')
+        dev._init_bash()
+        self.assertEqual(login.read_text(), original)
 
 
 class TestInitConfig(unittest.TestCase):
