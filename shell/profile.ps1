@@ -35,6 +35,24 @@ function Invoke-DevCached {
   return $Value
 }
 
+# `dev set <name>` prints PowerShell that must run in this session, so the
+# `dev` function evaluates it; every other command goes straight to dev.ps1.
+function dev {
+  if ($args.Count -ge 2 -and $args[0] -eq 'set' -and "$($args[1])" -notlike '-*') {
+    $Script = Invoke-DevCached (@($args) + '--shell', 'pwsh') -ErrorMessage "dev set $($args[1]) failed"
+    if ($Script) {
+      Invoke-Expression (@($Script) -join "`n")
+    }
+    return
+  }
+  if ($MyInvocation.ExpectingInput) {
+    $input | & "$DevScripts\dev.ps1" @args
+  }
+  else {
+    & "$DevScripts\dev.ps1" @args
+  }
+}
+
 . $SETUP\install_winget.ps1
 . $SETUP\install_prompt.ps1
 . $SETUP\install_ghcli.ps1

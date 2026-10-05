@@ -26,6 +26,11 @@ settings without printing credentials or the entire configuration.
   Run `dev python update` after changing it; `dev python path` prints its directory.
 - `workspaceRoots` maps machine names to workspace paths. `DEVCONFIG` selects
   the machine; `dev repo root` reports the resulting workspace.
+- `environments` defines named shell setups: `path` (directories prepended to
+  the base PATH), `env` (variables to set; `null` unsets), optional `cwd`, and
+  `description`. `$DEV` expands to the workspace root. `dev set` lists them and
+  `dev set <name>` applies one to the current shell through the profile's `dev`
+  function; a bare subprocess cannot change the caller's shell.
 - `dev init` prompts for `ai.provider`, suggesting `"ghcopilot"` by default
   or the saved choice on later runs. Choose `"none"` to skip AI setup.
   `"claude"` has a separate, not-yet-implemented handler that reports an error

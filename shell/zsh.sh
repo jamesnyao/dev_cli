@@ -31,6 +31,16 @@ fi
 
 # Dev CLI
 export PATH="$HOME/dev_cli:$HOME/.local/bin:$PATH"
+# `dev set <name>` prints shell code that must run in this shell.
+dev() {
+  if [[ "$1" == set && $# -ge 2 && "$2" != -* ]]; then
+    local dev_script
+    dev_script="$(command dev "$@" --shell zsh)" || return
+    eval "$dev_script"
+  else
+    command dev "$@"
+  fi
+}
 dev_python="$(dev python path)" || return
 export PATH="$dev_python:$PATH"
 unset dev_python

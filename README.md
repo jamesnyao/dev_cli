@@ -51,6 +51,35 @@ Add a `workspaceRoots` entry for each machine and set `DEVCONFIG` to its key.
 See the annotated [configuration defaults](dev_config.json) for other settings.
 Keep `.dev_temp/` out of Git; it holds local runtimes, caches, and credentials.
 
+### Named environments
+
+Define `environments` in `~/dev_config.json` to switch the current shell
+between toolchains or checkouts:
+
+```jsonc
+"environments": {
+  "project": {
+    "description": "Project toolchain",
+    "path": ["$DEV/project/tools"],        // prepended to the shell's base PATH
+    "env": {"TOOLS_ROOT": "$DEV/project/tools", "OLD_FLAG": null},  // null unsets
+    "cwd": "$DEV/project/src"              // optional
+  }
+}
+```
+
+```text
+dev set             # list environments; * marks the active one
+dev set project     # apply it to this shell
+dev set project --quiet
+```
+
+`$DEV` is the machine's workspace root, and `$HOME`, `~`, and other environment
+variables expand too. Each switch rebuilds PATH from the PATH captured on the
+first switch (`DEV_BASE_PATH`) and unsets the previous environment's variables,
+so switching never accumulates entries. `DEV_ENV` names the active environment.
+The `dev` function in the dev_cli PowerShell, Bash, and zsh profiles applies the
+change; PowerShell caches it with the other startup answers.
+
 `dev init` prompts for an AI provider, suggesting `ghcopilot` by default.
 Press Enter to install GitHub Copilot CLI and the `dev-cli` skill, or choose
 `none` to skip AI setup. Choose `claude` to select its separate setup path

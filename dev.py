@@ -23,6 +23,7 @@ from pathlib import Path
 
 import ai
 import configuration
+import environments
 import runtime
 import terminal
 from configuration import expand_config_path, load_jsonc
@@ -1459,6 +1460,55 @@ def cmd_repo_root(args):
     return 0
 
 
+def cmd_set(args):
+    """List named environments, or emit shell code that switches to one.
+
+    The `dev` shell function (installed by the dev_cli profiles) appends
+    `--shell` and evaluates the output, because a child process cannot change
+    the calling shell's variables or directory.
+    """
+    try:
+        config = load_config()
+    except (OSError, json.JSONDecodeError) as error:
+        emit_error(f"Could not read config: {error}")
+        return 1
+    envs = config.get('environments') or {}
+    if not args.name:
+        if not envs:
+            emit_info(f"No environments configured. Add an \"environments\" map to {OVERRIDE_CONFIG_FILE}.")
+            return 0
+        current = os.environ.get('DEV_ENV')
+        for name in sorted(envs):
+            marker = '*' if name == current else ' '
+            description = envs[name].get('description', '') if isinstance(envs[name], dict) else ''
+            print(f"{marker} {name:<16} {description}".rstrip())
+        return 0
+    if args.name not in envs:
+        emit_error(f"Unknown environment '{args.name}'. Available: {', '.join(sorted(envs)) or '(none)'}")
+        return 1
+    if not args.shell:
+        emit_error("`dev set <name>` must run through the dev shell function; open a new shell after `dev init`.")
+        return 1
+    try:
+        resolved = environments.resolve(envs[args.name], get_base_path(config))
+    except ValueError as error:
+        emit_error(f"Environment '{args.name}': {error}")
+        return 1
+    for entry in resolved['path']:
+        if not os.path.isdir(entry):
+            emit_warn(f"PATH entry does not exist: {entry}")
+    script = environments.render(args.name, resolved, args.shell)
+    if not args.quiet:
+        description = envs[args.name].get('description') or args.name
+        message = f"[OK] {args.name}: {description}"
+        if args.shell == 'pwsh':
+            script += f"Write-Host {environments.pwsh_quote(message)}\n"
+        else:
+            script += f"printf '%s\\n' {environments.sh_quote(message)}\n"
+    sys.stdout.write(script)
+    return 0
+
+
 def cmd_config_get(args):
     """Print a dotted-path value from the merged config (e.g. `identity.gitEmail`):
     SAMPLE_CONFIG_FILE (dev_cli/dev_config.json) overridden by
@@ -2082,7 +2132,7 @@ def cmd_test(args):
 
     print(f"\n{Colors.BLUE}Running pylint...{Colors.NC}", flush=True)
     lint = subprocess.run(
-        [sys.executable, '-u', '-m', 'pylint', 'dev.py', 'configuration.py', 'runtime.py', 'ai.py'],
+        [sys.executable, '-u', '-m', 'pylint', 'dev.py', 'configuration.py', 'environments.py', 'runtime.py', 'ai.py'],
         cwd=str(SCRIPT_DIR))
     return lint.returncode
 
@@ -3096,6 +3146,12 @@ def main():
     config_get_p = config_sub.add_parser('get', help='Print a dotted-path value (e.g. identity.gitEmail)')
     config_get_p.add_argument('key')
 
+    set_parser = subparsers.add_parser(
+        'set', help='Switch this shell to a named environment from dev_config.json (no name lists them)')
+    set_parser.add_argument('name', nargs='?', help='Environment name')
+    set_parser.add_argument('--quiet', action='store_true', help='Do not print a confirmation line')
+    set_parser.add_argument('--shell', choices=environments.SHELLS, help=argparse.SUPPRESS)
+
     # Init command
     subparsers.add_parser('init', help='Set up pinned Python, shell profiles, and custom hooks')
 
@@ -3146,6 +3202,8 @@ def main():
             return cmd_config_get(args)
         else:
             config_parser.print_help()
+    elif args.command == 'set':
+        return cmd_set(args)
     elif args.command == '__bg_sync__':
         return cmd_bg_sync(args)
     elif args.command == 'ado':

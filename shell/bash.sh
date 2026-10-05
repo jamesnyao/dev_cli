@@ -8,11 +8,26 @@ export platform="$(uname | tr '[:upper:]' '[:lower:]')"
 export PATH="$HOME/dev_cli:$HOME/.local/bin:$PATH"
 case "$platform" in
     mingw*|msys*|cygwin*)
-        dev() {
+        _dev_cli() {
             "$HOME/dev_cli/dev.cmd" "$@"
         }
         ;;
+    *)
+        _dev_cli() {
+            command dev "$@"
+        }
+        ;;
 esac
+# `dev set <name>` prints shell code that must run in this shell.
+dev() {
+    if [[ "$1" == set && $# -ge 2 && "$2" != -* ]]; then
+        local dev_script
+        dev_script="$(_dev_cli "$@" --shell bash)" || return
+        eval "$dev_script"
+    else
+        _dev_cli "$@"
+    fi
+}
 dev_python="$(dev python path)" || return
 case "$platform" in
     mingw*|msys*|cygwin*) dev_python="$(cygpath -u "$dev_python")" ;;

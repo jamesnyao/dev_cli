@@ -31,5 +31,10 @@
     // `branchPrefix` (default "user/<resolved-username>/") and
     // `creatorEmail` (default Git's global user.email).
     "username": ""
-  }
+  },
+  // Named shell setups applied with `dev set <name>`; `dev set` lists them.
+  // Each may set "description", "path" (prepended to the base PATH),
+  // "env" (null unsets a variable), and "cwd". $DEV is the workspace root.
+  // Example: "tools": {"path": ["$DEV/tools/bin"], "cwd": "$DEV/tools"}
+  "environments": {}
 }

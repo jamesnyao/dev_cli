@@ -58,6 +58,7 @@ class BootstrapFixture(unittest.TestCase):
             '.gitignore': (source_path.parent / '.gitignore').read_text(encoding='utf-8'),
             'ai.py': (source_path.parent / 'ai.py').read_text(encoding='utf-8'),
             'configuration.py': (source_path.parent / 'configuration.py').read_text(encoding='utf-8'),
+            'environments.py': (source_path.parent / 'environments.py').read_text(encoding='utf-8'),
             'terminal.py': (source_path.parent / 'terminal.py').read_text(encoding='utf-8'),
             # Provisioning has its own suite; sync fixtures never install a runtime.
             'runtime.py': self.RUNTIME,
