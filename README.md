@@ -41,6 +41,12 @@ Linux (including WSL). These hooks run **last**, after dev_cli sets up Python
 and PATH, so you can override either. Rerunning `dev init` preserves your
 platform-specific customizations.
 
+PowerShell caches the Python path, workspace root, and identity that it reads at
+startup in `~/.dev_temp/dev_cli/profile-cache.json`, so warm shells start without
+launching Python. The cache refreshes when `DEVCONFIG` or `dev_config.json`
+changes; delete the file to force a refresh. Custom hooks can reuse it with
+`Invoke-DevCached repo, root`.
+
 Add a `workspaceRoots` entry for each machine and set `DEVCONFIG` to its key.
 See the annotated [configuration defaults](dev_config.json) for other settings.
 Keep `.dev_temp/` out of Git; it holds local runtimes, caches, and credentials.

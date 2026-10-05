@@ -5,9 +5,38 @@ $DevScripts = Split-Path $PSScriptRoot -Parent
 $SETUP = Join-Path $DevScripts "setup"
 $env:PATH = "$DevScripts;$env:PATH"
 
+# Startup answers from `dev` are cached until DEVCONFIG or a config file changes,
+# so warm shells start without launching Python.
+$DevCacheFile = Join-Path $HOME '.dev_temp\dev_cli\profile-cache.json'
+$DevCache = @{}
+if (Test-Path -LiteralPath $DevCacheFile) {
+  try {
+    (Get-Content -LiteralPath $DevCacheFile -Raw | ConvertFrom-Json).PSObject.Properties |
+      ForEach-Object { $DevCache[$_.Name] = $_.Value }
+  }
+  catch {}
+}
+function Invoke-DevCached {
+  param([Parameter(Mandatory)][string[]]$Arguments, [string]$ErrorMessage)
+  $Stamp = foreach ($File in @((Join-Path $DevScripts 'dev_config.json'), (Join-Path $HOME 'dev_config.json'))) {
+    if (Test-Path -LiteralPath $File) { (Get-Item -LiteralPath $File).LastWriteTimeUtc.Ticks }
+  }
+  $Key = (@($env:DEVCONFIG) + $Arguments + $Stamp) -join '|'
+  if ($DevCache.ContainsKey($Key)) {
+    return $DevCache[$Key]
+  }
+  $Value = & "$DevScripts\dev.ps1" @Arguments
+  if ($LASTEXITCODE -ne 0) {
+    throw $ErrorMessage
+  }
+  $DevCache[$Key] = $Value
+  New-Item -ItemType Directory -Force -Path (Split-Path $DevCacheFile) | Out-Null
+  $DevCache | ConvertTo-Json -Compress | Set-Content -LiteralPath $DevCacheFile -Encoding utf8
+  return $Value
+}
+
 . $SETUP\install_winget.ps1
 . $SETUP\install_prompt.ps1
-. $SETUP\install_python.ps1
 . $SETUP\install_ghcli.ps1
 . $SETUP\install_golang.ps1
 . $SETUP\install_llvm.ps1
@@ -16,25 +45,19 @@ $env:PATH = "$DevScripts;$env:PATH"
 . $SETUP\install_fzf.ps1
 . $SETUP\install_pwsh.ps1
 
-$DevPython = & "$DevScripts\dev.ps1" python path
-if ($LASTEXITCODE -ne 0) {
-  throw "Could not provision the configured Python runtime"
+$DevPython = Invoke-DevCached python, path -ErrorMessage "Could not provision the configured Python runtime"
+if (-not (Test-Path -LiteralPath $DevPython)) {
+  $DevCache.Clear()
+  $DevPython = Invoke-DevCached python, path -ErrorMessage "Could not provision the configured Python runtime"
 }
 $env:PATH = "$DevPython;$DevScripts;$env:PATH"
 
 if (-not $env:DEVCONFIG) {
   $env:DEVCONFIG = "example-machine"
 }
-$Workspace = & dev repo root
-if ($LASTEXITCODE -ne 0) {
-  throw "Could not read workspaceRoots for DEVCONFIG=$env:DEVCONFIG"
-}
-$env:DEV = $Workspace
+$env:DEV = Invoke-DevCached repo, root -ErrorMessage "Could not read workspaceRoots for DEVCONFIG=$env:DEVCONFIG"
 if (-not $env:DEV_PROMPT_USER) {
-  $ConfiguredUsername = & dev config get identity.username
-  if ($LASTEXITCODE -ne 0) {
-    throw "Could not read identity.username"
-  }
+  $ConfiguredUsername = Invoke-DevCached config, get, identity.username -ErrorMessage "Could not read identity.username"
   if ($ConfiguredUsername) {
     $env:DEV_PROMPT_USER = $ConfiguredUsername
   }
