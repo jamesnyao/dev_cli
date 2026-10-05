@@ -1111,7 +1111,7 @@ class TestInitConfig(unittest.TestCase):
 
 class TestInitAI(unittest.TestCase):
     def setUp(self):
-        self.config = {'ai': {'provider': 'ghcopilot', 'skills': ['dev-cli']}, 'repos': []}
+        self.config = {'ai': {'provider': 'ghcopilot', 'skills': True}, 'repos': []}
         self.enterContext(patch('dev.load_config', side_effect=lambda: self.config))
         self.enterContext(patch('dev.OVERRIDE_CONFIG_FILE'))
         self.enterContext(patch('dev.load_jsonc', side_effect=lambda _: dict(self.config)))
@@ -1132,7 +1132,7 @@ class TestInitAI(unittest.TestCase):
         self.setup.return_value = 1
         self.assertEqual(dev._init_ai(), 1)
         selected = self.save.call_args.args[0]
-        self.assertEqual(selected['ai'], {'provider': 'claude', 'skills': ['dev-cli']})
+        self.assertEqual(selected['ai'], {'provider': 'claude', 'skills': True})
         self.assertEqual(self.setup.call_args.args[0], selected)
         self.assertEqual(self.config['ai']['provider'], 'ghcopilot')
 

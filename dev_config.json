@@ -11,7 +11,7 @@
   // dev init prompts with this default. Use "none" to skip AI; "claude" is not implemented yet.
   "ai": {
     "provider": "ghcopilot",
-    "skills": ["dev-cli"]
+    "skills": true
   },
   "repos": [
     {

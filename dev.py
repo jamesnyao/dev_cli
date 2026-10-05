@@ -3155,7 +3155,7 @@ def main():
     # Init command
     subparsers.add_parser('init', help='Set up pinned Python, shell profiles, and custom hooks')
 
-    ai_parser = subparsers.add_parser('ai', help='Launch the configured AI with full permissions')
+    ai_parser = subparsers.add_parser('ai', help='Launch the configured AI with full permissions in autopilot mode')
     ai_parser.add_argument('ai_args', nargs=argparse.REMAINDER,
                            help='AI CLI arguments (use -- before flags)')
 

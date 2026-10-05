@@ -81,27 +81,37 @@ The `dev` function in the dev_cli PowerShell, Bash, and zsh profiles applies the
 change; PowerShell caches it with the other startup answers.
 
 `dev init` prompts for an AI provider, suggesting `ghcopilot` by default.
-Press Enter to install GitHub Copilot CLI and the `dev-cli` skill, or choose
+Press Enter to install GitHub Copilot CLI and link the bundled skills, or choose
 `none` to skip AI setup. Choose `claude` to select its separate setup path
 (not implemented yet; it reports an error without installing Copilot).
 Later runs suggest your saved choice; noninteractive runs use the configured default.
-Run `copilot` and sign in yourself. `ai.skills` selects bundled workflow skills
-(default `["dev-cli"]`); use `[]` to install none. Personal skills stay untouched.
+Run `copilot` and sign in yourself.
+
+With `ai.skills` (default `true`), `dev init` links `~/.agents/skills` to the
+bundled [`skills/`](skills) directory (a junction on Windows, a symlink
+elsewhere), so Copilot loads every bundled skill and sees updates after
+`git pull` without reinstalling. Set it to `false` to skip the link. An existing
+`~/.agents/skills` directory or link is preserved with a warning. Unedited copies
+installed by earlier releases in `~/.copilot/skills` are removed; a personal
+skill with a bundled skill's name takes precedence and is reported. Keep private
+skills in `~/.copilot/skills`.
 
 ## AI chat
 
 Run `ai` from Bash, zsh, or PowerShell. The launchers live in `dev_cli`,
 which `dev init` adds to PATH, and share the same `dev ai` implementation.
-They use `ai.provider` (default `ghcopilot`) and install the CLI and selected
-skills if the executable is missing. Sign in with `/login` if needed;
+They use `ai.provider` (default `ghcopilot`) and install the CLI and link the
+bundled skills if the executable is missing. Sign in with `/login` if needed;
 the wrapper does not configure authentication.
 
 Chat always starts in the configured `workspaceRoots[DEVCONFIG]` directory with
 **full permissions** by default (`copilot --allow-all`, equivalent to YOLO
-mode). The workspace root is also passed through `--add-dir`, granting access
-to everything beneath it and loading its `.github` skills and agents as trusted
-configuration. All arguments and input are forwarded, and the provider's exit
-status is preserved.
+mode), in **autopilot** mode (`--mode autopilot`), so Copilot keeps working
+until the task is done. Pass `--mode interactive`, `--mode plan`, `--plan`, or
+`--autopilot` yourself to choose the mode instead. The workspace root is also
+passed through `--add-dir`, granting access to everything beneath it and loading
+its `.github` skills and agents as trusted configuration. All arguments and input
+are forwarded, and the provider's exit status is preserved.
 
 ```text
 ai
