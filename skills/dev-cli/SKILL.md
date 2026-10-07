@@ -17,6 +17,14 @@ hosting provider, or private configuration.
 profiles, creates missing custom environment hooks, and applies optional AI
 setup. Rerunning it preserves existing configuration and custom hooks.
 
+For Bash, `dev init` provisions ble.sh on Linux/macOS and on Windows when
+`defaultShell` is `"bash"`. Bash 4+ terminal sessions get gray, history-only
+autosuggestions: Right Arrow/End accepts all, Alt+F accepts a word. An installed
+fzf also gets completion and Ctrl+R history bindings. Scripts, redirected and
+dumb terminals, older Bash, and missing ble.sh keep their existing editor.
+ble.sh is never downloaded during shell startup. User `~/.blerc` or XDG blesh settings
+override the defaults. Existing zsh setups and non-Windows defaults are unchanged.
+
 Edit the user's override, normally `~/dev_config.json`; never change the
 repository's bundled defaults to store personal settings. `DEV_CONFIG_OVERRIDE`
 can select another override. Use `dev config get <dotted.key>` to inspect merged

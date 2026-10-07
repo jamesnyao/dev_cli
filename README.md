@@ -41,6 +41,36 @@ Linux (including WSL). These hooks run **last**, after dev_cli sets up Python
 and PATH, so you can override either. Rerunning `dev init` preserves your
 platform-specific customizations.
 
+Bash uses the same single-line prompt style as PowerShell: green `user@host`, a
+cyan path, an optional yellow Git branch, and `$` (red after a failed command).
+Git Bash uses forward slashes and omits the drive prefix: `D:\dev\project`
+appears as `dev/project`, with a drive root shown as `/`. UNC paths retain their
+server/share prefix; Linux, WSL, and macOS keep their full Unix paths.
+Set `DEV_PROMPT_USER` or `DEV_PROMPT_HOST` in your custom hook to override the
+display names. Existing Bash prompt commands are preserved.
+Bash launched from your home directory starts in the configured workspace,
+using the final `DEV` value after your custom hook runs. An explicitly selected
+working directory is left unchanged.
+
+`dev init` installs [ble.sh](https://github.com/akinomyoga/ble.sh) for Bash on
+Linux/macOS and for Windows when `defaultShell` is `"bash"`. Installation needs
+Bash 4+, curl, tar, xz, and awk; older Bash versions keep their existing editor.
+Interactive terminals show gray suggestions from Bash history, like
+`zsh-autosuggestions`: Right Arrow or End accepts the whole suggestion, and
+Alt+F accepts the next word. Enter alone does not accept the untyped remainder.
+Normal Tab completion and Readline-style editing remain available. If fzf is
+already on PATH, its completion and Ctrl+R history picker are enabled too.
+
+The editor lives in `~/.local/share/blesh`; rerunning `dev init` preserves an
+existing installation. Shell startup never downloads ble.sh. Scripts, redirected
+input/output, dumb terminals, and machines without ble.sh keep their existing
+behavior. Bash uses its own history, not PowerShell or zsh history.
+Put overrides in `~/.blerc` (or `~/.config/blesh/init.sh`, respecting
+`XDG_CONFIG_HOME`), which loads after dev_cli's defaults. For example,
+`bleopt complete_auto_complete=` disables suggestions.
+Existing zsh and PowerShell profiles remain available; no default shell is
+changed on Linux/macOS.
+
 PowerShell caches the Python path, workspace root, and identity that it reads at
 startup in `~/.dev_temp/dev_cli/profile-cache.json`, so warm shells start without
 launching Python. The cache refreshes when `DEVCONFIG` or `dev_config.json`

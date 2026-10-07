@@ -1,4 +1,4 @@
-# Sourced by ~/.bashrc. The platform-specific custom hook runs last.
+# Sourced by ~/.bashrc.
 case $- in
     *i*) ;;
     *) return ;;
@@ -76,6 +76,45 @@ if command -v zoxide >/dev/null 2>&1; then
     eval "$(zoxide init --cmd cd bash)"
 fi
 
+_dev_prompt()
+{
+    local last_status=$?
+    _dev_prompt_path="$PWD"
+    case "$platform" in
+        mingw*|msys*|cygwin*)
+            _dev_prompt_path="$(cygpath -m "$PWD")" || return
+            _dev_prompt_path="${_dev_prompt_path#?:/}"
+            _dev_prompt_path="${_dev_prompt_path:-/}"
+            ;;
+    esac
+    _dev_prompt_branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)"
+    # Expand data after Bash decodes prompt escapes, keeping paths and branch names literal.
+    PS1='\[\e[32m\]${DEV_PROMPT_USER:-\u}@${DEV_PROMPT_HOST:-\h}\[\e[0m\] \[\e[96m\]${_dev_prompt_path}\[\e[0m\]'
+    if [[ -n "$_dev_prompt_branch" ]]; then
+        PS1+=' \[\e[33m\](${_dev_prompt_branch})\[\e[0m\]'
+    fi
+    if (( last_status == 0 )); then
+        PS1+=' \[\e[0m\]$ '
+    else
+        PS1+=' \[\e[31m\]$ \[\e[0m\]'
+    fi
+    return "$last_status"
+}
+
+if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
+    PROMPT_COMMAND=(_dev_prompt "${PROMPT_COMMAND[@]}")
+else
+    PROMPT_COMMAND="_dev_prompt${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+fi
+
+if [[ -z ${BLE_VERSION-} && ${BASH_VERSINFO[0]} -ge 4
+      && -t 0 && -t 1 && -t 2 && ${TERM:-dumb} != dumb
+      && -f "$HOME/.local/share/blesh/ble.sh" ]]; then
+    export USER="${USER:-${USERNAME:-$(id -un)}}"
+    source -- "$HOME/.local/share/blesh/ble.sh" --attach=none \
+        --rcfile "$HOME/dev_cli/shell/blerc.sh" || return
+fi
+
 if [[ "$platform" == mingw* || "$platform" == msys* || "$platform" == cygwin* ]]; then
     dev_hook="$HOME/dev_env/env_windows.sh"
 elif [[ "$platform" == "darwin" ]]; then
@@ -84,5 +123,11 @@ else
     dev_hook="$HOME/dev_env/env_linux.sh"
 fi
 if [[ -f "$dev_hook" ]]; then
-    source "$dev_hook"
+    source "$dev_hook" || return
+fi
+if [[ "$PWD" -ef "$HOME" ]]; then
+    builtin cd -- "$DEV" || return
+fi
+if [[ ${BLE_VERSION-} && -t 0 && -t 1 && -t 2 && ${TERM:-dumb} != dumb ]]; then
+    ble-attach
 fi

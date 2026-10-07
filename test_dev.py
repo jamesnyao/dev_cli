@@ -877,6 +877,9 @@ class TestShellWorkspace(unittest.TestCase):
 
     def test_copy_config_and_initialize_profile(self):
         tool = self.home / 'dev_cli'
+        blesh = self.home / '.local' / 'share' / 'blesh'
+        blesh.mkdir(parents=True)
+        (blesh / 'ble.sh').write_text('# existing fixture installation\n')
         subprocess.run(['git', 'init', str(tool)], check=True, capture_output=True)
         subprocess.run(['git', '-C', str(tool), 'remote', 'add', 'origin',
                         'https://example.com/dev_cli.git'], check=True, capture_output=True)
@@ -1059,6 +1062,42 @@ class TestCmdInit(unittest.TestCase):
         dev._init_bash()
         self.assertEqual(login.read_text(), original)
 
+    @patch('dev.subprocess.run')
+    def test_bash_tools_preserve_existing_installation(self, run):
+        installed = self.home / '.local' / 'share' / 'blesh' / 'ble.sh'
+        installed.parent.mkdir(parents=True)
+        installed.write_text('# customized installation\n')
+        self.assertEqual(dev._init_bash_tools(), 0)
+        run.assert_not_called()
+        self.assertEqual(installed.read_text(), '# customized installation\n')
+
+    @patch('dev.subprocess.run')
+    @patch('dev.terminal._git_bash', return_value=Path('native-git-bash'))
+    @patch('dev.get_os_type', return_value='windows')
+    def test_bash_tools_use_native_git_bash_without_profiles(self, _system, _bash, run):
+        self.assertEqual(dev._init_bash_tools(), 0)
+        command = run.call_args.args[0]
+        self.assertEqual(command[:3], ['native-git-bash', '--noprofile', '--norc'])
+        self.assertEqual(command[3], (dev.SCRIPT_DIR / 'setup' / 'install_blesh.sh').as_posix())
+        self.assertEqual(run.call_args.kwargs['env']['HOME'], self.home.as_posix())
+        self.assertTrue(run.call_args.kwargs['check'])
+        self.assertEqual(run.call_args.kwargs['timeout'], 180)
+
+    @patch('dev.get_os_type', return_value='linux')
+    @patch('dev.emit_error')
+    @patch('dev.subprocess.run')
+    def test_bash_tools_report_missing_shell_and_installer_failures(self, run, error, _system):
+        with patch('dev.shutil.which', return_value=None):
+            self.assertEqual(dev._init_bash_tools(), 1)
+        self.assertIn('Bash was not found', error.call_args.args[0])
+        run.assert_not_called()
+        for failure in (OSError('unavailable'), subprocess.CalledProcessError(7, 'bash'),
+                        subprocess.TimeoutExpired('bash', 180)):
+            with self.subTest(failure=failure):
+                run.side_effect = failure
+                self.assertEqual(dev._init_bash_tools(), 1)
+                self.assertIn('setup failed', error.call_args.args[0])
+
 
 class TestInitConfig(unittest.TestCase):
 
@@ -1203,6 +1242,9 @@ class TestCmdInitSelfHealing(unittest.TestCase):
         ai_patch = patch('dev.ai.setup_ai', return_value=0)
         ai_patch.start()
         self.addCleanup(ai_patch.stop)
+        tools_patch = patch('dev._init_bash_tools', return_value=0)
+        self.bash_tools = tools_patch.start()
+        self.addCleanup(tools_patch.stop)
 
         self.orig_script_dir = dev.SCRIPT_DIR
         self.orig_config_dir = dev.CONFIG_DIR
@@ -1270,6 +1312,32 @@ class TestCmdInitSelfHealing(unittest.TestCase):
         self.assertFalse((self.home / '.zshrc').exists())
         self.assertFalse((self.home / '.psrc.ps1').exists())
         self.assertFalse(dev.OVERRIDE_CONFIG_FILE.exists())
+
+    @patch('dev._init_ai', return_value=0)
+    @patch('dev._init_windows', return_value=0)
+    @patch('dev.terminal.setup_windows_terminal', return_value=0)
+    @patch('sys.stdin')
+    def test_bash_tools_are_provisioned_only_for_registered_platforms(
+            self, stdin, _terminal, _windows, _ai):
+        stdin.isatty.return_value = False
+        for system, shell, expected in (
+                ('windows', 'system', 0), ('windows', 'bash', 1),
+                ('linux', 'system', 1), ('darwin', 'system', 1)):
+            with self.subTest(system=system, shell=shell), \
+                    patch('dev.get_os_type', return_value=system), \
+                    patch('dev.load_config', return_value={'defaultShell': shell}):
+                self.bash_tools.reset_mock()
+                self.assertEqual(dev.cmd_init(None), 0)
+                self.assertEqual(self.bash_tools.call_count, expected)
+
+    @patch('dev._init_ai')
+    @patch('dev.get_os_type', return_value='linux')
+    @patch('sys.stdin')
+    def test_bash_install_failure_stops_init(self, stdin, _system, ai_setup):
+        stdin.isatty.return_value = False
+        self.bash_tools.return_value = 1
+        self.assertEqual(dev.cmd_init(None), 1)
+        ai_setup.assert_not_called()
 
     def test_platform_hooks_do_not_adopt_legacy_files(self):
         for system, name, legacy in (
@@ -1450,9 +1518,9 @@ class TestSplitRepositorySync(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    @staticmethod
-    def git(path, *args):
-        return subprocess.run(['git', '-C', str(path), *args], check=True,
+    def git(self, path, *args):
+        location = '--git-dir' if path in (self.remote, self.parent_remote) else '-C'
+        return subprocess.run(['git', location, str(path), *args], check=True,
                               capture_output=True, text=True).stdout.strip()
 
     def test_sync_root_is_parent_not_workspace(self):

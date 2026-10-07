@@ -1990,6 +1990,28 @@ def _init_bash():
         '[ -n "$BASH_VERSION" ] && [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"')
 
 
+def _init_bash_tools():
+    """Provision the optional line editor at setup time, never at shell startup."""
+    if (Path.home() / '.local' / 'share' / 'blesh' / 'ble.sh').is_file():
+        emit_ok("Bash autosuggestions already installed")
+        return 0
+    if get_os_type() == 'windows':
+        bash = terminal._git_bash()  # pylint: disable=protected-access
+    else:
+        bash = shutil.which('bash')
+    if not bash:
+        emit_error("Bash was not found; install Bash and rerun dev init.")
+        return 1
+    try:
+        subprocess.run(
+            [str(bash), '--noprofile', '--norc', (SCRIPT_DIR / 'setup' / 'install_blesh.sh').as_posix()],
+            env=dict(os.environ, HOME=Path.home().as_posix()), check=True, timeout=180)
+    except (OSError, subprocess.SubprocessError) as error:
+        emit_error(f"Bash autosuggestions setup failed: {error}")
+        return 1
+    return 0
+
+
 def _init_config():
     """Create the private override config from the sample, prompting for a
     username when one isn't already configured and the terminal is interactive."""
@@ -2097,6 +2119,10 @@ def cmd_init(args):
     rc = _init_env_stub()
     if rc != 0:
         return rc
+    if system != 'windows' or config.get('defaultShell', 'system') == 'bash':
+        rc = _init_bash_tools()
+        if rc != 0:
+            return rc
     rc = _init_ai()
     if rc != 0:
         return rc
