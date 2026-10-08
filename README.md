@@ -183,7 +183,9 @@ Run `dev <command> -h` for options.
 ## Develop
 
 Install pylint with `python -m pip install pylint`, then run `dev test`.
-The suite covers onboarding, launchers, and sync using local Git repositories.
-Run it natively on Windows and Unix after changing shell behavior.
+This discovers all `test_*.py` suites and lints the production Python modules,
+including Windows Terminal integration. The tests cover onboarding, launchers,
+and sync using local Git repositories. Run them natively on Windows and Unix
+after changing shell behavior.
 
 [MIT license](LICENSE).

@@ -2146,7 +2146,7 @@ def cmd_python(args):
 
 
 def cmd_test(args):
-    """Run dev.py unit tests"""
+    """Run the full unit suite and lint the production Python modules."""
     test_file = SCRIPT_DIR / 'test_dev.py'
     if not test_file.exists():
         emit_error("test_dev.py not found")
@@ -2161,7 +2161,8 @@ def cmd_test(args):
 
     print(f"\n{Colors.BLUE}Running pylint...{Colors.NC}", flush=True)
     lint = subprocess.run(
-        [sys.executable, '-u', '-m', 'pylint', 'dev.py', 'configuration.py', 'environments.py', 'runtime.py', 'ai.py'],
+        [sys.executable, '-u', '-m', 'pylint', 'dev.py', 'configuration.py',
+         'environments.py', 'runtime.py', 'ai.py', 'terminal.py'],
         cwd=str(SCRIPT_DIR))
     return lint.returncode
 

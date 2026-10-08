@@ -102,7 +102,7 @@ def _same_path(first, second):
 
 def _create_directory_link(link, target):
     if os.name == 'nt':
-        import _winapi  # pylint: disable=import-outside-toplevel
+        import _winapi  # pylint: disable=import-error
         # Junctions need neither administrator rights nor Developer Mode.
         _winapi.CreateJunction(str(target), str(link))
     else:
