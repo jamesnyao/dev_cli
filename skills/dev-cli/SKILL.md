@@ -119,7 +119,8 @@ push, post comments, or create a PR without the user's authorization.
 Each accepts `--id <PR_ID>` or infers the PR from the current repository and
 branch. `dev pr create` opens a draft unless `--draft false` is passed, and
 `dev pr comments --reply <threadId> --resolve "<msg>"` replies and resolves in
-one call.
+one call. Without `--reply`, `--resolve "<msg>"` resolves the newly created
+thread.
 
 `dev ado git <args>` runs Git with a short-lived Azure CLI bearer token, and
 `dev ado token` prints a cached one; neither needs a PAT. `dev ado set-pat`,

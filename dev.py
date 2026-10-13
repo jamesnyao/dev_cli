@@ -2910,8 +2910,8 @@ def _post_pr_comment(org, project, repo, pr_id, args, message):
     if line and not file_path:
         emit_error("--line requires --file")
         return 1
-    if resolve and not reply_to:
-        emit_error("--resolve requires --reply <threadId>")
+    if resolve and not reply_to and not message:
+        emit_error("--resolve requires a message or --reply <threadId>")
         return 1
 
     if message:
@@ -2933,6 +2933,7 @@ def _post_pr_comment(org, project, repo, pr_id, args, message):
             loc = f"{file_path}:{line}" if (file_path and line) else (file_path or '(PR-level)')
             print(f"{Colors.GREEN}[+]{Colors.NC} Created thread {result.get('id')} on PR !{pr_id} "
                   f"{Colors.GREY}({loc}){Colors.NC}")
+            reply_to = result.get('id')
 
     if resolve:
         if not _set_pr_thread_status(org, project, repo, pr_id, reply_to, 'fixed'):
@@ -2960,9 +2961,9 @@ def cmd_pr_comments(args):
     1), or ``--file``/``--line`` to open a new file-anchored thread. With neither,
     a new PR-level thread is created.
 
-    Use ``--resolve`` (requires ``--reply``) to mark the thread ``fixed`` after
-    replying. ``--resolve`` may be used without a message to resolve a thread
-    without posting a reply.
+    Use ``--resolve`` to mark the thread ``fixed`` after posting: with
+    ``--reply`` it resolves the replied-to thread (a message is optional), and
+    without ``--reply`` it resolves the newly created thread.
     """
     ctx = _resolve_pr_context(args)
     if not ctx:
@@ -3166,7 +3167,7 @@ def main():
     pr_comments_p.add_argument('--file', help='Anchor a new thread to this repo-relative file path')
     pr_comments_p.add_argument('--line', type=int, help='Anchor a new thread to this line (requires --file)')
     pr_comments_p.add_argument('--resolve', action='store_true',
-                               help='Mark the replied-to thread as fixed (requires --reply)')
+                               help='Mark the thread as fixed: the --reply thread, or the newly created one')
     pr_comments_p.add_argument('--active', action='store_true',
                                help='When listing, show only active (unresolved) threads')
 

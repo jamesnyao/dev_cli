@@ -3305,10 +3305,23 @@ class TestPrCommentPosting(unittest.TestCase):
         mock_reply.assert_not_called()
         self.assertEqual(mock_status.call_args[0][4], 700)
 
+    @patch('dev._set_pr_thread_status', return_value={'id': 812})
+    @patch('dev._post_pr_thread_new', return_value={'id': 812})
     @patch('dev._resolve_pr_context')
-    def test_resolve_without_reply_errors(self, mock_ctx):
+    def test_new_thread_with_resolve_marks_created_thread_fixed(self, mock_ctx, mock_new, mock_status):
         mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'feat', 42, 'az', None)
-        rc = dev.cmd_pr_comments(self._make_args(message=['x'], resolve=True))
+        buf = StringIO()
+        with patch('sys.stdout', buf):
+            rc = dev.cmd_pr_comments(self._make_args(message=['summary'], resolve=True))
+        self.assertEqual(rc, 0)
+        mock_new.assert_called_once()
+        self.assertEqual(mock_status.call_args[0][4], 812)
+        self.assertEqual(mock_status.call_args[0][5], 'fixed')
+
+    @patch('dev._resolve_pr_context')
+    def test_resolve_without_message_or_reply_errors(self, mock_ctx):
+        mock_ctx.return_value = ('contoso', 'Platform', 'repo', 'feat', 42, 'az', None)
+        rc = dev.cmd_pr_comments(self._make_args(resolve=True))
         self.assertEqual(rc, 1)
 
 
