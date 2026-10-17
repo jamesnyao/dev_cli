@@ -2606,27 +2606,27 @@ def _resolve_pr_context(args):
             emit_error("Failed to get ADO token")
             return None
 
-        repos_to_try = []
-        seen = set()
+        projects_to_try = []
         try:
             for entry in load_config().get('repos', []):
                 parsed = _parse_ado_remote(entry.get('remoteUrl', ''))
-                if parsed and parsed not in seen:
-                    seen.add(parsed)
-                    repos_to_try.append(parsed)
+                if parsed and parsed[:2] not in projects_to_try:
+                    projects_to_try.append(parsed[:2])
         except (OSError, json.JSONDecodeError):
             pass
 
-        for org, project, repo in repos_to_try:
-            pr = _fetch_pr(org, project, repo, pr_id)
+        for org, project in projects_to_try:
+            pr = _ado_get_json(f'https://dev.azure.com/{org}/{project}/_apis/git/pullrequests/'
+                               f'{pr_id}?api-version={ADO_API_VERSION}')
             if pr:
+                repo = pr['repository']['name']
                 branch = pr['sourceRefName'].replace('refs/heads/', '')
                 # Stash the fetched PR so callers (e.g. cmd_pr_diff) can reuse it
                 # instead of issuing a second identical GET.
                 args.resolved_pr = pr
                 return org, project, repo, branch, pr_id, az_cmd, None
 
-        emit_error(f"PR !{pr_id} not found in known repos")
+        emit_error(f"PR !{pr_id} not found in known projects")
         return None
 
     repo_path = args.repo or '.'

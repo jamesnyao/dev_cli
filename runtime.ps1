@@ -138,7 +138,7 @@ if (-not $Interpreter) {
     }
 }
 
-$Json = ConvertTo-Json -InputObject @($args) -Compress
+$Json = ConvertTo-Json -InputObject @($args | ForEach-Object { [string]$_ }) -Compress
 $Encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Json))
 $PreviousEncoding = [Console]::OutputEncoding
 $PreviousOutputEncoding = $global:OutputEncoding

@@ -391,6 +391,21 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(len(output['value']), 2)
         self.assertIn(b'child diagnostic', result.stderr)
 
+    @unittest.skipUnless(os.name == 'nt', 'native Windows shell test')
+    def test_windows_dev_encodes_numeric_arguments_as_strings(self):
+        self.create_native_runtime_fixture()
+        invocation = self.directory / 'numeric.ps1'
+        invocation.write_text(
+            '$Value = @(& "$PSScriptRoot\\dev.ps1" pr comments --id 17138162 -k 1.5)\n'
+            '[Console]::Out.Write($Value[1])\n', encoding='utf-8-sig')
+        powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+        result = subprocess.run(
+            [str(powershell), '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(invocation)],
+            stdin=subprocess.DEVNULL, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)[0],
+                         ['--dev', 'pr', 'comments', '--id', '17138162', '-k', '1.5'])
+
     def create_native_runtime_fixture(self):
         source = (self.source / 'runtime.ps1').read_text(encoding='utf-8')
         executable = sys.executable.replace("'", "''")

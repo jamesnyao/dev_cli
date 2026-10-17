@@ -1763,6 +1763,34 @@ class TestNormalizeUrlForComparison(unittest.TestCase):
         self.assertIsNone(dev._parse_ado_remote(github_url))
 
 
+class TestResolvePrContextById(unittest.TestCase):
+
+    CONFIG = {'repos': [
+        {'remoteUrl': 'https://dev.azure.com/contoso/Platform/_git/listed'},
+        {'remoteUrl': 'https://dev.azure.com/contoso/Platform/_git/other'},
+        {'remoteUrl': 'https://dev.azure.com/contoso/Tools/_git/tools'},
+    ]}
+
+    @patch('dev.get_ado_token', return_value='fake-token')
+    @patch('dev.load_config', return_value=CONFIG)
+    def test_finds_pr_in_unlisted_repo_of_known_project(self, _config, _token):
+        pr = {'repository': {'name': 'unlisted'}, 'sourceRefName': 'refs/heads/user/me/fix'}
+        args = argparse.Namespace(id=42)
+        with patch('dev._ado_get_json', side_effect=[None, pr]) as get:
+            context = dev._resolve_pr_context(args)
+        self.assertEqual(context[:5], ('contoso', 'Tools', 'unlisted', 'user/me/fix', 42))
+        self.assertIs(args.resolved_pr, pr)
+        self.assertEqual([call.args[0].split('/_apis/')[0] for call in get.call_args_list],
+                         ['https://dev.azure.com/contoso/Platform', 'https://dev.azure.com/contoso/Tools'])
+
+    @patch('dev.get_ado_token', return_value='fake-token')
+    @patch('dev.load_config', return_value=CONFIG)
+    def test_reports_pr_missing_from_known_projects(self, _config, _token):
+        with patch('dev._ado_get_json', return_value=None), patch('dev.emit_error') as error:
+            self.assertIsNone(dev._resolve_pr_context(argparse.Namespace(id=42)))
+        error.assert_called_once_with('PR !42 not found in known projects')
+
+
 class TestCmdPrDesc(unittest.TestCase):
 
     def _make_args(self, **kwargs):
