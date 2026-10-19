@@ -125,6 +125,7 @@ class TestAI(unittest.TestCase):
             {'ai': {'provider': []}}, {'ai': {'provider': 'none', 'unexpected': True}},
             {'ai': {'models': []}}, {'ai': {'models': {'high': ''}}}, {'ai': {'models': {'high': None}}},
             {'ai': {'defaultModel': 'missing'}}, {'ai': {'models': {'high': 'm'}, 'defaultModel': 'low'}},
+            {'ai': {'continueModel': 'missing'}},
         ]
         for config in choices:
             with self.subTest(config=config):
@@ -336,6 +337,8 @@ class TestAI(unittest.TestCase):
         self.which.return_value = 'native-copilot'
         self.run.return_value.returncode = 0
         tiered = {'models': {'high': 'strong-model'}, 'defaultModel': 'high'}
+        split = {'models': {'fast': 'fast-model', 'high': 'strong-model'},
+                 'defaultModel': 'fast', 'continueModel': 'high'}
         for options, arguments, model, rest in (
                 ({}, ['auto', '-p', 'x'], ['--model', 'auto'], ['-p', 'x']),
                 ({}, ['high'], [], ['high']),
@@ -349,7 +352,15 @@ class TestAI(unittest.TestCase):
                 (tiered, ['high'], ['--model', 'strong-model'], []),
                 (tiered, ['--model', 'other'], [], ['--model', 'other']),
                 (tiered, ['--model=other'], [], ['--model=other']),
-                ({'models': {'auto': 'pinned'}}, ['auto'], ['--model', 'pinned'], [])):
+                ({'models': {'auto': 'pinned'}}, ['auto'], ['--model', 'pinned'], []),
+                (split, [], ['--model', 'fast-model'], []),
+                (split, ['-p', 'x'], ['--model', 'fast-model'], ['-p', 'x']),
+                (split, ['-c'], ['--model', 'strong-model'], ['--continue']),
+                (split, ['--continue'], ['--model', 'strong-model'], ['--continue']),
+                (split, ['fast', '-c'], ['--model', 'fast-model'], ['--continue']),
+                (split, ['-c', '--model', 'other'], [], ['--continue', '--model', 'other']),
+                ({'continueModel': 'auto'}, [], [], []),
+                ({'continueModel': 'auto'}, ['-c'], ['--model', 'auto'], ['--continue'])):
             with self.subTest(options=options, arguments=arguments):
                 self.run.reset_mock()
                 self.assertEqual(ai.run_chat({'ai': options}, arguments, self.home, self.dev), 0)

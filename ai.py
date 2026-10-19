@@ -14,7 +14,8 @@ import urllib.request
 BUNDLED_SKILLS = Path(__file__).parent / 'skills'
 MODE_FLAGS = {'--mode', '--autopilot', '--plan'}
 MODEL_TIERS = {'auto': 'auto'}
-AI_OPTIONS = {'provider', 'skills', 'models', 'defaultModel'}
+AI_OPTIONS = {'provider', 'skills', 'models', 'defaultModel', 'continueModel'}
+CONTINUE_FLAGS = {'-c', '--continue'}
 COPILOT_INSTALL_URL = 'https://gh.io/copilot-install'
 COPILOT_DOCS = 'https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli'
 
@@ -229,21 +230,23 @@ def provider_name(config):
 
 
 def _model_tiers(options):
-    """Return the tier-to-model map (built-ins plus ai.models) and the default tier."""
+    """Return the tier-to-model map (built-ins plus ai.models), the default tier, and the continue tier."""
     configured = options.get('models', {})
     if not isinstance(configured, dict) or not all(
             isinstance(model, str) and model for model in configured.values()):
         raise ValueError('ai.models must map tier names to model names.')
     tiers = {**MODEL_TIERS, **configured}
+    for option in ('defaultModel', 'continueModel'):
+        tier = options.get(option)
+        if tier is not None and tier not in tiers:
+            raise ValueError(f"ai.{option} must be one of: {', '.join(tiers)}.")
     default = options.get('defaultModel')
-    if default is not None and default not in tiers:
-        raise ValueError(f"ai.defaultModel must be one of: {', '.join(tiers)}.")
-    return tiers, default
+    return tiers, default, options.get('continueModel', default)
 
 
 def _model_arguments(options, arguments):
-    """Replace a leading tier name with --model, falling back to ai.defaultModel."""
-    tiers, tier = _model_tiers(options)
+    """Replace a leading tier name with --model, falling back to ai.continueModel or ai.defaultModel."""
+    tiers, tier, resume = _model_tiers(options)
     explicit = any(arg == '--model' or arg.startswith('--model=') for arg in arguments)
     if arguments and arguments[0] in tiers:
         if explicit:
@@ -251,6 +254,8 @@ def _model_arguments(options, arguments):
         tier, arguments = arguments[0], arguments[1:]
     elif explicit:
         tier = None
+    elif arguments and arguments[0] in CONTINUE_FLAGS:
+        tier = resume
     return ([] if tier is None else ['--model', tiers[tier]]), arguments
 
 
