@@ -2939,7 +2939,466 @@ class TestCmdPrDiff(unittest.TestCase):
         self.assertIn('origin/main...origin/feat', ' '.join(diff_call[-1][0][0]))
 
 
+class TestCmdPrPolicy(unittest.TestCase):
+
+    def setUp(self):
+        self.pr = {'repository': {'project': {'id': 'project-id'}}}
+        self.ctx = self.enterContext(patch('dev._resolve_pr_context', return_value=(
+            'contoso', 'Platform', 'repo', 'feature', 42, 'az', None)))
+        self.config = self.enterContext(patch('dev.load_config', return_value={}))
+        self.fetch = self.enterContext(patch('dev._fetch_pr_policy_evaluations', return_value=[]))
+        self.get = self.enterContext(patch('dev._ado_get_json'))
+        self.post = self.enterContext(patch('dev._ado_post_json'))
+        self.output = self.enterContext(patch('sys.stdout', new_callable=StringIO))
+        self.errors = self.enterContext(patch('sys.stderr', new_callable=StringIO))
+
+    def _args(self):
+        return argparse.Namespace(id=42, repo=None, branch=None, resolved_pr=self.pr)
+
+    @staticmethod
+    def _policy(number, status='running', **settings):
+        return {
+            'evaluationId': f'evaluation-{number}', 'status': status,
+            'context': {'buildId': number + 100},
+            'configuration': {
+                'id': number, 'isEnabled': True, 'isBlocking': True,
+                'settings': settings or {'statusGenre': 'ci', 'statusName': f'check-{number}'},
+            },
+        }
+
+    def test_prints_only_unique_outstanding_run_links_without_detail_requests(self):
+        self.fetch.return_value = [
+            self._policy(1, 'queued'), self._policy(2, 'running'),
+            self._policy(3, 'rejected'), self._policy(4, 'broken'),
+            self._policy(5, 'approved'), self._policy(6, 'notApplicable'),
+            self._policy(7, minimumApproverCount=2),
+            self._policy(8, 'running'), self._policy(1, 'rejected'),
+        ]
+        self.fetch.return_value[6]['context'] = {}
+        self.fetch.return_value[7]['configuration']['isBlocking'] = False
+        self.assertEqual(dev.cmd_pr_policy(self._args()), 0)
+        self.assertEqual(self.output.getvalue(), ''.join(
+            f'https://dev.azure.com/contoso/Platform/_build/results?buildId={build_id}\n'
+            for build_id in (101, 102, 103, 104, 108)))
+        self.fetch.assert_called_once_with('contoso', 'project-id', 42)
+        self.get.assert_not_called()
+        self.post.assert_not_called()
+
+    def test_exclusions_match_names_not_substrings_and_skip_disabled_policies(self):
+        self.config.return_value = {'pr': {'policyExclude': ['external approval', 'legacy-*']}}
+        self.fetch.return_value = [
+            self._policy(1, statusName='EXTERNAL APPROVAL'),
+            self._policy(2, statusName='external approval tests'),
+            self._policy(3, statusName='legacy-lint'),
+            self._policy(4), self._policy(5),
+        ]
+        self.fetch.return_value[-2]['configuration']['isEnabled'] = False
+        self.fetch.return_value[-1]['configuration']['isDeleted'] = True
+        self.assertEqual(dev.cmd_pr_policy(self._args()), 0)
+        self.assertEqual(self.output.getvalue(),
+                         'https://dev.azure.com/contoso/Platform/_build/results?buildId=102\n')
+
+    def test_unnamed_pipeline_needs_no_build_lookup(self):
+        self.config.return_value = {'pr': {'policyExclude': ['external approval']}}
+        self.fetch.return_value = [self._policy(1, buildDefinitionId=77)]
+        self.assertEqual(dev.cmd_pr_policy(self._args()), 0)
+        self.assertEqual(self.output.getvalue(),
+                         'https://dev.azure.com/contoso/Platform/_build/results?buildId=101\n')
+        self.get.assert_not_called()
+
+    def test_errors_never_look_like_an_empty_successful_list(self):
+        for config in ({'pr': []}, {'pr': {'policyExclude': 'skip'}},
+                       {'pr': {'policyExclude': ['']}}):
+            with self.subTest(config=config):
+                self.config.return_value = config
+                self.assertEqual(dev.cmd_pr_policy(self._args()), 1)
+        self.config.return_value = {}
+        self.fetch.side_effect = ValueError('unavailable')
+        self.assertEqual(dev.cmd_pr_policy(self._args()), 1)
+        self.assertEqual(self.output.getvalue(), '')
+        self.assertIn('unavailable', self.errors.getvalue())
+        self.post.assert_not_called()
+
+    def test_no_pr_and_missing_project_fail(self):
+        self.ctx.return_value = None
+        self.assertEqual(dev.cmd_pr_policy(self._args()), 1)
+        self.ctx.return_value = ('contoso', 'Platform', 'repo', 'feature', None, 'az', None)
+        self.assertEqual(dev.cmd_pr_policy(self._args()), 1)
+        self.ctx.return_value = ('contoso', 'Platform', 'repo', 'feature', 42, 'az', None)
+        self.pr['repository'] = {}
+        self.assertEqual(dev.cmd_pr_policy(self._args()), 1)
+        self.fetch.assert_not_called()
+
+    def test_draft_checks_without_runs_and_empty_results_produce_no_links(self):
+        for records in ([], [self._policy(1, 'queued'), self._policy(2, 'running')]):
+            for record in records:
+                record['context'] = {}
+            self.fetch.return_value = records
+            self.assertEqual(dev.cmd_pr_policy(self._args()), 0)
+        self.assertEqual(self.output.getvalue(), '')
+        self.get.assert_not_called()
+        self.post.assert_not_called()
+
+    def test_evaluation_pagination_uses_project_artifact(self):
+        with patch('dev._ado_get_json') as get:
+            page = [self._policy(i) for i in range(100)]
+            get.side_effect = [{'value': page}, {'value': [self._policy(100)]}]
+            records = self._real_fetch('contoso', 'project-id', 42)
+        self.assertEqual(len(records), 101)
+        from urllib.parse import parse_qs, urlsplit
+        query = parse_qs(urlsplit(get.call_args_list[1].args[0]).query)
+        self.assertEqual(query['artifactId'], ['vstfs:///CodeReview/CodeReviewId/project-id/42'])
+        self.assertEqual(query['$skip'], ['100'])
+        self.assertEqual(query['api-version'], ['7.1-preview.1'])
+
+    _real_fetch = staticmethod(dev._fetch_pr_policy_evaluations)
+
+    def test_malformed_evaluation_response_fails(self):
+        for response in (None, {}, {'value': None}, {'value': [None]}):
+            with self.subTest(response=response):
+                self.get.return_value = response
+                with self.assertRaises(ValueError):
+                    self._real_fetch('contoso', 'project-id', 42)
+
+
+class TestCmdPrTag(unittest.TestCase):
+
+    def setUp(self):
+        self.enterContext(patch('dev._resolve_pr_context', return_value=(
+            'contoso', 'Platform', 'repo', 'feature', 42, 'az', None)))
+        self.names = self.enterContext(patch('dev._pr_tag_names', return_value={'working', 'feature'}))
+        self.post = self.enterContext(patch('dev._ado_post_json', return_value={'name': 'done'}))
+        self.delete = self.enterContext(patch('dev._delete_pr_tag'))
+        self.output = self.enterContext(patch('sys.stdout', new_callable=StringIO))
+        self.errors = self.enterContext(patch('sys.stderr', new_callable=StringIO))
+
+    @staticmethod
+    def _args(**kwargs):
+        return argparse.Namespace(**dict(
+            {'id': 42, 'repo': None, 'branch': None, 'json': True,
+             'add': None, 'remove': None, 'expect': None}, **kwargs))
+
+    def test_list_is_read_only(self):
+        self.assertEqual(dev.cmd_pr_tag(self._args()), 0)
+        self.assertEqual(json.loads(self.output.getvalue()), ['feature', 'working'])
+        self.post.assert_not_called()
+        self.delete.assert_not_called()
+
+    def test_transition_preserves_unrelated_tags_and_verifies_result(self):
+        self.names.side_effect = [
+            {'working', 'feature'}, {'working', 'done', 'feature'}, {'done', 'feature'}]
+        self.assertEqual(dev.cmd_pr_tag(self._args(add='done', remove='working', expect='working')), 0)
+        self.assertEqual(self.post.call_args.args[1], {'name': 'done'})
+        self.assertIn('/labels/working?', self.delete.call_args.args[0])
+        self.assertEqual(json.loads(self.output.getvalue()), ['done', 'feature'])
+        self.assertEqual(self.names.call_count, 3)
+
+    def test_missing_expected_tag_or_failed_read_prevents_writes(self):
+        for failure in (False, True):
+            with self.subTest(failure=failure):
+                self.names.return_value = {'stop', 'feature'}
+                self.names.side_effect = ValueError('offline') if failure else None
+                self.assertEqual(dev.cmd_pr_tag(
+                    self._args(add='done', remove='working', expect='working')), 1)
+        self.post.assert_not_called()
+        self.delete.assert_not_called()
+        self.assertEqual(self.output.getvalue(), '')
+
+    def test_manual_removal_during_transition_stops_further_writes(self):
+        for observed in ({'stop', 'feature', 'done'}, {'working', 'stop', 'feature', 'done'}):
+            with self.subTest(observed=observed):
+                self.names.side_effect = [{'working', 'feature'}, observed]
+                self.assertEqual(dev.cmd_pr_tag(self._args(
+                    add='done', remove='working', expect='working')), 1)
+        self.delete.assert_not_called()
+        self.assertIn('changed; stopping', self.errors.getvalue())
+
+    def test_idempotent_update_and_encoded_removal(self):
+        self.assertEqual(dev.cmd_pr_tag(self._args(add='feature', remove='absent')), 0)
+        self.post.assert_not_called()
+        self.delete.assert_not_called()
+        self.names.side_effect = [{'topic / ready'}, set()]
+        self.assertEqual(dev.cmd_pr_tag(self._args(remove='topic / ready')), 0)
+        self.assertIn('/labels/topic%20%2F%20ready?', self.delete.call_args.args[0])
+
+    def test_failed_post_and_unverified_result_fail(self):
+        self.post.return_value = None
+        self.assertEqual(dev.cmd_pr_tag(self._args(add='done')), 1)
+        self.post.return_value = {'name': 'done'}
+        self.assertEqual(dev.cmd_pr_tag(self._args(add='done')), 1)
+        self.assertEqual(self.output.getvalue(), '')
+
+    def test_invalid_arguments_do_not_mutate(self):
+        for kwargs in ({'add': ' '}, {'add': 'x', 'remove': 'x'}):
+            self.assertEqual(dev.cmd_pr_tag(self._args(**kwargs)), 1)
+        self.names.assert_not_called()
+        self.post.assert_not_called()
+        self.delete.assert_not_called()
+
+
+class TestPrPolicyAndTagWiring(unittest.TestCase):
+
+    def test_cli_dispatch_and_flags(self):
+        for command, flags, handler in (
+                ('policy', [], 'cmd_pr_policy'),
+                ('tag', ['--json', '--add', 'done', '--remove', 'working', '--expect', 'working'],
+                 'cmd_pr_tag')):
+            with self.subTest(command=command), \
+                    patch('sys.argv', ['dev', 'pr', command, '--id', '42', *flags]), \
+                    patch('dev.trust_claude_workspace'), patch('dev.get_base_path', return_value='.'), \
+                    patch(f'dev.{handler}', return_value=7) as dispatch:
+                self.assertEqual(dev.main(), 7)
+                self.assertEqual(dispatch.call_args.args[0].id, 42)
+                if command == 'tag':
+                    self.assertTrue(dispatch.call_args.args[0].json)
+
+
+class TestPrCommentHashes(unittest.TestCase):
+
+    def setUp(self):
+        self.ctx = self.enterContext(patch('dev._resolve_pr_context', return_value=(
+            'contoso', 'Platform', 'repo', 'feature', 42, 'az', None)))
+        self.fetch = self.enterContext(patch('dev._fetch_pr_threads'))
+        self.post = self.enterContext(patch('dev._post_pr_comment'))
+        self.record = self.enterContext(patch('dev._record_pr_comment_snapshot'))
+        self.output = self.enterContext(patch('sys.stdout', new_callable=StringIO))
+        self.errors = self.enterContext(patch('sys.stderr', new_callable=StringIO))
+        self.thread = {
+            'id': 100, 'status': 'active', 'threadContext': {'filePath': '/src/a.py'},
+            'comments': [{'id': 1, 'content': 'Original feedback', 'author': {'displayName': 'Reviewer'}}],
+        }
+
+    @staticmethod
+    def _args(**kwargs):
+        return argparse.Namespace(**dict({'id': 42, 'repo': None, 'branch': None, 'hash': True}, **kwargs))
+
+    def _scan(self, threads):
+        self.fetch.return_value = threads
+        self.output.seek(0)
+        self.output.truncate()
+        self.assertEqual(dev.cmd_pr_comments(self._args()), 0)
+        lines = self.output.getvalue().splitlines()
+        for line in lines:
+            self.assertRegex(line, r'^\d+/\d+ [0-9a-f]{64}$')
+        return dict(line.split() for line in lines)
+
+    def test_canonical_json_and_row_order_are_stable(self):
+        other = {'id': 200, 'status': 'active',
+                 'comments': [{'id': 2, 'content': 'Second'}, {'id': 1, 'content': 'First'}]}
+        baseline = self._scan([other, self.thread])
+        self.assertEqual(list(baseline), ['100/1', '200/1', '200/2'])
+        reordered = dict(reversed(list(self.thread.items())))
+        reordered['comments'] = [dict(reversed(list(self.thread['comments'][0].items())))]
+        other['comments'].reverse()
+        self.assertEqual(self._scan([reordered, other]), baseline)
+        self.assertNotIn('Original feedback', self.output.getvalue())
+
+    def test_json_edits_and_thread_context_changes_invalidate_hash(self):
+        baseline = self._scan([self.thread])
+        changed = json.loads(json.dumps(self.thread))
+        changed['comments'][0]['content'] = 'Updated feedback'
+        self.assertNotEqual(self._scan([changed]), baseline)
+        changed = json.loads(json.dumps(self.thread))
+        changed['threadContext']['filePath'] = '/src/b.py'
+        self.assertNotEqual(self._scan([changed]), baseline)
+        changed = json.loads(json.dumps(self.thread))
+        changed['status'] = 'pending'
+        self.assertNotEqual(self._scan([changed]), baseline)
+
+    def test_each_scan_refetches_and_detects_deletion_resolution_and_reopening(self):
+        self.thread['comments'].append({'id': 2, 'content': 'A new reply'})
+        self.assertEqual(set(self._scan([self.thread])), {'100/1', '100/2'})
+        self.thread['comments'][1]['isDeleted'] = True
+        self.assertEqual(set(self._scan([self.thread])), {'100/1'})
+        self.thread['status'] = 'fixed'
+        self.assertEqual(self._scan([self.thread]), {})
+        self.thread['status'] = 'active'
+        self.assertEqual(set(self._scan([self.thread])), {'100/1'})
+        self.thread['isDeleted'] = True
+        self.assertEqual(self._scan([self.thread]), {})
+        self.assertEqual(self.fetch.call_count, 5)
+        self.post.assert_not_called()
+
+    def test_resolved_and_activity_threads_are_omitted_but_bot_comments_remain(self):
+        hidden = []
+        for status in ('fixed', 'wontFix', 'closed', 'byDesign'):
+            thread = json.loads(json.dumps(self.thread))
+            thread['status'] = status
+            hidden.append(thread)
+        activity = json.loads(json.dumps(self.thread))
+        activity['properties'] = {'CodeReviewThreadType': {}}
+        self.thread['comments'][0]['commentType'] = 'system'
+        self.assertEqual(set(self._scan([*hidden, activity, self.thread])), {'100/1'})
+
+    def test_deleted_comment_content_is_not_displayed_in_normal_mode(self):
+        self.thread['comments'].append({'id': 2, 'content': 'Deleted feedback', 'isDeleted': True})
+        self.fetch.return_value = [self.thread]
+        self.assertEqual(dev.cmd_pr_comments(self._args(hash=False)), 0)
+        self.assertIn('Original feedback', self.output.getvalue())
+        self.assertNotIn('Deleted feedback', self.output.getvalue())
+
+    def test_hash_mode_rejects_posting_options_without_writes(self):
+        for options in ({'message': ['reply']}, {'reply': 100}, {'resolve': True},
+                        {'file': '/src/a.py'}, {'line': 1}, {'parent': 2}):
+            with self.subTest(options=options):
+                self.assertEqual(dev.cmd_pr_comments(self._args(**options)), 1)
+        self.ctx.assert_not_called()
+        self.post.assert_not_called()
+        self.assertEqual(self.output.getvalue(), '')
+
+    def test_failed_or_invalid_fetch_does_not_print_a_snapshot(self):
+        self.fetch.return_value = None
+        self.assertEqual(dev.cmd_pr_comments(self._args()), 1)
+        self.fetch.return_value = [self.thread, {'comments': [{'content': 'Missing IDs'}]}]
+        self.assertEqual(dev.cmd_pr_comments(self._args()), 1)
+        self.assertEqual(self.output.getvalue(), '')
+        self.assertIn('Cannot hash', self.errors.getvalue())
+
+    def test_malformed_api_response_is_not_an_empty_snapshot(self):
+        for response in (None, {}, [], {'value': None}, {'value': [None]}):
+            with self.subTest(response=response), patch('dev._ado_get_json', return_value=response):
+                self.assertIsNone(self._real_fetch('contoso', 'Platform', 'repo', 42))
+        with patch('dev._ado_get_json', return_value={'value': []}):
+            self.assertEqual(self._real_fetch('contoso', 'Platform', 'repo', 42), [])
+
+    _real_fetch = staticmethod(dev._fetch_pr_threads)
+
+    def test_cli_hash_flag(self):
+        with patch('sys.argv', ['dev', 'pr', 'comments', '--id', '42', '--hash']), \
+                patch('dev.trust_claude_workspace'), patch('dev.get_base_path', return_value='.'), \
+                patch('dev.cmd_pr_comments', return_value=0) as command:
+            self.assertEqual(dev.main(), 0)
+            self.assertTrue(command.call_args.args[0].hash)
+
+
+class TestPrCommentHistory(unittest.TestCase):
+
+    def setUp(self):
+        self.directory = self.enterContext(tempfile.TemporaryDirectory())
+        self.enterContext(patch('dev.DEV_TEMP_DIR', Path(self.directory)))
+        self.enterContext(patch.dict(os.environ, {'COPILOT_AGENT_SESSION_ID': 'owning-session'}))
+        self.ctx = ('contoso', 'Platform', 'repo', 'feature', 42, 'az', None)
+        self.enterContext(patch('dev._resolve_pr_context', return_value=self.ctx))
+        self.pr = self.enterContext(patch('dev._fetch_pr', return_value={
+            'lastMergeSourceCommit': {'commitId': 'source-sha'}}))
+        self.fetch = self.enterContext(patch('dev._fetch_pr_threads', return_value=[{
+            'id': 100, 'status': 'active',
+            'comments': [{'id': 1, 'content': 'Do not store this body'}],
+        }]))
+        self.output = self.enterContext(patch('sys.stdout', new_callable=StringIO))
+        self.errors = self.enterContext(patch('sys.stderr', new_callable=StringIO))
+        self.path = dev._pr_comment_history_path(self.ctx)
+
+    @staticmethod
+    def _args(**kwargs):
+        return argparse.Namespace(**dict({'id': 42, 'repo': None, 'branch': None}, **kwargs))
+
+    def test_all_read_modes_record_commit_hashes_and_automatic_session_without_bodies(self):
+        for flags in ({}, {'active': True}, {'hash': True}):
+            self.assertEqual(dev.cmd_pr_comments(self._args(**flags)), 0)
+        entries = json.loads(self.path.read_text(encoding='utf-8'))
+        self.assertEqual(len(entries), 3)
+        for entry in entries:
+            self.assertEqual(entry['commit'], 'source-sha')
+            self.assertEqual(entry['sessionId'], 'owning-session')
+            self.assertEqual(set(entry['hashes']), {'100/1'})
+            self.assertEqual(datetime.fromisoformat(entry['timestamp']).utcoffset().total_seconds(), 0)
+            self.assertNotIn('wip', entry)
+        self.assertNotIn('Do not store this body', self.path.read_text(encoding='utf-8'))
+
+    def test_history_defaults_to_last_ten_and_does_not_fetch_or_record(self):
+        for number in range(12):
+            self.pr.return_value = {'lastMergeSourceCommit': {'commitId': f'commit-{number}'}}
+            self.assertEqual(dev.cmd_pr_comments(self._args(hash=True)), 0)
+        saved = self.path.read_bytes()
+        self.fetch.reset_mock()
+        self.pr.reset_mock()
+        for limit, expected_count in ((None, 10), (2, 2)):
+            self.output.seek(0)
+            self.output.truncate()
+            self.assertEqual(dev.cmd_pr_comments(self._args(history=True, last=limit)), 0)
+            headings = [line for line in self.output.getvalue().splitlines() if ' commit ' in line]
+            self.assertEqual(len(headings), expected_count)
+            self.assertIn('commit commit-11 session owning-session', headings[0])
+            self.assertIn(f'commit commit-{12 - expected_count} ', headings[-1])
+            self.assertIn('  100/1 ', self.output.getvalue())
+        self.assertEqual(self.path.read_bytes(), saved)
+        self.fetch.assert_not_called()
+        self.pr.assert_not_called()
+
+    def test_retains_exactly_the_latest_thousand_entries(self):
+        self.assertEqual(dev.cmd_pr_comments(self._args(hash=True)), 0)
+        template = json.loads(self.path.read_text(encoding='utf-8'))[0]
+        self.path.write_text(json.dumps([
+            dict(template, commit=f'old-{index}') for index in range(1000)]), encoding='utf-8')
+        self.assertEqual(dev.cmd_pr_comments(self._args(hash=True)), 0)
+        entries = json.loads(self.path.read_text(encoding='utf-8'))
+        self.assertEqual(len(entries), 1000)
+        self.assertEqual(entries[0]['commit'], 'old-1')
+        self.assertEqual(entries[-1]['commit'], 'source-sha')
+
+    def test_concurrent_writers_preserve_both_entries(self):
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(dev._record_pr_comment_snapshot, self.ctx, self._args(),
+                                   [(100, index, str(index) * 64)]) for index in (1, 2)]
+            for future in futures:
+                future.result()
+        entries = json.loads(self.path.read_text(encoding='utf-8'))
+        self.assertEqual(len(entries), 2)
+        self.assertEqual({key for entry in entries for key in entry['hashes']}, {'100/1', '100/2'})
+
+    def test_absent_session_is_not_guessed_and_pr_histories_are_separate(self):
+        with patch.dict(os.environ, {'COPILOT_AGENT_SESSION_ID': ''}):
+            self.assertEqual(dev.cmd_pr_comments(self._args(hash=True)), 0)
+        self.assertIsNone(json.loads(self.path.read_text(encoding='utf-8'))[0]['sessionId'])
+        other = (*self.ctx[:4], 43, *self.ctx[5:])
+        self.assertNotEqual(dev._pr_comment_history_path(other), self.path)
+        self.assertEqual(dev._read_pr_comment_history(dev._pr_comment_history_path(other)), [])
+
+    def test_failed_fetch_or_write_does_not_replace_existing_history(self):
+        self.assertEqual(dev.cmd_pr_comments(self._args(hash=True)), 0)
+        saved = self.path.read_bytes()
+        self.output.seek(0)
+        self.output.truncate()
+        with patch('dev._fetch_pr_threads', return_value=None):
+            self.assertEqual(dev.cmd_pr_comments(self._args(hash=True)), 1)
+        with patch('dev._fetch_pr', return_value=None):
+            self.assertEqual(dev.cmd_pr_comments(self._args(hash=True)), 1)
+        with patch.object(Path, 'replace', side_effect=OSError('disk unavailable')):
+            self.assertEqual(dev.cmd_pr_comments(self._args(hash=True)), 1)
+        self.assertEqual(self.path.read_bytes(), saved)
+        self.assertEqual(list(self.path.parent.glob('*.tmp')), [])
+        self.assertEqual(self.output.getvalue(), '')
+
+    def test_corrupt_history_is_reported_not_silently_reset(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text('broken json', encoding='utf-8')
+        self.assertEqual(dev.cmd_pr_comments(self._args(history=True)), 1)
+        self.assertEqual(dev.cmd_pr_comments(self._args(hash=True)), 1)
+        self.assertEqual(self.path.read_text(encoding='utf-8'), 'broken json')
+
+    def test_invalid_history_flags_and_posting_do_not_create_entries(self):
+        for flags in ({'last': 1}, {'history': True, 'last': 0}, {'history': True, 'last': -1},
+                      {'history': True, 'hash': True}, {'history': True, 'active': True},
+                      {'history': True, 'message': ['write']}):
+            self.assertEqual(dev.cmd_pr_comments(self._args(**flags)), 1)
+        self.fetch.assert_not_called()
+        self.assertFalse(self.path.exists())
+
+    def test_history_flags_parse(self):
+        with patch('sys.argv', ['dev', 'pr', 'comments', '--id', '42', '--history', '--last', '2']), \
+                patch('dev.trust_claude_workspace'), patch('dev.get_base_path', return_value='.'), \
+                patch('dev.cmd_pr_comments', return_value=0) as command:
+            self.assertEqual(dev.main(), 0)
+            self.assertTrue(command.call_args.args[0].history)
+            self.assertEqual(command.call_args.args[0].last, 2)
+
+
 class TestCmdPrComments(unittest.TestCase):
+
+    def setUp(self):
+        self.enterContext(patch('dev._record_pr_comment_snapshot'))
 
     def _make_args(self, **kwargs):
         defaults = dict(repo=None, branch=None, id=None)

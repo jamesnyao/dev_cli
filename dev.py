@@ -5,7 +5,9 @@ Dev CLI - Cross-platform development workflow tool
 
 import argparse
 import base64
+import fnmatch
 import getpass
+import hashlib
 import json
 import os
 import platform
@@ -16,6 +18,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
@@ -2478,7 +2481,158 @@ def _fetch_pr_threads(org, project, repo, pr_id):
     """Fetch PR comment threads from ADO REST API. Returns list of threads or None."""
     base = f'https://dev.azure.com/{org}/{project}/_apis/git/repositories'
     data = _ado_get_json(f'{base}/{repo}/pullrequests/{pr_id}/threads?api-version={ADO_API_VERSION}')
-    return None if data is None else data.get('value', [])
+    if (not isinstance(data, dict) or not isinstance(data.get('value'), list)
+            or not all(isinstance(thread, dict) for thread in data['value'])):
+        return None
+    return data['value']
+
+
+def _fetch_pr_policy_evaluations(org, project_id, pr_id):
+    """Read all applicable policy evaluations, following pagination."""
+    records = []
+    while True:
+        query = urllib.parse.urlencode({
+            'artifactId': f'vstfs:///CodeReview/CodeReviewId/{project_id}/{pr_id}',
+            '$top': 100, '$skip': len(records),
+            'api-version': f'{ADO_API_VERSION}-preview.1',
+        })
+        data = _ado_get_json(
+            f'https://dev.azure.com/{org}/{project_id}/_apis/policy/evaluations?{query}',
+            timeout=30)
+        if not isinstance(data, dict) or not isinstance(data.get('value'), list):
+            raise ValueError("Failed to fetch PR policy evaluations")
+        page = data['value']
+        if not all(isinstance(record, dict) for record in page):
+            raise ValueError("Invalid PR policy evaluation response")
+        records.extend(page)
+        if len(page) < 100:
+            return records
+
+
+def _pr_policy_run_url(org, project, record, exclude):
+    """Return an outstanding policy's Azure Pipelines run link, if it has a run."""
+    if record.get('status') not in ('queued', 'running', 'rejected', 'broken'):
+        return None
+    config = record.get('configuration') or {}
+    if config.get('isEnabled') is False or config.get('isDeleted'):
+        return None
+    build_id = (record.get('context') or {}).get('buildId')
+    if not build_id:
+        return None
+    settings = config.get('settings') or {}
+    status_name = settings.get('statusName')
+    name = settings.get('displayName') or '/'.join(
+        value for value in (settings.get('statusGenre'), status_name) if value)
+    names = [name, status_name or '', (config.get('type') or {}).get('displayName', '')]
+    if any(fnmatch.fnmatchcase(value.casefold(), pattern.casefold())
+           for value in names if value for pattern in exclude):
+        return None
+    return f'https://dev.azure.com/{org}/{project}/_build/results?buildId={build_id}'
+
+
+def cmd_pr_policy(args):
+    """Print only links to pending or failed PR policy runs; never queue anything."""
+    ctx = _resolve_pr_context(args)
+    if not ctx:
+        return 1
+    org, project, repo, _, pr_id, _, _ = ctx
+    if not pr_id:
+        emit_error("No active PR found for this branch")
+        return 1
+    pr = getattr(args, 'resolved_pr', None) or _fetch_pr(org, project, repo, pr_id)
+    project_id = (((pr or {}).get('repository') or {}).get('project') or {}).get('id')
+    if not project_id:
+        emit_error(f"Failed to fetch project details for PR !{pr_id}")
+        return 1
+    try:
+        pr_config = load_config().get('pr', {})
+        if not isinstance(pr_config, dict):
+            raise ValueError("pr configuration must be an object")
+        exclude = pr_config.get('policyExclude', [])
+        if (not isinstance(exclude, list)
+                or not all(isinstance(item, str) and item.strip() for item in exclude)):
+            raise ValueError("pr.policyExclude must be a list of nonempty name patterns")
+        links = []
+        for record in _fetch_pr_policy_evaluations(org, project_id, pr_id):
+            link = _pr_policy_run_url(org, project, record, exclude)
+            if link:
+                links.append(link)
+    except (OSError, ValueError) as error:
+        emit_error(f"Cannot read PR policies: {error}")
+        return 1
+    for link in dict.fromkeys(links):
+        print(link)
+    return 0
+
+
+def _pr_tag_names(url):
+    data = _ado_get_json(url, timeout=30)
+    if not isinstance(data, dict) or not isinstance(data.get('value'), list):
+        raise ValueError("Failed to fetch PR tags")
+    if not all(isinstance(tag, dict) and isinstance(tag.get('name'), str)
+               for tag in data['value']):
+        raise ValueError("Invalid PR tag response")
+    return {tag['name'] for tag in data['value']}
+
+
+def _delete_pr_tag(url):
+    token = get_ado_token()
+    if not token:
+        raise ValueError("Failed to get ADO token")
+    request = urllib.request.Request(
+        url, method='DELETE', headers={'Authorization': f'Bearer {token}'})
+    with urllib.request.urlopen(request, timeout=30):
+        pass
+
+
+def cmd_pr_tag(args):
+    """List tags or add/remove named tags, optionally requiring a current tag."""
+    for value in (args.add, args.remove, args.expect):
+        if value is not None and not value.strip():
+            emit_error("PR tag names must not be blank")
+            return 1
+    if args.add and args.add == args.remove:
+        emit_error("Cannot add and remove the same PR tag")
+        return 1
+    ctx = _resolve_pr_context(args)
+    if not ctx:
+        return 1
+    org, project, repo, _, pr_id, _, _ = ctx
+    if not pr_id:
+        emit_error("No active PR found for this branch")
+        return 1
+    base = (f'https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo}'
+            f'/pullrequests/{pr_id}/labels')
+    url = f'{base}?api-version={ADO_API_VERSION}'
+    try:
+        names = _pr_tag_names(url)
+        if args.expect and args.expect not in names:
+            raise ValueError(f"Expected PR tag {args.expect!r} is missing; no changes made")
+        expected_names = names | ({args.add} if args.add else set())
+        if args.add and args.add not in names:
+            if not _ado_post_json(url, {'name': args.add}):
+                raise ValueError(f"Failed to add PR tag {args.add!r}")
+        if args.remove and args.remove in names:
+            # Recheck after adding: a user may have stopped the workflow meanwhile.
+            if args.expect and _pr_tag_names(url) != expected_names:
+                raise ValueError("PR tags changed; stopping")
+            label = urllib.parse.quote(args.remove, safe='')
+            _delete_pr_tag(f'{base}/{label}?api-version={ADO_API_VERSION}')
+        expected_names.discard(args.remove)
+        if args.add or args.remove:
+            names = _pr_tag_names(url)
+            if (args.add and args.add not in names) or (args.remove and args.remove in names):
+                raise ValueError("PR tag update could not be verified; re-read tags before retrying")
+            if args.expect and names != expected_names:
+                raise ValueError("PR tags changed; stopping")
+    except (OSError, ValueError) as error:
+        emit_error(f"Cannot update/read PR tags: {error}")
+        return 1
+    if args.json:
+        print(json.dumps(sorted(names)))
+    else:
+        print(f"PR !{pr_id} tags: {', '.join(sorted(names)) or '(none)'}")
+    return 0
 
 
 # Every comment posted via `dev pr comments` is stamped with this marker so it is
@@ -2944,6 +3098,138 @@ def _post_pr_comment(org, project, repo, pr_id, args, message):
     return 0
 
 
+PR_RESOLVED_THREAD_STATUSES = {'fixed', 'wontFix', 'closed', 'byDesign'}
+PR_COMMENT_HISTORY_LIMIT = 1000
+
+
+def _visible_pr_comment_threads(threads, active_only=False):
+    for thread in threads:
+        if thread.get('isDeleted') or 'CodeReviewThreadType' in (thread.get('properties') or {}):
+            continue
+        if active_only and thread.get('status') in PR_RESOLVED_THREAD_STATUSES:
+            continue
+        comments = [comment for comment in (thread.get('comments') or [])
+                    if not comment.get('isDeleted')]
+        if comments:
+            yield thread, comments
+
+
+def _pr_comment_hash(thread, comment):
+    payload = {
+        'thread': {key: value for key, value in thread.items() if key != 'comments'},
+        'comment': comment,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+
+def _pr_comment_hash_rows(threads):
+    hashes = []
+    for thread, comments in _visible_pr_comment_threads(threads, active_only=True):
+        if thread.get('id') is None or any(comment.get('id') is None for comment in comments):
+            raise ValueError("Cannot hash PR comments without thread and comment IDs")
+        hashes.extend((thread['id'], comment['id'], _pr_comment_hash(thread, comment))
+                      for comment in comments)
+    return sorted(hashes)
+
+
+def _pr_comment_history_path(ctx):
+    identity = json.dumps([*ctx[:3], ctx[4]], separators=(',', ':'))
+    key = hashlib.sha256(identity.encode('utf-8')).hexdigest()
+    return DEV_TEMP_DIR / 'pr-comment-history' / f'{key}.json'
+
+
+@contextmanager
+def _lock_pr_comment_history(path):
+    with path.with_suffix('.lock').open('a+b') as stream:
+        if sys.platform == 'win32':
+            try:
+                import msvcrt
+            except ImportError as error:
+                raise OSError("Windows file locking is unavailable") from error
+            if stream.tell() == 0:
+                stream.write(b'\0')
+                stream.flush()
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            try:
+                import fcntl
+            except ImportError as error:
+                raise OSError("POSIX file locking is unavailable") from error
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if sys.platform == 'win32':
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def _read_pr_comment_history(path):
+    if not path.exists():
+        return []
+    snapshots = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(snapshots, list) or any(
+            not isinstance(snapshot, dict)
+            or not isinstance(snapshot.get('timestamp'), str)
+            or not isinstance(snapshot.get('commit'), str)
+            or not isinstance(snapshot.get('hashes'), dict)
+            for snapshot in snapshots):
+        raise ValueError(f"Invalid comment history: {path.name}")
+    return snapshots
+
+
+def _record_pr_comment_snapshot(ctx, args, hashes):
+    import tempfile
+
+    org, project, repo, _, pr_id, _, _ = ctx
+    pr = getattr(args, 'resolved_pr', None) or _fetch_pr(org, project, repo, pr_id)
+    commit = ((pr or {}).get('lastMergeSourceCommit') or {}).get('commitId')
+    if not commit:
+        raise ValueError("Failed to read the PR source commit for comment history")
+    timestamp = datetime.now(timezone.utc)
+    snapshot = {
+        'timestamp': timestamp.isoformat(),
+        'commit': commit,
+        'sessionId': os.environ.get('COPILOT_AGENT_SESSION_ID') or None,
+        'hashes': {f'{thread_id}/{comment_id}': digest for thread_id, comment_id, digest in hashes},
+    }
+    path = _pr_comment_history_path(ctx)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _lock_pr_comment_history(path):
+        snapshots = [*_read_pr_comment_history(path), snapshot][-PR_COMMENT_HISTORY_LIMIT:]
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                    mode='w', encoding='utf-8', dir=path.parent, delete=False, suffix='.tmp') as stream:
+                temporary = Path(stream.name)
+                json.dump(snapshots, stream, sort_keys=True)
+            temporary.replace(path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+
+def _show_pr_comment_history(ctx, last):
+    path = _pr_comment_history_path(ctx)
+    snapshots = []
+    if path.parent.exists():
+        with _lock_pr_comment_history(path):
+            snapshots = list(reversed(_read_pr_comment_history(path)[-last:]))
+    if not snapshots:
+        print(f"No saved comment reads for PR !{ctx[4]}.")
+    for snapshot in snapshots:
+        print(f"{snapshot['timestamp']} commit {snapshot['commit']}"
+              f" session {snapshot.get('sessionId') or '-'}")
+        for key, digest in sorted(snapshot['hashes'].items()):
+            print(f"  {key} {digest}")
+        if not snapshot['hashes']:
+            print("  (no unresolved comments)")
+
+
 def cmd_pr_comments(args):
     """List or post comment threads on the PR.
 
@@ -2955,6 +3241,13 @@ def cmd_pr_comments(args):
     shown. Prints PR id, thread id, and comment ids so replies can be issued
     without further lookups.
 
+    ``--hash`` prints only ``threadId/commentId sha256`` for live comments in
+    unresolved threads. Hashes cover canonical comment JSON and parent thread
+    metadata, so edits and context changes can be detected without reading bodies.
+    Successful reads save up to 1,000 local snapshots with UTC time, PR source
+    commit, and the inherited agent session ID. ``--history --last 10`` shows
+    recent snapshots without fetching comments or recording another entry.
+
     With a message, posts a comment. Every posted comment is stamped with the
     ``Code-review-bot:`` prefix. Use ``--reply <threadId>`` to reply to an
     existing thread (``--parent`` selects the in-thread parent comment, default
@@ -2965,6 +3258,21 @@ def cmd_pr_comments(args):
     ``--reply`` it resolves the replied-to thread (a message is optional), and
     without ``--reply`` it resolves the newly created thread.
     """
+    hash_only = getattr(args, 'hash', False)
+    history = getattr(args, 'history', False)
+    last = getattr(args, 'last', None)
+    message = '\n'.join(getattr(args, 'message', None) or []).strip()
+    posting = (message or any(getattr(args, flag, None) for flag in ('reply', 'resolve', 'file', 'line'))
+               or getattr(args, 'parent', 1) != 1)
+    if (hash_only or history) and posting:
+        emit_error("--hash and --history cannot be combined with comment posting options")
+        return 1
+    if history and (hash_only or getattr(args, 'active', False)):
+        emit_error("--history cannot be combined with other read modes")
+        return 1
+    if last is not None and (not history or last < 1):
+        emit_error("--last requires --history and a positive count")
+        return 1
     ctx = _resolve_pr_context(args)
     if not ctx:
         return 1
@@ -2974,7 +3282,14 @@ def cmd_pr_comments(args):
         emit_error("No active PR found for this branch")
         return 1
 
-    message = '\n'.join(getattr(args, 'message', None) or []).strip()
+    if history:
+        try:
+            _show_pr_comment_history(ctx, 10 if last is None else last)
+        except (OSError, ValueError) as error:
+            emit_error(f"Cannot read comment history: {error}")
+            return 1
+        return 0
+
     if message or getattr(args, 'resolve', False):
         return _post_pr_comment(org, project, repo, pr_id, args, message)
 
@@ -2983,31 +3298,24 @@ def cmd_pr_comments(args):
         emit_error(f"Failed to fetch threads for PR !{pr_id}")
         return 1
 
+    try:
+        hashes = _pr_comment_hash_rows(threads)
+        _record_pr_comment_snapshot(ctx, args, hashes)
+    except (OSError, ValueError) as error:
+        emit_error(f"Cannot save comment snapshot: {error}")
+        return 1
+    if hash_only:
+        for thread_id, comment_id, digest in hashes:
+            print(f"{thread_id}/{comment_id} {digest}")
+        return 0
+
     print(f"{Colors.BLUE}PR !{pr_id}{Colors.NC} {Colors.GREY}({org}/{project}/{repo}){Colors.NC}")
     print()
 
-    resolved_statuses = {'fixed', 'wontFix', 'closed', 'byDesign'}
     active_only = getattr(args, 'active', False)
     printed = 0
-    for thread in threads:
-        if thread.get('isDeleted'):
-            continue
-        comments = thread.get('comments') or []
-        if not comments:
-            continue
-        # Skip ADO system-activity threads (ref-update pushes, votes, policy/
-        # status changes, "published the pull request" notices). ADO stamps a
-        # CodeReviewThreadType property on every auto-generated thread; real
-        # human and bot review comments (e.g. PR Assistant, Ownership Enforcer)
-        # never carry it, so bot comments are still shown even when their
-        # individual commentType is 'system'.
-        if 'CodeReviewThreadType' in (thread.get('properties') or {}):
-            continue
-
+    for thread, comments in _visible_pr_comment_threads(threads, active_only):
         status = thread.get('status') or 'open'
-        # With --active, list only unresolved threads.
-        if active_only and status in resolved_statuses:
-            continue
 
         tc = thread.get('threadContext') or {}
         file_path = tc.get('filePath')
@@ -3019,7 +3327,7 @@ def cmd_pr_comments(args):
             loc = '(PR-level)'
 
         thread_id = thread.get('id')
-        status_label = f"{status}, resolved" if status in resolved_statuses else status
+        status_label = f"{status}, resolved" if status in PR_RESOLVED_THREAD_STATUSES else status
         print(f"{Colors.CYAN}[>]{Colors.NC} {loc}  "
               f"{Colors.GREY}thread {thread_id} ({status_label}){Colors.NC}")
         for comment in comments:
@@ -3064,6 +3372,8 @@ def main():
             '  dev pr create -t "Title"      Open a draft PR from the current branch\n'
             '  dev pr diff --id 12345        Show a PR diff by id\n'
             '  dev pr comments --active      List only unresolved PR threads\n'
+            '  dev pr policy --id 12345       Print pending or failed policy run links\n'
+            '  dev pr tag --id 12345          List PR tags\n'
             '  dev ado token                 Print a cached Azure DevOps access token\n'
             '\n'
             'Run `dev <command> -h` for command-specific help.'
@@ -3170,6 +3480,23 @@ def main():
                                help='Mark the thread as fixed: the --reply thread, or the newly created one')
     pr_comments_p.add_argument('--active', action='store_true',
                                help='When listing, show only active (unresolved) threads')
+    pr_comments_p.add_argument('--hash', action='store_true',
+                               help='Print thread/comment IDs and JSON hashes for unresolved comments (read-only)')
+    pr_comments_p.add_argument('--history', action='store_true',
+                               help='Show saved comment-read snapshots, newest first (default: last 10)')
+    pr_comments_p.add_argument('--last', type=int, metavar='N', help='Number of snapshots to show with --history')
+
+    pr_policy_p = pr_sub.add_parser('policy', help='Print links to pending or failed PR policy runs (read-only)')
+    pr_tag_p = pr_sub.add_parser('tag', help='List, add, or remove PR tags')
+    for command_parser in (pr_policy_p, pr_tag_p):
+        command_parser.add_argument('--repo', '-r', help='Path to git repository (default: current directory)')
+        command_parser.add_argument('--branch', '-b', help='Source branch (default: current branch)')
+        command_parser.add_argument('--id', type=int, help='PR ID (alternative to --repo/--branch)')
+    pr_tag_p.add_argument('--json', action='store_true', help='Output tag names as a JSON array')
+    pr_tag_p.add_argument('--add', metavar='NAME', help='Add this tag without replacing other tags')
+    pr_tag_p.add_argument('--remove', metavar='NAME', help='Remove only this tag')
+    pr_tag_p.add_argument('--expect', metavar='NAME',
+                          help='Fail without writing if this tag is missing (not an atomic lock)')
 
     # Config subcommand
     config_parser = subparsers.add_parser('config', help='Read values from the dev_config.json file')
@@ -3256,6 +3583,8 @@ def main():
             'desc': cmd_pr_desc,
             'diff': cmd_pr_diff,
             'comments': cmd_pr_comments,
+            'policy': cmd_pr_policy,
+            'tag': cmd_pr_tag,
         }
         if args.pr_command in cmd_map:
             return cmd_map[args.pr_command](args)

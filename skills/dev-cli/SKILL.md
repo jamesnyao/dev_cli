@@ -112,7 +112,7 @@ Repository updates are non-destructive:
 ## PR workflows and validation
 
 The `dev pr` commands target Azure DevOps. Inspect `dev pr -h` and the relevant
-subcommand help before using `create`, `desc`, `diff`, or `comments`. Confirm the
+subcommand help before using `create`, `desc`, `diff`, `comments`, `policy`, or `tag`. Confirm the
 repository and branch. Read diffs before describing changes; do not publish,
 push, post comments, or create a PR without the user's authorization.
 
@@ -121,6 +121,39 @@ branch. `dev pr create` opens a draft unless `--draft false` is passed, and
 `dev pr comments --reply <threadId> --resolve "<msg>"` replies and resolves in
 one call. Without `--reply`, `--resolve "<msg>"` resolves the newly created
 thread.
+
+`dev pr comments --hash` prints only sorted `threadId/commentId sha256` rows for
+unresolved, non-deleted comments. Hashes cover canonical comment JSON plus thread
+metadata; compare the full map for new, edited, removed, or reopened feedback.
+Read changed bodies with `--active`; resolved comments need no inspection.
+Recheck hashes after reading before saving the reviewed map. Every scan is fresh;
+never replace a saved map on failure or treat unchanged feedback as resolved.
+Hash mode is read-only and cannot be combined with posting options.
+
+`dev pr comments --history --last 10` shows recent successful read snapshots:
+UTC timestamp, PR source commit, hashes, and the automatically inherited
+`COPILOT_AGENT_SESSION_ID` (empty outside an agent). The default is 10, newest first;
+local history is bounded to 1,000 entries per PR. Normal, `--active`, and `--hash`
+reads record snapshots, but posting, failed reads, and history lookups do not.
+No bodies, session flags, or WIP flags are stored/required. Recover observations
+from history on resume, but still read unfamiliar live feedback.
+
+`dev pr policy` prints only deduplicated run links for pending/failed PR policy
+evaluations with build IDs. It does not fetch build details or queue anything.
+Successful and unrun checks have no output; an empty list is not a completion gate.
+Use `az repos pr show` and `az repos pr policy list` for merge and policy state.
+`pr.policyExclude` in the private configuration supplies case-insensitive
+name patterns; the public default excludes nothing.
+
+Draft checks may need explicit queueing. With the user's authorization, use
+`az repos pr policy queue --id <PR_ID> --evaluation-id <ID> --org <ORG_URL>`,
+then verify the evaluation's resulting build and PR merge revision. Do not
+substitute an unrelated branch build, activate the PR, or modify policies.
+
+`dev pr tag --json` lists tag names. `--add <NAME>` and `--remove <NAME>` change
+only those names and verify the result. `--expect <NAME>` fails if that tag is
+missing, but is not an atomic lock. Re-read tags before each dependent mutation;
+an API error must stop work rather than bypass a tag-based stop signal.
 
 `dev ado git <args>` runs Git with a short-lived Azure CLI bearer token, and
 `dev ado token` prints a cached one; neither needs a PAT. `dev ado set-pat`,

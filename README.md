@@ -187,6 +187,73 @@ Sync can commit and push changes in the bootstrap repository. Commit and push
 tool submodule changes separately; dirty or unpublished submodules stop sync.
 Run `dev <command> -h` for options.
 
+## Pull requests
+
+`dev pr` targets Azure DevOps. Commands accept `--id <PR_ID>`, or infer the
+PR from the current repository and branch (`--repo` and `--branch` override these).
+
+```text
+dev pr comments --id 12345 --hash
+dev pr comments --id 12345 --history --last 10
+dev pr policy --id 12345
+dev pr tag --id 12345 --json
+dev pr tag --id 12345 --add working
+dev pr tag --id 12345 --expect working --add reviewed --remove working
+```
+
+`comments --hash` prints only `threadId/commentId sha256` rows for live comments
+in unresolved threads, sorted by those IDs. Each hash covers canonical JSON for
+the full comment plus parent thread metadata (excluding its comments array).
+JSON key order does not affect it; edits, status changes, and moved anchors do.
+Resolved/deleted comments and system-activity threads are omitted. Every call
+fetches fresh state and rejects posting options. Empty output means no matching
+comments; read failures return nonzero.
+
+Compare the whole ID-to-hash map to detect additions, changes, and removals.
+Use `comments --active` to read changed content and scan hashes again before
+accepting the reviewed snapshot. Do not permanently ignore resolved IDs: a
+reopened thread reappears. Never replace a saved map after an unsuccessful scan.
+
+`comments --history` shows the latest 10 successful comment reads, newest first;
+`--last <N>` changes the count. Each entry contains UTC time, the ADO-reported PR
+source commit, unresolved-comment hashes, and the automatic
+`COPILOT_AGENT_SESSION_ID` when available (otherwise empty). No comment bodies
+are stored, and there are no session or WIP flags.
+All successful read modes record snapshots; posting, failures, and history
+lookups do not. Each PR's local history file under the configuration directory's
+`.dev_temp/pr-comment-history` retains at most 1,000 entries. Appends are locked
+and atomically published. History uses normal PR resolution, but does not fetch
+comments again. Historical observations are not proof that feedback was handled.
+
+`policy` prints one Azure Pipelines run URL per line for queued, running, rejected,
+or broken PR policy evaluations with an associated build ID. Links are deduplicated.
+Successful, non-applicable, disabled, deleted, and unrun checks are omitted.
+No matching runs means no output; read failures report an error and return nonzero.
+An empty listing is not proof that the PR can merge or its draft checks ran.
+There are no extra output modes, build-detail requests, or writes.
+
+Set `pr.policyExclude` in your private `dev_config.json` to omit checks by name.
+Patterns match case-insensitively against names in the evaluation: its display
+name, status-check name (with or without its genre), or policy type name.
+Exact names match only that name; `*` and `?` explicitly enable wildcards.
+The default is an empty list.
+
+Draft PR build validations may require manual queueing. After confirming the
+pipeline, PR revision, and parameters, use the existing
+`az repos pr policy queue --id <PR_ID> --evaluation-id <ID> --org <ORG_URL>`.
+Inspect the resulting evaluation and build to verify the correct PR merge
+revision was validated; an unrelated branch build is not policy evidence.
+Listing policies never queues, retries, activates a PR, or changes policy settings.
+
+`tag` lists names, adds one named tag, removes one named tag, or does both.
+Unrelated tags are preserved, repeated adds/removals are idempotent, and changes
+are read back for verification. `--json` returns an array of names.
+`--expect <NAME>` requires that tag before writing and stops on unexpected tag
+changes before removal or during final verification.
+It is a cooperative precondition, not an atomic lock: consumers must re-read
+tags before each subsequent action. Failed reads and unmet preconditions return
+a nonzero exit code; they must never be interpreted as permission to continue.
+
 ## Develop
 
 Install pylint with `python -m pip install pylint`, then run `dev test`.

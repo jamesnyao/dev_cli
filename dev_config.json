@@ -16,6 +16,11 @@
     "provider": "ghcopilot",
     "skills": true
   },
+  "pr": {
+    // Case-insensitive name patterns omitted by `dev pr policy`.
+    // Use exact names, or explicit * and ? wildcards. Empty means no exclusions.
+    "policyExclude": []
+  },
   "repos": [
     {
       "path": "dev_cli",
