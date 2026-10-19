@@ -21,7 +21,9 @@ import runtime
 
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
-        self.scratch = tempfile.TemporaryDirectory(dir=Path(__file__).parent)
+        fixtures = Path(__file__).parent / '.dev_temp' / 'runtime-tests'
+        fixtures.mkdir(parents=True, exist_ok=True)
+        self.scratch = tempfile.TemporaryDirectory(dir=fixtures)
         self.addCleanup(self.scratch.cleanup)
         self.home = Path(self.scratch.name) / 'home with spaces \u00e9!'
         self.root = self.home / '.dev_temp' / 'dev_cli'
@@ -295,7 +297,9 @@ class RuntimeTests(unittest.TestCase):
 
 class LauncherTests(unittest.TestCase):
     def setUp(self):
-        self.scratch = tempfile.TemporaryDirectory(dir=Path(__file__).parent)
+        fixtures = Path(__file__).parent / '.dev_temp' / 'launcher-tests'
+        fixtures.mkdir(parents=True, exist_ok=True)
+        self.scratch = tempfile.TemporaryDirectory(dir=fixtures)
         self.addCleanup(self.scratch.cleanup)
         self.directory = Path(self.scratch.name) / 'launchers with spaces \u00e9!'
         self.directory.mkdir()

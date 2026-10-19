@@ -13,7 +13,9 @@ import terminal
 
 class TestWindowsTerminal(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='.test-terminal-', dir=Path(__file__).parent)
+        fixtures = Path(__file__).parent / '.dev_temp' / 'terminal-tests'
+        fixtures.mkdir(parents=True, exist_ok=True)
+        self.temp = tempfile.TemporaryDirectory(dir=fixtures)
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.local = self.root / 'local'

@@ -136,11 +136,12 @@ the wrapper does not configure authentication.
 
 Chat always starts in the configured `workspaceRoots[DEVCONFIG]` directory with
 **full permissions** by default (`copilot --allow-all`, equivalent to YOLO
-mode), in **autopilot** mode (`--mode autopilot`), so Copilot keeps working
-until the task is done. Pass `--mode interactive`, `--mode plan`, `--plan`, or
+mode), in **interactive** mode (`--mode interactive`), including when continuing
+a session with `ai -c`. Pass `--mode autopilot`, `--mode plan`, `--plan`, or
 `--autopilot` yourself to choose the mode instead. The workspace root is also
 passed through `--add-dir`, granting access to everything beneath it and loading
-its `.github` skills and agents as trusted configuration. All arguments and input
+its `.github` skills and agents as trusted configuration. A leading `-c` (after
+any model tier) is shorthand for `--continue`; all other arguments and input
 are forwarded, and the provider's exit status is preserved.
 
 ```text
@@ -187,5 +188,9 @@ This discovers all `test_*.py` suites and lints the production Python modules,
 including Windows Terminal integration. The tests cover onboarding, launchers,
 and sync using local Git repositories. Run them natively on Windows and Unix
 after changing shell behavior.
+
+Tests that need repository-local temporary files use ignored `.dev_temp/`
+subdirectories and clean up on completion, so an interrupted run does not add
+untracked fixture directories to the repository root.
 
 [MIT license](LICENSE).

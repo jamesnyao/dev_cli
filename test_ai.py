@@ -20,7 +20,9 @@ ROOT = Path(__file__).resolve().parent
 
 class TestAI(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='.test-ai-', dir=ROOT)
+        fixtures = ROOT / '.dev_temp' / 'ai-tests'
+        fixtures.mkdir(parents=True, exist_ok=True)
+        self.temp = tempfile.TemporaryDirectory(dir=fixtures)
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name)
         self.dev = SimpleNamespace(
@@ -31,6 +33,7 @@ class TestAI(unittest.TestCase):
             'LOCALAPPDATA': str(self.home / 'local'),
             'ProgramFiles': str(self.home / 'programs'),
         }))
+        self.enterContext(patch.object(ai.platform, 'system', return_value=ai.platform.system()))
         self.run = self.enterContext(patch.object(
             ai.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'Copilot 1.0', '')))
         self.which = self.enterContext(patch.object(ai.shutil, 'which', return_value=None))
@@ -314,7 +317,7 @@ class TestAI(unittest.TestCase):
         self.assertEqual(self.setup_existing(), 0)
         self.assertEqual(settings.read_text(), '{"user_setting": "keep"}')
 
-    def test_chat_defaults_to_copilot_with_yolo_from_workspace_root(self):
+    def test_chat_defaults_to_interactive_copilot_with_yolo_from_workspace_root(self):
         arguments = ['--resume', '-p', 'space and "quotes"', '', '--', '*']
         workspace = self.home / 'workspace root'
         workspace.mkdir()
@@ -325,7 +328,7 @@ class TestAI(unittest.TestCase):
                 self.run.reset_mock()
                 self.assertEqual(ai.run_chat(config, arguments, workspace, self.dev), 23)
                 self.run.assert_called_once_with(
-                    ['native-copilot', '--allow-all', '--mode', 'autopilot', '--add-dir', str(workspace), *arguments],
+                    ['native-copilot', '--allow-all', '--mode', 'interactive', '--add-dir', str(workspace), *arguments],
                     cwd=workspace, check=False)
         self.download.assert_not_called()
 
@@ -337,6 +340,11 @@ class TestAI(unittest.TestCase):
                 ({}, ['auto', '-p', 'x'], ['--model', 'auto'], ['-p', 'x']),
                 ({}, ['high'], [], ['high']),
                 (tiered, [], ['--model', 'strong-model'], []),
+                (tiered, ['-c'], ['--model', 'strong-model'], ['--continue']),
+                (tiered, ['high', '-c'], ['--model', 'strong-model'], ['--continue']),
+                (tiered, ['-c', '--model', 'other'], [], ['--continue', '--model', 'other']),
+                (tiered, ['-p', '-c'], ['--model', 'strong-model'], ['-p', '-c']),
+                (tiered, ['--', '-c'], ['--model', 'strong-model'], ['--', '-c']),
                 (tiered, ['auto', '--resume'], ['--model', 'auto'], ['--resume']),
                 (tiered, ['high'], ['--model', 'strong-model'], []),
                 (tiered, ['--model', 'other'], [], ['--model', 'other']),
@@ -346,7 +354,7 @@ class TestAI(unittest.TestCase):
                 self.run.reset_mock()
                 self.assertEqual(ai.run_chat({'ai': options}, arguments, self.home, self.dev), 0)
                 self.run.assert_called_once_with(
-                    ['native-copilot', '--allow-all', '--mode', 'autopilot', *model,
+                    ['native-copilot', '--allow-all', '--mode', 'interactive', *model,
                      '--add-dir', str(self.home), *rest],
                     cwd=self.home, check=False)
 
@@ -359,7 +367,9 @@ class TestAI(unittest.TestCase):
     def test_chat_keeps_an_explicit_mode(self):
         self.which.return_value = 'native-copilot'
         self.run.return_value.returncode = 0
-        for arguments in (['--mode', 'plan'], ['--mode=interactive'], ['--autopilot'], ['--plan']):
+        for arguments in (
+                ['--mode', 'plan'], ['--mode=interactive'], ['--mode=autopilot'],
+                ['--autopilot'], ['--plan']):
             with self.subTest(arguments=arguments):
                 self.run.reset_mock()
                 self.assertEqual(ai.run_chat({}, arguments, self.home, self.dev), 0)
@@ -375,7 +385,7 @@ class TestAI(unittest.TestCase):
         install.assert_called_once_with()
         self.assertTrue((self.link / 'dev-cli' / 'SKILL.md').is_file())
         self.run.assert_called_once_with(
-            ['installed-copilot', '--allow-all', '--mode', 'autopilot', '--add-dir', str(self.home)],
+            ['installed-copilot', '--allow-all', '--mode', 'interactive', '--add-dir', str(self.home)],
             cwd=self.home, check=False)
 
     def test_chat_does_not_launch_after_failed_bootstrap(self):

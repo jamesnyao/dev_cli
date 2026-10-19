@@ -277,11 +277,13 @@ def run_chat(config, arguments, workspace, dev):
         if not workspace.is_dir():
             raise ValueError(f"Workspace root does not exist or is not a directory: {workspace}")
         model, arguments = _model_arguments(config.get('ai', {}), list(arguments))
+        if arguments and arguments[0] == '-c':
+            arguments[0] = '--continue'
         command = _copilot_command()
         if not command:
             command = _setup_ghcopilot(_skills_enabled(config.get('ai', {})), dev)
         mode = [] if any(arg in MODE_FLAGS or arg.startswith('--mode=') for arg in arguments) \
-            else ['--mode', 'autopilot']
+            else ['--mode', 'interactive']
         return subprocess.run(
             [command, '--allow-all', *mode, *model, '--add-dir', str(workspace), *arguments],
             cwd=workspace, check=False).returncode
