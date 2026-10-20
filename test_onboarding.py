@@ -440,7 +440,7 @@ printf '%s\0' "${PS1@P}"
                         self.assertFalse((repo / 'branch-injected').exists())
 
     def test_git_bash_uses_windows_launchers_and_hook(self):
-        with tempfile.TemporaryDirectory() as temp:
+        with tempfile.TemporaryDirectory(prefix='dev git bash ') as temp:
             home = Path(temp)
             tool = home / 'dev_cli'
             (tool / 'shell').mkdir(parents=True)
@@ -461,21 +461,34 @@ printf '%s\0' "${PS1@P}"
                 'repo) printf "%s\\n" "$HOME";;\n'
                 'config) :;;\nesac\n')
             (tool / 'dev.cmd').chmod(0o755)
+            (tool / 'zoxide').write_text('#!/bin/sh\nprintf "%s\\n" "$ZOXIDE_TEST_INIT"\n')
+            (tool / 'zoxide').chmod(0o755)
             hooks = home / 'dev_env'
             hooks.mkdir()
             (hooks / 'env_windows.sh').write_text('export WINDOWS_HOOK_SEEN=yes\n')
             command = [
                 '/bin/bash', '--noprofile', '--norc', '-ic',
                 f'source "{tool / "shell" / "bash.sh"}" || exit $?; '
-                'printf "%s\\n" "$WINDOWS_HOOK_SEEN" "$(command -v python)"',
+                'printf "%s\\n" "$WINDOWS_HOOK_SEEN" "$(command -v python)" '
+                '"$__zoxide_oldpwd" "$(__zoxide_pwd)"',
             ]
-            result = subprocess.run(
-                command,
-                env=dict(os.environ, HOME=str(home), MANAGED_TEST_BIN=str(managed),
-                         DEVCONFIG='example-machine', PATH=f'{tools}:/usr/bin:/bin'),
-                text=True, capture_output=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.splitlines(), ['yes', str(managed / 'python')])
+            for flag in ('-L', '-P'):
+                for pwd_command in (
+                        rf'\command cygpath -w "\builtin pwd {flag}"',
+                        rf'\command cygpath -w "$(\builtin pwd {flag})"',
+                        rf'\builtin pwd {flag}'):
+                    with self.subTest(pwd_command=pwd_command):
+                        init = (f'__zoxide_pwd() {{\n{pwd_command}\n}}\n'
+                                '__zoxide_oldpwd="$(__zoxide_pwd)"\n')
+                        result = subprocess.run(
+                            command, cwd=home,
+                            env=dict(os.environ, HOME=str(home), MANAGED_TEST_BIN=str(managed),
+                                     DEVCONFIG='example-machine', PATH=f'{tools}:/usr/bin:/bin',
+                                     ZOXIDE_TEST_INIT=init),
+                            text=True, capture_output=True, timeout=30)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(result.stdout.splitlines(),
+                                         ['yes', str(managed / 'python'), str(home), str(home)])
 
     def test_bash_profile_caches_dev_answers_and_loads_once(self):
         with tempfile.TemporaryDirectory() as temp:

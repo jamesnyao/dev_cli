@@ -73,7 +73,12 @@ if [[ -z "$DEV_PROMPT_USER" ]]; then
 fi
 
 if command -v zoxide >/dev/null 2>&1; then
-    eval "$(zoxide init --cmd cd bash)"
+    _dev_zoxide_init="$(zoxide init --cmd cd bash)" || return
+    # zoxide 0.10.0 quotes pwd literally in its Windows Bash hook.
+    _dev_zoxide_init="${_dev_zoxide_init//'"\builtin pwd -L"'/'"$(\builtin pwd -L)"'}"
+    _dev_zoxide_init="${_dev_zoxide_init//'"\builtin pwd -P"'/'"$(\builtin pwd -P)"'}"
+    eval "$_dev_zoxide_init" || return
+    unset _dev_zoxide_init
 fi
 
 _dev_prompt()
