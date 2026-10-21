@@ -127,8 +127,10 @@ elsewhere), so Copilot loads every bundled skill and sees updates after
 `~/.agents/skills` directory or link is preserved with a warning. Unedited copies
 installed by earlier releases in `~/.copilot/skills` are removed; a personal
 skill with a bundled skill's name takes precedence and is reported. Keep private
-skills in `~/.copilot/skills`, or in an [AI profile](#ai-profiles) to load them
-only there.
+skills in the default [AI profile](#ai-profiles), `~/dev_ai/default/skills`, so
+they stay separate from profiles that should not load them. A bundled skill
+hides a same-named profile skill (`dev init` reports it), so keep the names
+distinct.
 
 ## AI chat
 
@@ -195,8 +197,15 @@ profile, as does any flag registered for it; without one, `ai` uses
 `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` to the profile folder, and `DEV_AI_PROFILE`
 to its name. Copilot reads only `.github/instructions/*.instructions.md` from
 that folder, not `AGENTS.md` or `copilot-instructions.md`; give each file
-`applyTo: '**'` frontmatter so it always applies. Skills and instructions in
-`~/.copilot` still load in every profile that uses the normal Copilot home.
+`applyTo: '**'` frontmatter so it always applies.
+
+`~/dev_ai/default` is the shared place for private skills and instructions. The
+shell profiles that `dev init` installs export its `skills/` and folder as
+`COPILOT_SKILLS_DIRS` and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` when it exists, so
+they also load when you run `copilot` directly; another profile replaces them
+with its own for that launch. Anything left in `~/.copilot/skills` or
+`~/.copilot/copilot-instructions.md` still loads in every session that uses the
+normal Copilot home, so move private files into a profile instead.
 
 ```text
 ai --add-env review --add-flag -r   # registers --review and -r, creates ~/dev_ai/review

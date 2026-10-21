@@ -195,20 +195,26 @@ class TestPowerShellProfile(unittest.TestCase):
                 '$env:HOOK_SEEN = "yes"\n', encoding='utf-8')
             env = dict(os.environ, USERPROFILE=str(home), MANAGED_TEST_BIN=str(managed),
                        OVERRIDE_TEST_BIN=str(override), DEVCONFIG='example-machine')
-            env.pop('HOOK_SEEN', None)
+            for name in ('HOOK_SEEN', 'COPILOT_SKILLS_DIRS', 'COPILOT_CUSTOM_INSTRUCTIONS_DIRS'):
+                env.pop(name, None)
+            default_profile = home / 'dev_ai' / 'default'
+            default_profile.mkdir(parents=True)
             quoted_home = str(home).replace("'", "''")
             command = [
                 POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
                 '-Command', f"$ErrorActionPreference='Stop'; Set-Variable HOME '{quoted_home}' -Force; "
                 '. "$HOME\\dev_cli\\shell\\profile.ps1"; '
-                '@($env:HOOK_SEEN, (Get-Command python).Source) | ConvertTo-Json -Compress']
+                '@($env:HOOK_SEEN, (Get-Command python).Source, $env:COPILOT_SKILLS_DIRS, '
+                '$env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS) | ConvertTo-Json -Compress']
             result = subprocess.run(command, env=env, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(json.loads(result.stdout), ['yes', str(override / 'python.cmd')])
+            self.assertEqual(json.loads(result.stdout), [
+                'yes', str(override / 'python.cmd'), str(default_profile / 'skills'), str(default_profile)])
             (hooks / 'env_windows.ps1').unlink()
+            default_profile.rmdir()
             result = subprocess.run(command, env=env, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(json.loads(result.stdout), [None, str(managed / 'python.cmd')])
+            self.assertEqual(json.loads(result.stdout), [None, str(managed / 'python.cmd'), None, None])
 
 
 @unittest.skipIf(os.name == 'nt', 'requires native Unix shells')
@@ -522,6 +528,36 @@ printf '%s\0' "${PS1@P}"
                                     text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(len(calls.read_text().splitlines()), 6)
+
+    def test_bash_loads_the_default_ai_profile_when_present(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            tool = home / 'dev_cli'
+            (tool / 'shell').mkdir(parents=True)
+            shutil.copy2(ROOT / 'shell' / 'bash.sh', tool / 'shell')
+            (tool / 'dev').write_text(
+                '#!/bin/sh\ncase "$1" in\n'
+                'python) printf "%s/dev_cli\\n" "$HOME";;\n'
+                'repo) printf "%s\\n" "$HOME";;\n'
+                'config) printf "user\\n";;\nesac\n')
+            (tool / 'dev').chmod(0o755)
+            env = dict(os.environ, HOME=str(home), DEVCONFIG='example-machine', PATH=f'{tool}:/usr/bin:/bin')
+            for name in ('COPILOT_SKILLS_DIRS', 'COPILOT_CUSTOM_INSTRUCTIONS_DIRS'):
+                env.pop(name, None)
+            report = 'printf "%s\\n" "${COPILOT_SKILLS_DIRS:-none}" "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-none}"'
+            command = ['/bin/bash', '--noprofile', '--norc', '-ic',
+                       f'source "{tool / "shell" / "bash.sh"}" || exit $?; {report}']
+            default = home / 'dev_ai' / 'default'
+            for present in (True, False):
+                if present:
+                    default.mkdir(parents=True)
+                else:
+                    default.rmdir()
+                expected = [str(default / 'skills'), str(default)] if present else ['none', 'none']
+                with self.subTest(present=present):
+                    result = subprocess.run(command, env=env, cwd=home, text=True, capture_output=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.splitlines()[-2:], expected)
 
     def test_legacy_hook_does_not_run_or_switch_shells(self):
         with tempfile.TemporaryDirectory() as temp:

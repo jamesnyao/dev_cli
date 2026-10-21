@@ -51,6 +51,12 @@ if [[ -z "$DEV_PROMPT_USER" ]]; then
   DEV_PROMPT_USER="$(dev config get identity.username)" || return
   export DEV_PROMPT_USER="${DEV_PROMPT_USER:-${USERNAME:-$USER}}"
 fi
+# Skills and instructions in the default AI profile load in every Copilot session;
+# `ai --profile <name>` replaces them for that launch.
+if [[ -d "$HOME/dev_ai/default" ]]; then
+  export COPILOT_SKILLS_DIRS="$HOME/dev_ai/default/skills"
+  export COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$HOME/dev_ai/default"
+fi
 
 # zoxide (replaces cd)
 if command -v zoxide &>/dev/null; then

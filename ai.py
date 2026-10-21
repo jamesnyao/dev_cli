@@ -194,6 +194,9 @@ def _link_skills(dev):
         shadow = personal / source.name
         if (source / 'SKILL.md').is_file() and (shadow.exists() or _is_link(shadow)):
             dev.emit_warn(f"Personal skill {shadow} takes precedence over the bundled {source.name} skill.")
+    for skill in sorted(profiles_root().glob('*/skills/*/SKILL.md')):
+        if (target / skill.parent.name / 'SKILL.md').is_file():
+            dev.emit_warn(f"Bundled {skill.parent.name} skill hides {skill.parent}; rename the profile skill.")
 
 
 def profiles_root():

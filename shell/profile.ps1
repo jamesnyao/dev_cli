@@ -81,6 +81,14 @@ if (-not $env:DEV_PROMPT_USER) {
   }
 }
 
+# Skills and instructions in the default AI profile load in every Copilot session;
+# `ai --profile <name>` replaces them for that launch.
+$DevAiDefault = Join-Path $HOME 'dev_ai\default'
+if (Test-Path -LiteralPath $DevAiDefault -PathType Container) {
+  $env:COPILOT_SKILLS_DIRS = Join-Path $DevAiDefault 'skills'
+  $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = $DevAiDefault
+}
+
 # Private, work-specific setup -- runs last so it can override anything above.
 $WorkEnv = "$HOME\dev_env\env_windows.ps1"
 if (Test-Path $WorkEnv) {

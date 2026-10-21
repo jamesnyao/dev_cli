@@ -45,14 +45,18 @@ settings without printing credentials or the entire configuration.
   without installing Copilot. Noninteractive runs use the configured default.
   `ai.skills` (default `true`) links `~/.agents/skills` to the bundled `skills/`
   directory so every bundled skill loads and tracks the checkout; `false` skips it.
-  Personal skills in `~/.copilot/skills` stay untouched and win on name clashes.
+  Keep private skill names distinct from bundled ones: a bundled skill hides a
+  same-named skill in an AI profile (dev init warns), while one in
+  `~/.copilot/skills` wins over the bundled skill.
 - Each `~/dev_ai/<name>` folder is an AI profile holding tracked configuration:
   `skills/`, `.github/instructions/*.instructions.md` (with `applyTo: '**'`;
   `AGENTS.md` there is not read), and an optional `plugins.json` of local
   folders or `{"repo", "path"}` Git sources passed as `--plugin-dir`.
+  `~/dev_ai/default` is the shared place for private skills and instructions:
+  the shell profiles export it for every Copilot session, and `ai` uses it.
   `ai --add-env <name> [--add-flag -x]` registers `--<name>` (and `-x`) and
-  creates the folder; `ai --profile <name>` or a registered flag launches it,
-  and `ai` uses `~/dev_ai/default` when present. Copilot state stays in
+  creates the folder; `ai --profile <name>` or a registered flag launches it
+  with only that profile's skills and instructions. Copilot state stays in
   `~/.copilot`. Optional `ai.profiles.<name>` also sets `command`,
   `addWorkspace`, `defaultModel`, and `env`.
   Authentication remains user-controlled: run `copilot`, then `/login` if needed.

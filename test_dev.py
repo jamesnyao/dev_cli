@@ -887,6 +887,22 @@ class TestShellWorkspace(unittest.TestCase):
         result = self.shell()
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_default_ai_profile_reaches_shell_when_present(self):
+        hooks = self.home / 'dev_env'
+        hooks.mkdir()
+        default = self.home / 'dev_ai' / 'default'
+        for name in ('COPILOT_SKILLS_DIRS', 'COPILOT_CUSTOM_INSTRUCTIONS_DIRS'):
+            self.env.pop(name, None)
+        for present, skills, instructions in ((False, '', ''), (True, default / 'skills', default)):
+            with self.subTest(present=present):
+                if present:
+                    default.mkdir(parents=True)
+                (hooks / 'env_mac.sh').write_text(
+                    f'[[ "${{COPILOT_SKILLS_DIRS:-}}" == "{skills}" ]] || return 1\n'
+                    f'[[ "${{COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-}}" == "{instructions}" ]] || return 1\n')
+                result = self.shell()
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_copy_config_and_initialize_profile(self):
         tool = self.home / 'dev_cli'
         blesh = self.home / '.local' / 'share' / 'blesh'

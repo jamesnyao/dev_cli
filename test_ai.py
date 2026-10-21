@@ -308,6 +308,16 @@ class TestAI(unittest.TestCase):
         self.assertTrue((self.personal / 'private').is_dir())
         self.assertIn('takes precedence', self.dev.emit_warn.call_args.args[0])
 
+    def test_profile_skill_hidden_by_a_bundled_skill_is_reported(self):
+        self.bundles('dev-cli')
+        for name in ('dev-cli', 'private'):
+            skill = self.home / 'dev_ai' / 'default' / 'skills' / name
+            skill.mkdir(parents=True)
+            (skill / 'SKILL.md').write_text(name, encoding='utf-8')
+        self.assertEqual(self.setup_existing(), 0)
+        self.assertEqual(self.dev.emit_warn.call_count, 1)
+        self.assertIn('Bundled dev-cli skill hides', self.dev.emit_warn.call_args.args[0])
+
     def test_link_failure_returns_error(self):
         with patch.object(ai, '_create_directory_link', side_effect=OSError('read-only fixture')):
             self.assertEqual(self.setup_existing(), 1)

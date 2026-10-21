@@ -71,6 +71,19 @@ if [[ -z "$DEV_PROMPT_USER" ]]; then
     DEV_PROMPT_USER="$(dev_cached config get identity.username)" || return
     export DEV_PROMPT_USER="${DEV_PROMPT_USER:-${USERNAME:-$USER}}"
 fi
+# Skills and instructions in the default AI profile load in every Copilot session;
+# `ai --profile <name>` replaces them for that launch.
+if [[ -d "$HOME/dev_ai/default" ]]; then
+    COPILOT_SKILLS_DIRS="$HOME/dev_ai/default/skills"
+    COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$HOME/dev_ai/default"
+    case "$platform" in
+        mingw*|msys*|cygwin*)
+            COPILOT_SKILLS_DIRS="$(cygpath -w "$COPILOT_SKILLS_DIRS")" || return
+            COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$(cygpath -w "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS")" || return
+            ;;
+    esac
+    export COPILOT_SKILLS_DIRS COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+fi
 
 if command -v zoxide >/dev/null 2>&1; then
     _dev_zoxide_init="$(zoxide init --cmd cd bash)" || return
