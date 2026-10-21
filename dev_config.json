@@ -12,6 +12,11 @@
   // `ai <tier>` runs that tier's model; "auto" is built in. Add tiers under
   // "models" (e.g. {"high": "<model-id>"}) and pick one with "defaultModel".
   // "continueModel" optionally picks a different tier for `ai -c`.
+  // Each ~/dev_ai/<name> folder is an AI profile (skills/, .github/instructions/,
+  // plugins.json). `ai --add-env <name> --add-flag -x` registers --<name> and -x
+  // as launch flags and creates the folder.
+  // Optional "profiles": {"<name>": {"flags", "command", "addWorkspace",
+  // "defaultModel", "env"}} changes how a profile launches (see README).
   "ai": {
     "provider": "ghcopilot",
     "skills": true

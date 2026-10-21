@@ -4,6 +4,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 from types import SimpleNamespace
@@ -26,7 +27,7 @@ class TestAI(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name)
         self.dev = SimpleNamespace(
-            load_config=Mock(return_value={'ai': {'provider': 'none'}}),
+            load_config=Mock(return_value={'ai': {'provider': 'none'}}), get_base_path=Mock(return_value=self.home),
             emit_ok=Mock(), emit_info=Mock(), emit_warn=Mock(), emit_error=Mock())
         self.enterContext(patch.object(ai.Path, 'home', return_value=self.home))
         self.enterContext(patch.dict(os.environ, {
@@ -255,7 +256,8 @@ class TestAI(unittest.TestCase):
         (bundled / 'added' / 'SKILL.md').write_text('# added\n', encoding='utf-8')
         self.assertEqual(self.setup_existing(), 0)
         self.assertTrue((self.link / 'added' / 'SKILL.md').is_file())
-        self.assertIn('Bundled skills are linked', self.dev.emit_ok.call_args_list[-1].args[0])
+        self.assertTrue(any('Bundled skills are linked' in call.args[0]
+                            for call in self.dev.emit_ok.call_args_list))
         self.dev.emit_warn.assert_not_called()
         self.assertFalse(self.personal.exists())
 
@@ -442,6 +444,252 @@ class TestAI(unittest.TestCase):
         self.which.assert_not_called()
         self.run.assert_not_called()
         self.download.assert_not_called()
+
+    def profile(self, name, skills=(), plugins=None):
+        directory = self.home / 'dev_ai' / name
+        directory.mkdir(parents=True, exist_ok=True)
+        for skill in skills:
+            (directory / 'skills' / skill).mkdir(parents=True)
+            (directory / 'skills' / skill / 'SKILL.md').write_text(f'# {skill}\n', encoding='utf-8')
+        if plugins is not None:
+            (directory / 'plugins.json').write_text(json.dumps({'plugins': plugins}), encoding='utf-8')
+        return directory
+
+    def assert_profile_env(self, env, name):
+        directory = self.home / 'dev_ai' / name
+        self.assertEqual(env['DEV_AI_PROFILE'], name)
+        self.assertEqual(env['COPILOT_SKILLS_DIRS'], str(directory / 'skills'))
+        self.assertEqual(env['COPILOT_CUSTOM_INSTRUCTIONS_DIRS'], str(directory))
+        self.assertEqual(env.get('COPILOT_HOME'), os.environ.get('COPILOT_HOME'))
+
+    def flagged_config(self):
+        return {'ai': {'models': {'high': 'strong-model'}, 'profiles': {
+            'work': {'flags': ['-c', '--work'], 'addWorkspace': False, 'env': {'MODE': 'base'}},
+            'work-alt': {'flags': ['--work-alt'], 'addWorkspace': False, 'env': {'MODE': 'alt'}}}}}
+
+    def test_profile_flags_select_the_profile(self):
+        self.which.return_value = 'native-copilot'
+        for arguments, profile, mode, rest in (
+                (['-c'], 'work', 'base', []),
+                (['--work', 'high', '-p', 'x'], 'work', 'base', ['--model', 'strong-model', '-p', 'x']),
+                (['--work-alt', '-p', 'x'], 'work-alt', 'alt', ['-p', 'x']),
+                (['-c', '--work-alt'], 'work', 'base', ['--work-alt']),
+                (['-c', '--continue'], 'work', 'base', ['--continue'])):
+            with self.subTest(arguments=arguments):
+                self.run.reset_mock()
+                self.assertEqual(ai.run_chat(self.flagged_config(), arguments, self.home, self.dev), 0)
+                launched = self.run.call_args
+                self.assertEqual(launched.args[0], ['native-copilot', '--allow-all', '--mode', 'interactive', *rest])
+                self.assert_profile_env(launched.kwargs['env'], profile)
+                self.assertEqual(launched.kwargs['env']['MODE'], mode)
+        self.assertFalse((self.home / 'dev_ai').exists())
+
+    def test_continue_shorthand_without_profile_flags_is_unchanged(self):
+        self.which.return_value = 'native-copilot'
+        self.assertEqual(ai.run_chat(self.config, ['-c'], self.home, self.dev), 0)
+        self.assertEqual(self.run.call_args.args[0][-1], '--continue')
+
+    def test_chat_uses_the_default_profile_folder_when_present(self):
+        self.profile('default', skills=['mine'])
+        self.which.return_value = 'native-copilot'
+        self.assertEqual(ai.run_chat(self.config, [], self.home, self.dev), 0)
+        self.assertEqual(self.run.call_args.args[0],
+                         ['native-copilot', '--allow-all', '--mode', 'interactive', '--add-dir', str(self.home)])
+        self.assert_profile_env(self.run.call_args.kwargs['env'], 'default')
+
+    def test_chat_profile_from_folder_without_configuration(self):
+        self.profile('scratch')
+        self.which.return_value = 'native-copilot'
+        for arguments in (['--profile', 'scratch'], ['--profile=scratch']):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(ai.run_chat(self.config, arguments, self.home, self.dev), 0)
+                self.assert_profile_env(self.run.call_args.kwargs['env'], 'scratch')
+
+    def test_chat_launches_a_configured_profile_with_its_command_env_and_model(self):
+        workspace = self.home / 'workspace'
+        workspace.mkdir()
+        config = {'ai': {'models': {'fast': 'fast-model', 'high': 'strong-model'}, 'defaultModel': 'fast',
+                         'profiles': {'conductor': {
+                             'command': '$DEV/launch.cmd', 'addWorkspace': False, 'defaultModel': 'high',
+                             'env': {'EXTRA': '$DEV/extra', 'DROPPED': None}}}}}
+        with patch.dict(os.environ, {'DROPPED': 'yes'}):
+            self.assertEqual(ai.run_chat(config, ['--profile', 'conductor', '-p', 'x'], workspace, self.dev), 0)
+        self.assertEqual(self.run.call_args.args[0], [
+            os.path.normpath(str(workspace / 'launch.cmd')), '--allow-all', '--mode', 'interactive',
+            '--model', 'strong-model', '-p', 'x'])
+        env = self.run.call_args.kwargs['env']
+        self.assert_profile_env(env, 'conductor')
+        self.assertEqual(env['EXTRA'], os.path.normpath(str(workspace / 'extra')))
+        self.assertNotIn('DROPPED', env)
+        self.which.assert_not_called()
+
+    def cache(self, *parts):
+        return self.home.joinpath('.dev_temp', 'dev_cli', 'plugins', *parts)
+
+    def fake_git(self, created=()):
+        """Make git clone create the checkout (and listed subfolders) instead of downloading."""
+        def run(command, **kwargs):
+            if command[:2] == ['git', 'clone']:
+                checkout = Path(command[-1])
+                (checkout / '.git').mkdir(parents=True)
+                for relative in created:
+                    (checkout / relative).mkdir(parents=True, exist_ok=True)
+            return subprocess.CompletedProcess(command, 0)
+        self.run.side_effect = run
+
+    def test_local_and_git_plugins_become_plugin_dirs(self):
+        local = self.home / 'local plugin'
+        local.mkdir()
+        self.profile('default', plugins=[str(local), {'repo': 'owner/repo', 'path': 'plugins/x'},
+                                         {'repo': 'https://example.com/a/b.git'}])
+        self.which.return_value = 'native-copilot'
+        self.fake_git(created=['plugins/x'])
+        self.assertEqual(ai.run_chat(self.config, ['-p', 'x'], self.home, self.dev), 0)
+        clones = [call.args[0] for call in self.run.call_args_list if call.args[0][:2] == ['git', 'clone']]
+        self.assertEqual(clones, [
+            ['git', 'clone', '--depth', '1', 'https://github.com/owner/repo.git', str(self.cache('github.com', 'owner', 'repo'))],
+            ['git', 'clone', '--depth', '1', 'https://example.com/a/b.git', str(self.cache('example.com', 'a', 'b'))]])
+        self.assertEqual(self.run.call_args.args[0], [
+            'native-copilot', '--allow-all', '--mode', 'interactive', '--add-dir', str(self.home),
+            '--plugin-dir', str(local),
+            '--plugin-dir', str(self.cache('github.com', 'owner', 'repo', 'plugins', 'x')),
+            '--plugin-dir', str(self.cache('example.com', 'a', 'b')), '-p', 'x'])
+        self.run.reset_mock()
+        self.assertEqual(ai.run_chat(self.config, [], self.home, self.dev), 0)
+        self.assertEqual(self.run.call_count, 1)
+
+    def test_update_plugins_refreshes_existing_checkouts_once_per_repository(self):
+        self.profile('default', plugins=[{'repo': 'owner/repo', 'path': 'a'}, {'repo': 'owner/repo', 'path': 'b'}])
+        self.profile('other', plugins=[])
+        (self.home / 'dev_ai' / 'not a profile').mkdir()
+        checkout = self.cache('github.com', 'owner', 'repo')
+        for relative in ('.git', 'a', 'b'):
+            (checkout / relative).mkdir(parents=True)
+        self.assertEqual(self.setup_existing(), 0)
+        git = [call.args[0] for call in self.run.call_args_list if call.args[0][0] == 'git']
+        self.assertEqual(git, [
+            ['git', '-C', str(checkout), 'fetch', '--depth', '1', 'origin', 'HEAD'],
+            ['git', '-C', str(checkout), 'reset', '--hard', '--quiet', 'FETCH_HEAD']])
+        self.assertIn('default plugin ready', self.dev.emit_ok.call_args.args[0])
+
+    def test_invalid_plugin_manifests_fail_before_launch(self):
+        self.which.return_value = 'native-copilot'
+        for manifest in ('[]', '{"plugins": {}}', '{"plugins": [1]}', '{"plugins": [""]}',
+                         '{"plugins": [{"repo": 1}]}', '{"plugins": [{"repo": "a/b", "extra": 1}]}',
+                         '{"plugins": [{"repo": "a/b", "path": "../x"}]}',
+                         '{"plugins": [{"repo": "a/b", "path": "/abs"}]}',
+                         '{"plugins": [{"repo": "a/b", "path": "C:/abs"}]}',
+                         '{"plugins": [{"repo": "https://host/../escape"}]}', '{"plugins": [{"repo": ""}]}',
+                         '{"plugins": ["missing plugin folder"]}', '{broken'):
+            with self.subTest(manifest=manifest):
+                directory = self.profile('default')
+                (directory / 'plugins.json').write_text(manifest, encoding='utf-8')
+                self.assertEqual(ai.run_chat(self.config, [], self.home, self.dev), 1)
+        self.run.assert_not_called()
+        self.assertFalse(self.cache().exists())
+
+    def test_plugin_clone_failure_does_not_launch(self):
+        self.profile('default', plugins=[{'repo': 'owner/repo'}])
+        self.which.return_value = 'native-copilot'
+        self.run.side_effect = subprocess.CalledProcessError(128, 'git clone')
+        self.assertEqual(ai.run_chat(self.config, [], self.home, self.dev), 1)
+        self.assertEqual(self.run.call_count, 1)
+        self.assertIn('AI chat failed', self.dev.emit_error.call_args.args[0])
+
+    def test_plugin_folder_missing_from_checkout_is_an_error(self):
+        self.profile('default', plugins=[{'repo': 'owner/repo', 'path': 'plugins/missing'}])
+        self.which.return_value = 'native-copilot'
+        self.fake_git()
+        self.assertEqual(ai.run_chat(self.config, [], self.home, self.dev), 1)
+        self.assertIn('Plugin folder does not exist', self.dev.emit_error.call_args.args[0])
+
+    def add(self, arguments, config=None, override=None):
+        override_file = self.home / 'dev_config.json'
+        if override is not None:
+            override_file.write_text(json.dumps(override), encoding='utf-8')
+        self.dev.OVERRIDE_CONFIG_FILE = override_file
+        self.dev.save_config = Mock(side_effect=lambda data: override_file.write_text(
+            json.dumps(data), encoding='utf-8'))
+        result = ai.run_chat(config or self.config, arguments, self.home, self.dev)
+        saved = json.loads(override_file.read_text()) if override_file.is_file() else None
+        return result, saved
+
+    def test_add_registers_long_and_extra_flags_and_creates_the_folder(self):
+        result, saved = self.add(['--add-env', 'conductor', '--add-flag', '-c', '--add-flag', '-k'],
+                                 override={'ai': {'defaultModel': 'auto'}, 'repos': []})
+        self.assertEqual(result, 0)
+        self.assertEqual(saved, {'ai': {'defaultModel': 'auto', 'profiles': {
+            'conductor': {'flags': ['--conductor', '-c', '-k']}}}, 'repos': []})
+        directory = self.home / 'dev_ai' / 'conductor'
+        self.assertTrue((directory / 'skills').is_dir())
+        self.assertTrue((directory / '.github' / 'instructions').is_dir())
+        self.assertIn('use --continue', self.dev.emit_warn.call_args.args[0])
+        self.assertIn(str(directory), self.dev.emit_ok.call_args.args[0])
+        self.assertIn('ai -c', self.dev.emit_ok.call_args.args[0])
+        self.run.assert_not_called()
+
+    def test_add_keeps_existing_profile_settings_and_is_idempotent(self):
+        existing = {'command': 'launch', 'flags': ['--conductor', '-c']}
+        config = {'ai': {'profiles': {'conductor': existing}}}
+        result, saved = self.add(['--add-env', 'conductor', '--add-flag', '-c'], config=config,
+                                 override={'ai': {'profiles': {'conductor': existing, 'other': {}}}})
+        self.assertEqual(result, 0)
+        self.assertEqual(saved['ai']['profiles'], {'conductor': existing, 'other': {}})
+
+    def test_add_rejects_invalid_requests_without_writing(self):
+        config = {'ai': {'profiles': {'taken': {'flags': ['-t']}}}}
+        for arguments, message in ((['--add-env', 'default'], 'Invalid profile name'),
+                                   (['--add-env', 'bad/name'], 'Invalid profile name'),
+                                   (['--add-env', 'x', '--add-flag'], 'requires a flag'),
+                                   (['--add-env', 'x', '--add-flag', '-t'], 'both use -t'),
+                                   (['--add-env', 'x', '--add-flag', '-p'], 'already uses'),
+                                   (['--add-env', 'x', '--add-flag', 'bad'], 'flags must be'),
+                                   (['--add-env', 'x', 'y'], 'Unexpected argument'),
+                                   (['--add-env', 'model'], 'already uses')):
+            with self.subTest(arguments=arguments):
+                result, saved = self.add(arguments, config=config)
+                self.assertEqual(result, 1)
+                self.assertIn(message, self.dev.emit_error.call_args.args[0])
+                self.assertIsNone(saved)
+        self.assertFalse((self.home / 'dev_ai').exists())
+
+    def test_add_prompts_when_interactive_and_requires_a_name_otherwise(self):
+        with patch.object(ai.sys.stdin, 'isatty', return_value=True), \
+                patch('builtins.input', side_effect=['conductor', '-c']):
+            result, saved = self.add(['--add-env'])
+        self.assertEqual(result, 0)
+        self.assertEqual(saved['ai']['profiles']['conductor']['flags'], ['--conductor', '-c'])
+        (self.home / 'dev_config.json').unlink()
+        for isatty, side_effect in ((False, []), (True, EOFError())):
+            with self.subTest(isatty=isatty), patch.object(ai.sys.stdin, 'isatty', return_value=isatty), \
+                    patch('builtins.input', side_effect=side_effect):
+                result, saved = self.add(['--add-env'])
+                self.assertEqual(result, 1)
+                self.assertIn('Profile name required', self.dev.emit_error.call_args.args[0])
+    def test_chat_rejects_unknown_or_invalid_profiles(self):
+        self.which.return_value = 'native-copilot'
+        for arguments, message in ((['--profile', 'missing'], 'Unknown AI profile'),
+                                   (['--profile', '../escape'], 'Unknown AI profile'),
+                                   (['--profile='], 'Unknown AI profile'),
+                                   (['--profile'], 'requires a profile name')):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(ai.run_chat(self.config, arguments, self.home, self.dev), 1)
+                self.assertIn(message, self.dev.emit_error.call_args.args[0])
+        self.run.assert_not_called()
+        self.assertFalse((self.home / 'dev_ai').exists())
+
+    def test_invalid_profiles_are_explicit_errors(self):
+        for profiles in ([], {'bad name': {}}, {'p': []}, {'p': {'unknown': 1}}, {'p': {'command': 1}},
+                         {'p': {'addWorkspace': 'no'}}, {'p': {'defaultModel': 'missing'}},
+                         {'p': {'env': {'PATH': 'x'}}}, {'p': {'env': {'X': 1}}},
+                         {'p': {'flags': '-x'}}, {'p': {'flags': ['x']}}, {'p': {'flags': ['-xy']}},
+                         {'p': {'flags': ['--profile']}}, {'p': {'flags': ['-p']}},
+                         {'p': {'flags': ['-x']}, 'q': {'flags': ['-x']}}, {'p': {'options': {}}}):
+            with self.subTest(profiles=profiles):
+                self.dev.emit_error.reset_mock()
+                self.assertEqual(self.setup_ai({'ai': {'provider': 'none', 'profiles': profiles}}), 1)
+                self.dev.emit_error.assert_called_once()
+        self.run.assert_not_called()
 
 
 class TestChatCommand(unittest.TestCase):

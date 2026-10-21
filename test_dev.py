@@ -46,6 +46,18 @@ def _sanitize_environment():
 
 
 _sanitize_environment()
+_PROFILES = tempfile.TemporaryDirectory()
+_PROFILES_PATCH = patch.object(dev.ai, 'profiles_root', return_value=Path(_PROFILES.name))
+
+
+def setUpModule():
+    """Keep repo sync's plugin update away from the real ~/dev_ai."""
+    _PROFILES_PATCH.start()
+
+
+def tearDownModule():
+    _PROFILES_PATCH.stop()
+    _PROFILES.cleanup()
 
 
 class TestConfig(unittest.TestCase):

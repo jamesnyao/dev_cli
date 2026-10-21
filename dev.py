@@ -1423,6 +1423,12 @@ def cmd_repo_sync(args):
     if config_changed:
         save_config(config)
 
+    try:
+        ai.update_plugins(config, sys.modules[__name__])
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        emit_error(f"AI profile plugin update failed: {error}")
+        failed += 1
+
     print()
     synced_str = f"{Colors.GREEN}{synced}{Colors.NC}" if synced > 0 else str(synced)
     skipped_str = f"{Colors.CYAN}{skipped}{Colors.NC}" if skipped > 0 else str(skipped)

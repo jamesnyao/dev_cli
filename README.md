@@ -127,7 +127,8 @@ elsewhere), so Copilot loads every bundled skill and sees updates after
 `~/.agents/skills` directory or link is preserved with a warning. Unedited copies
 installed by earlier releases in `~/.copilot/skills` are removed; a personal
 skill with a bundled skill's name takes precedence and is reported. Keep private
-skills in `~/.copilot/skills`.
+skills in `~/.copilot/skills`, or in an [AI profile](#ai-profiles) to load them
+only there.
 
 ## AI chat
 
@@ -174,6 +175,90 @@ Use `copilot` directly when you want its normal permission prompts.
 `ai.provider: none` disables chat; Claude chat is not implemented yet and
 reports an error rather than falling back to Copilot.
 
+### AI profiles
+
+A profile is a folder of tracked configuration in `~/dev_ai/<name>`. Copilot
+keeps its sessions, caches, and sign-in in its normal home (`~/.copilot`), so
+the folder holds only files worth committing:
+
+```text
+~/dev_ai/<name>/
+├── skills/<skill>/SKILL.md                 # skills for this profile only
+├── .github/instructions/<topic>.instructions.md
+└── plugins.json                            # optional plugin list
+```
+
+`ai --profile <name>` (or `--profile=<name>`, before any model tier) launches a
+profile, as does any flag registered for it; without one, `ai` uses
+`~/dev_ai/default` when that folder exists. The launch sets
+`COPILOT_SKILLS_DIRS` to the profile's `skills/`,
+`COPILOT_CUSTOM_INSTRUCTIONS_DIRS` to the profile folder, and `DEV_AI_PROFILE`
+to its name. Copilot reads only `.github/instructions/*.instructions.md` from
+that folder, not `AGENTS.md` or `copilot-instructions.md`; give each file
+`applyTo: '**'` frontmatter so it always applies. Skills and instructions in
+`~/.copilot` still load in every profile that uses the normal Copilot home.
+
+```text
+ai --add-env review --add-flag -r   # registers --review and -r, creates ~/dev_ai/review
+ai -r high -p "Review this diff"
+```
+
+`ai --add-env NAME [--add-flag FLAG]...` registers `--NAME` plus each extra
+flag in `ai.profiles.NAME.flags` of your private `dev_config.json`, creates
+`~/dev_ai/NAME/skills` and `~/dev_ai/NAME/.github/instructions`, and prints the
+folder. Without a name it prompts for one and an optional extra flag. Rerunning
+it adds flags and keeps existing settings. Flags that `dev ai` or Copilot
+already use (such as `-p`, `--model`, or `--profile`) are rejected, and two
+profiles cannot share a flag. A profile flag named `-c` replaces the `-c`
+continue shorthand; use `--continue` instead.
+
+#### Plugins
+
+`plugins.json` lists the profile's plugins, each passed to Copilot as
+`--plugin-dir`. An entry is a local folder (`~`, `$HOME`, and `$DEV` expand) or
+a Git source with an optional folder inside it:
+
+```jsonc
+{
+  "plugins": [
+    "$DEV/my-plugins/review",
+    {"repo": "owner/repo", "path": "plugins/doublecheck"},   // GitHub shorthand
+    {"repo": "https://example.com/team/plugins.git"}
+  ]
+}
+```
+
+Git sources are shallow-cloned into the ignored
+`~/.dev_temp/dev_cli/plugins/<host>/<path>` when a launch first needs them, and
+updated to the remote's default branch by `dev init` and `dev repo sync`. Local
+changes in that cache are discarded on update. A missing folder, an invalid
+entry, or a failed clone stops the launch with an error. Copilot's own
+`copilot plugin install` state is not used by profiles.
+
+#### Launch options
+
+A folder alone is enough for a profile. Add `ai.profiles.<name>` to change how
+it launches:
+
+| Option | Meaning |
+|--------|---------|
+| `command` | Launcher to run instead of `copilot` (`~`, `$HOME`, and `$DEV` expand). It receives the same arguments and environment. |
+| `addWorkspace` | `false` omits `--add-dir <workspace>` (default `true`). |
+| `defaultModel` | Tier used instead of `ai.defaultModel`. |
+| `env` | Variables to set, or remove with `null`, like environments. Applied last, so it can point `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` at another profile's folder. |
+| `flags` | Leading flags that select the profile (managed by `ai --add-env`). |
+
+```jsonc
+"ai": {
+  "profiles": {
+    "review": {"flags": ["--review", "-r"], "defaultModel": "high", "addWorkspace": false},
+    "review-strict": {"flags": ["--review-strict"], "env": {"REVIEW_MODE": "strict"}}
+  }
+}
+```
+
+For a variant of a profile, add a separate profile with its own flag and
+settings.
 ## Sync
 
 ```text

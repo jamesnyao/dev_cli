@@ -28,7 +28,8 @@ dev_cli mounted as a submodule at `~/dev_cli`:
 ├── dev_config.json         # private configuration override
 ├── .dev_temp/              # ignored credentials and caches (never print or commit)
 ├── dev_env/                # private shell hooks
-├── .copilot/skills/        # private skills
+├── dev_ai/<profile>/       # AI profile: skills/, .github/instructions/, plugins.json
+├── .copilot/skills/        # private skills for every session
 ├── .agents/skills          # link to ~/dev_cli/skills (created by dev init, ignored)
 └── dev_cli/                # dev_cli submodule
     ├── dev.py, ai.py, ...  # the tool and its tests
@@ -54,11 +55,12 @@ Do not add dev_cli as a separate entry in `repos[]`.
 
 | Location | Contents |
 | --- | --- |
-| `~/.copilot/skills/` | Private skills; take precedence on name clashes |
+| `~/.copilot/skills/` | Private skills for every session; take precedence on name clashes |
+| `~/dev_ai/<profile>/skills/` | Private skills for that AI profile only (`ai --profile <profile>`) |
 | `~/.agents/skills/` | Link to `~/dev_cli/skills/`, the public bundled skills |
 
-Edit public skills in `~/dev_cli/skills/` and private ones in
-`~/.copilot/skills/`. Keep the names distinct; put private additions to a
+Edit public skills in `~/dev_cli/skills/` and private ones in the matching
+profile's `skills/`. Keep the names distinct; put private additions to a
 public skill in a separately named skill.
 
 ## Key paths

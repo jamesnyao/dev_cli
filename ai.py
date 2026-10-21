@@ -4,17 +4,31 @@ import hashlib
 import http.client
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import platform
+import re
 import shutil
 import subprocess
+import sys
 import urllib.request
+
+import environments
+from configuration import load_jsonc
 
 
 BUNDLED_SKILLS = Path(__file__).parent / 'skills'
 MODE_FLAGS = {'--mode', '--autopilot', '--plan'}
 MODEL_TIERS = {'auto': 'auto'}
-AI_OPTIONS = {'provider', 'skills', 'models', 'defaultModel', 'continueModel'}
+AI_OPTIONS = {'provider', 'skills', 'models', 'defaultModel', 'continueModel', 'profiles'}
+PROFILE_OPTIONS = {'command', 'addWorkspace', 'defaultModel', 'env', 'flags'}
+DEFAULT_PROFILE = 'default'
+PROFILE_NAME = re.compile(r'^[A-Za-z0-9_-]+$')
+GITHUB_SHORTHAND = re.compile(r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')
+FLAG = re.compile(r'^(-[A-Za-z0-9]|--[A-Za-z0-9][A-Za-z0-9_-]*)$')
+# Leading flags that dev ai or common Copilot usage already gives a meaning.
+RESERVED_FLAGS = {'--profile', '--add-env', '--add-flag', '--model', '--mode', '--plan', '--autopilot', '--continue',
+                  '--resume', '-p', '--prompt', '-i', '--interactive', '-h', '--help', '-v', '--version',
+                  '--allow-all', '--add-dir', '--agent'}
 CONTINUE_FLAGS = {'-c', '--continue'}
 COPILOT_INSTALL_URL = 'https://gh.io/copilot-install'
 COPILOT_DOCS = 'https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli'
@@ -182,6 +196,141 @@ def _link_skills(dev):
             dev.emit_warn(f"Personal skill {shadow} takes precedence over the bundled {source.name} skill.")
 
 
+def profiles_root():
+    """Directory holding one tracked configuration folder per AI profile."""
+    return Path.home() / 'dev_ai'
+
+
+def plugin_cache():
+    """Ignored directory holding git checkouts of profile plugins."""
+    return Path.home() / '.dev_temp' / 'dev_cli' / 'plugins'
+
+
+def _plugin_specs(directory, workspace):
+    """Validate a profile's plugins.json, returning (local path) or (url, checkout, subpath) entries."""
+    manifest = directory / 'plugins.json'
+    if not manifest.is_file():
+        return []
+    data = load_jsonc(manifest)
+    plugins = data.get('plugins') if isinstance(data, dict) else None
+    if not isinstance(plugins, list):
+        raise ValueError(f'{manifest} must contain {{"plugins": [...]}}.')
+    specs = []
+    for entry in plugins:
+        if isinstance(entry, str) and entry:
+            specs.append((Path(_expand(entry, workspace)),))
+        elif isinstance(entry, dict) and set(entry) <= {'repo', 'path'} and isinstance(entry.get('repo'), str) \
+                and isinstance(entry.get('path', ''), str):
+            url = entry['repo']
+            if GITHUB_SHORTHAND.match(url):
+                url = f'https://github.com/{url}.git'
+            parts = [part for part in re.split(r'[:/\\@]+', re.sub(r'^[a-z+]+://', '', url)) if part]
+            raw = entry.get('path', '')
+            relative = PurePosixPath(raw.replace('\\', '/'))
+            if not parts or any(part in ('.', '..') for part in parts) or relative.is_absolute() \
+                    or '..' in relative.parts or ':' in raw:
+                raise ValueError(f'{manifest}: invalid plugin {entry!r}.')
+            subpath = Path(*relative.parts)
+            checkout = plugin_cache().joinpath(*parts).with_suffix('') if parts[-1].endswith('.git') \
+                else plugin_cache().joinpath(*parts)
+            specs.append((url, checkout, subpath))
+        else:
+            raise ValueError(f'{manifest}: each plugin must be a local path or {{"repo": ..., "path": ...}}.')
+    return specs
+
+
+def _update_checkout(url, checkout, dev):
+    if not (checkout / '.git').is_dir():
+        checkout.parent.mkdir(parents=True, exist_ok=True)
+        dev.emit_info(f"Cloning plugin repository {url}")
+        subprocess.run(['git', 'clone', '--depth', '1', url, str(checkout)], check=True, timeout=600)
+    else:
+        subprocess.run(['git', '-C', str(checkout), 'fetch', '--depth', '1', 'origin', 'HEAD'],
+                       check=True, timeout=600)
+        subprocess.run(['git', '-C', str(checkout), 'reset', '--hard', '--quiet', 'FETCH_HEAD'],
+                       check=True, timeout=60)
+
+
+def plugin_dirs(directory, workspace, dev, update=False):
+    """Resolve a profile's plugin folders, cloning missing git sources and updating them when asked."""
+    folders, updated = [], set()
+    for spec in _plugin_specs(directory, workspace):
+        if len(spec) == 3:
+            url, checkout, subpath = spec
+            if checkout not in updated and (update or not (checkout / '.git').is_dir()):
+                _update_checkout(url, checkout, dev)
+                updated.add(checkout)
+            folder = checkout / subpath
+        else:
+            folder = spec[0]
+        if not folder.is_dir():
+            raise ValueError(f'Plugin folder does not exist: {folder} (from {directory / "plugins.json"}).')
+        folders.append(folder)
+    return folders
+
+
+def update_plugins(config, dev):
+    """Update every profile's git plugin sources; used by dev init and dev repo sync."""
+    root = profiles_root()
+    for directory in sorted(root.iterdir() if root.is_dir() else []):
+        if directory.is_dir() and PROFILE_NAME.match(directory.name) and (directory / 'plugins.json').is_file():
+            for folder in plugin_dirs(directory, dev.get_base_path(config), dev, update=True):
+                dev.emit_ok(f"{directory.name} plugin ready: {folder}")
+
+
+def _profile_env(name, directory, profile, workspace):
+    env = dict(os.environ, DEV_AI_PROFILE=name,
+               COPILOT_SKILLS_DIRS=str(directory / 'skills'),
+               COPILOT_CUSTOM_INSTRUCTIONS_DIRS=str(directory))
+    for variable, value in environments.resolve({'env': profile.get('env') or {}}, workspace)['env'].items():
+        if value is None:
+            env.pop(variable, None)
+        else:
+            env[variable] = value
+    return env
+
+
+def _profiles(options):
+    """Validate and return ai.profiles."""
+    profiles = options.get('profiles', {})
+    if not isinstance(profiles, dict):
+        raise ValueError('ai.profiles must map profile names to objects.')
+    tiers = _model_tiers(options)[0]
+    owners = {}
+    for name, profile in profiles.items():
+        where = f'ai.profiles.{name}'
+        if not PROFILE_NAME.match(name):
+            raise ValueError(f'{where}: profile names may contain only letters, digits, "-" and "_".')
+        if not isinstance(profile, dict) or set(profile) - PROFILE_OPTIONS:
+            raise ValueError(f"{where} must be an object containing only {', '.join(sorted(PROFILE_OPTIONS))}.")
+        if not isinstance(profile.get('command', ''), str):
+            raise ValueError(f'{where}.command must be a string.')
+        if not isinstance(profile.get('addWorkspace', True), bool):
+            raise ValueError(f'{where}.addWorkspace must be true or false.')
+        if 'defaultModel' in profile and profile['defaultModel'] not in tiers:
+            raise ValueError(f"{where}.defaultModel must be one of: {', '.join(tiers)}.")
+        environments.resolve({'env': profile.get('env') or {}}, Path.home())
+        flags = profile.get('flags', [])
+        if not isinstance(flags, list) or not all(isinstance(flag, str) and FLAG.match(flag) for flag in flags):
+            raise ValueError(f'{where}.flags must be a list like ["-x", "--name"].')
+        for flag in flags:
+            if flag in RESERVED_FLAGS:
+                raise ValueError(f'{where} cannot use {flag}, which dev ai or Copilot already uses.')
+        for flag in flags:
+            if flag in owners:
+                raise ValueError(f'{where} and ai.profiles.{owners[flag]} both use {flag}.')
+            owners[flag] = name
+    return profiles
+
+
+def _profile_flags(profiles):
+    return {flag: name for name, profile in profiles.items() for flag in profile.get('flags', [])}
+
+
+def _expand(value, workspace):
+    return environments.resolve({'cwd': value}, workspace)['cwd']
+
+
 def _setup_ghcopilot(skills, dev):
     command = _copilot_command()
     if command:
@@ -226,6 +375,7 @@ def provider_name(config):
         raise ValueError(f"ai.provider must be one of: {', '.join(PROVIDERS)}.")
     _skills_enabled(options)
     _model_tiers(options)
+    _profiles(options)
     return provider
 
 
@@ -264,10 +414,76 @@ def setup_ai(config, dev):
     try:
         provider = provider_name(config)
         PROVIDERS[provider](_skills_enabled(config.get('ai', {})), dev)
+        if provider == 'ghcopilot' and _skills_enabled(config.get('ai', {})):
+            update_plugins(config, dev)
         return 0
     except (OSError, ValueError, RuntimeError, http.client.HTTPException, subprocess.SubprocessError) as error:
         dev.emit_error(f"AI setup failed: {error}")
         return 1
+
+
+def _profile_argument(arguments, profiles):
+    """Split a leading profile selector (--profile NAME, --profile=NAME, or a profile flag) from the arguments."""
+    if arguments[:1] == ['--profile']:
+        if len(arguments) < 2:
+            raise ValueError('--profile requires a profile name.')
+        return arguments[1], arguments[2:]
+    if arguments and arguments[0].startswith('--profile='):
+        return arguments[0].split('=', 1)[1], arguments[1:]
+    flags = _profile_flags(profiles)
+    if arguments and arguments[0] in flags:
+        return flags[arguments[0]], arguments[1:]
+    return None, arguments
+
+
+def _add_arguments(arguments):
+    """Parse `--add-env [NAME] [--add-flag FLAG]...`."""
+    name, flags, rest = None, [], arguments[1:]
+    while rest:
+        if rest[0] == '--add-flag':
+            if len(rest) < 2:
+                raise ValueError('--add-flag requires a flag such as -x.')
+            flags.append(rest[1])
+            rest = rest[2:]
+        elif name is None and not rest[0].startswith('-'):
+            name, rest = rest[0], rest[1:]
+        else:
+            raise ValueError(f'Unexpected argument {rest[0]!r}; use: ai --add-env NAME [--add-flag -x].')
+    return name, flags
+
+
+def add_profile(config, arguments, dev):
+    """Register a profile with --NAME and any extra flags, and create its configuration folder."""
+    name, flags = _add_arguments(arguments)
+    if name is None:
+        if not sys.stdin.isatty():
+            raise ValueError('Profile name required: ai --add-env NAME [--add-flag -x].')
+        try:
+            name = input('Profile name (also usable as --NAME): ').strip()
+            short = input('Extra flag, e.g. -x (Enter for none): ').strip()
+        except EOFError as error:
+            raise ValueError('Profile name required: ai --add-env NAME [--add-flag -x].') from error
+        flags += [short] if short else []
+    if name == DEFAULT_PROFILE or not PROFILE_NAME.match(name):
+        raise ValueError(f'Invalid profile name {name!r}; use letters, digits, "-" and "_", not "default".')
+    override = load_jsonc(dev.OVERRIDE_CONFIG_FILE) if dev.OVERRIDE_CONFIG_FILE.is_file() else {}
+    profiles = {**config.get('ai', {}).get('profiles', {}), **override.get('ai', {}).get('profiles', {})}
+    profile = dict(profiles.get(name, {}))
+    wanted = list(dict.fromkeys([*profile.get('flags', []), f'--{name}', *flags]))
+    profile['flags'] = wanted
+    candidate = {**config.get('ai', {}), 'profiles': {**profiles, name: profile}}
+    _profiles(candidate)
+    for flag in wanted:
+        if flag in CONTINUE_FLAGS:
+            dev.emit_warn(f"{flag} now selects the {name} profile; use --continue to continue a session.")
+    override['ai'] = {**override.get('ai', {}),
+                      'profiles': {**override.get('ai', {}).get('profiles', {}), name: profile}}
+    dev.save_config(override)
+    directory = profiles_root() / name
+    (directory / 'skills').mkdir(parents=True, exist_ok=True)
+    (directory / '.github' / 'instructions').mkdir(parents=True, exist_ok=True)
+    dev.emit_ok(f"Profile {name} uses {directory}; launch it with {' or '.join('ai ' + flag for flag in wanted)}.")
+    return 0
 
 
 def run_chat(config, arguments, workspace, dev):
@@ -281,17 +497,39 @@ def run_chat(config, arguments, workspace, dev):
         workspace = Path(workspace)
         if not workspace.is_dir():
             raise ValueError(f"Workspace root does not exist or is not a directory: {workspace}")
-        model, arguments = _model_arguments(config.get('ai', {}), list(arguments))
+        options = config.get('ai', {})
+        profiles = _profiles(options)
+        if arguments[:1] == ['--add-env']:
+            return add_profile(config, list(arguments), dev)
+        requested, arguments = _profile_argument(list(arguments), profiles)
+        name = DEFAULT_PROFILE if requested is None else requested
+        directory = profiles_root() / name
+        if requested is not None and (not PROFILE_NAME.match(name)
+                                      or (name not in profiles and not directory.is_dir())):
+            raise ValueError(f"Unknown AI profile {name!r}; add it with ai --add-env {name}.")
+        profile = profiles.get(name, {})
+        launch, plugins = {}, []
+        if directory.is_dir() or name in profiles:
+            launch['env'] = _profile_env(name, directory, profile, workspace)
+            for folder in plugin_dirs(directory, workspace, dev):
+                plugins += ['--plugin-dir', str(folder)]
+        if 'defaultModel' in profile:
+            options = {**options, 'defaultModel': profile['defaultModel']}
+        model, arguments = _model_arguments(options, arguments)
         if arguments and arguments[0] == '-c':
             arguments[0] = '--continue'
-        command = _copilot_command()
-        if not command:
-            command = _setup_ghcopilot(_skills_enabled(config.get('ai', {})), dev)
+        if 'command' in profile:
+            command = _expand(profile['command'], workspace)
+        else:
+            command = _copilot_command()
+            if not command:
+                command = _setup_ghcopilot(_skills_enabled(options), dev)
         mode = [] if any(arg in MODE_FLAGS or arg.startswith('--mode=') for arg in arguments) \
             else ['--mode', 'interactive']
+        add_dir = ['--add-dir', str(workspace)] if profile.get('addWorkspace', True) else []
         return subprocess.run(
-            [command, '--allow-all', *mode, *model, '--add-dir', str(workspace), *arguments],
-            cwd=workspace, check=False).returncode
+            [command, '--allow-all', *mode, *model, *add_dir, *plugins, *arguments],
+            cwd=workspace, check=False, **launch).returncode
     except (OSError, ValueError, RuntimeError, http.client.HTTPException, subprocess.SubprocessError) as error:
         dev.emit_error(f"AI chat failed: {error}")
         return 1

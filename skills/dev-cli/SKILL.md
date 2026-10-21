@@ -46,6 +46,15 @@ settings without printing credentials or the entire configuration.
   `ai.skills` (default `true`) links `~/.agents/skills` to the bundled `skills/`
   directory so every bundled skill loads and tracks the checkout; `false` skips it.
   Personal skills in `~/.copilot/skills` stay untouched and win on name clashes.
+- Each `~/dev_ai/<name>` folder is an AI profile holding tracked configuration:
+  `skills/`, `.github/instructions/*.instructions.md` (with `applyTo: '**'`;
+  `AGENTS.md` there is not read), and an optional `plugins.json` of local
+  folders or `{"repo", "path"}` Git sources passed as `--plugin-dir`.
+  `ai --add-env <name> [--add-flag -x]` registers `--<name>` (and `-x`) and
+  creates the folder; `ai --profile <name>` or a registered flag launches it,
+  and `ai` uses `~/dev_ai/default` when present. Copilot state stays in
+  `~/.copilot`. Optional `ai.profiles.<name>` also sets `command`,
+  `addWorkspace`, `defaultModel`, and `env`.
   Authentication remains user-controlled: run `copilot`, then `/login` if needed.
 - Custom settings belong in `~/dev_env/env_windows.ps1` on Windows,
   `~/dev_env/env_mac.sh` on macOS, or `~/dev_env/env_linux.sh` on Linux, including
