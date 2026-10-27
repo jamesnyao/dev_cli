@@ -1,18 +1,30 @@
 ---
 name: code-cleanup
 description: >-
-  Code cleanup guidelines — simplify documentation, remove inline comments,
-  clean unused imports, remove unnecessary namespace prefixes, remove narrative
-  comments. Use when asked to do code cleanup or review code for cleanliness.
+  Review changed code for unnecessary complexity, duplication, comments, imports,
+  and namespace prefixes. Use when asked to clean up code or before committing.
 ---
 
 # Code Cleanup Guidelines
 
-When performing code cleanup, apply these rules:
+Review only the requested scope or current changes. Cleanup should reduce the
+number of concepts a maintainer must understand, not just shorten the code.
 
-1. **Simplify function documentation** to about a single sentence unless the function REALLY needs a more complex description
-2. **Remove all inline comments** unless they explain convoluted code
-3. **Clean up unused usings/includes/imports**
-4. **Clean up unnecessary namespace prefixes** (e.g., `System.IO.File` → `File`) if not required
-5. **Clean up narrative comments** that explain what the code is doing — the code should be clear enough
-   to not require comments in most cases
+1. **Remove unnecessary machinery.** Require an actual caller or verified runtime
+   behavior for added locks, fallbacks, wrappers, and compatibility paths. Look for
+   framework facilities or existing data that make new state unnecessary.
+2. **Check responsibility and lifetime boundaries.** State should have a clear
+   owner and cleanup path, including failures. Each check should protect a named
+   trust boundary, transport constraint, or invariant; avoid repeating internal
+   shape checks across layers.
+3. **Review both sides when ownership allows.** Do not keep consumer workarounds
+   solely because the producer is in another repository we also own. Propose the
+   smaller coordinated change when it falls outside the authorized scope.
+4. **Keep necessary explanations.** Use short docstrings and comments for
+   non-obvious constraints or reasons. Remove comments that merely narrate code.
+5. **Remove unused imports and unnecessary namespace prefixes.**
+
+Do not remove a safeguard just because it looks defensive. Identify the condition
+it protects, and verify that the simpler design still handles that condition.
+Keep regression tests focused on that behavior, not the implementation being
+removed. Preserve real privacy protections and visible failure handling.
