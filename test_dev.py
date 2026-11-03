@@ -60,24 +60,20 @@ def tearDownModule():
     _PROFILES.cleanup()
 
 
+def _isolate_config(test, sample_name):
+    temp_dir = test.enterContext(tempfile.TemporaryDirectory())
+    config_dir = Path(temp_dir) / 'repoconfig'
+    test.enterContext(patch.multiple(
+        dev, CONFIG_DIR=config_dir, OVERRIDE_CONFIG_FILE=config_dir / 'dev_config.json',
+        SAMPLE_CONFIG_FILE=Path(temp_dir) / sample_name))
+    return temp_dir
+
+
 class TestConfig(unittest.TestCase):
     """Test config loading and saving"""
     
     def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
-        self.orig_config_dir = dev.CONFIG_DIR
-        self.orig_override_config_file = dev.OVERRIDE_CONFIG_FILE
-        self.orig_sample_config_file = dev.SAMPLE_CONFIG_FILE
-        dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
-        dev.OVERRIDE_CONFIG_FILE = dev.CONFIG_DIR / 'dev_config.json'
-        dev.SAMPLE_CONFIG_FILE = Path(self.temp_dir) / 'no-sample-here.json'
-
-    def tearDown(self):
-        dev.CONFIG_DIR = self.orig_config_dir
-        dev.OVERRIDE_CONFIG_FILE = self.orig_override_config_file
-        dev.SAMPLE_CONFIG_FILE = self.orig_sample_config_file
-        import shutil
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
+        self.temp_dir = _isolate_config(self, 'no-sample-here.json')
 
     def test_load_config_defaults_to_empty(self):
         """load_config should return {} when neither sample nor override exists"""
@@ -355,20 +351,8 @@ class TestConfigGet(unittest.TestCase):
     """Test `dev config get <dotted.key>` reading from the singleton config file."""
 
     def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
-        self.orig_config_dir = dev.CONFIG_DIR
-        self.orig_override_config_file = dev.OVERRIDE_CONFIG_FILE
-        self.orig_sample_config_file = dev.SAMPLE_CONFIG_FILE
-        dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
+        self.temp_dir = _isolate_config(self, 'no-sample-here.json')
         dev.CONFIG_DIR.mkdir(parents=True)
-        dev.OVERRIDE_CONFIG_FILE = dev.CONFIG_DIR / 'dev_config.json'
-        dev.SAMPLE_CONFIG_FILE = Path(self.temp_dir) / 'no-sample-here.json'
-
-    def tearDown(self):
-        dev.CONFIG_DIR = self.orig_config_dir
-        dev.OVERRIDE_CONFIG_FILE = self.orig_override_config_file
-        dev.SAMPLE_CONFIG_FILE = self.orig_sample_config_file
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _args(self, key):
         return argparse.Namespace(key=key)
@@ -950,8 +934,7 @@ class TestCmdInit(unittest.TestCase):
         shutil.rmtree(self.tmpdir)
 
     @patch.dict(os.environ, {'SHELL': '/bin/zsh'})
-    @patch('dev.get_os_type', return_value='linux')
-    def test_unix_zsh_already_default(self, mock_os):
+    def test_unix_zsh_already_default(self):
         self.assertEqual(dev._init_unix(), 0)
         self.assertIn(dev.ZSHRC_SOURCE_LINE, (self.home / '.zshrc').read_text())
 
@@ -965,44 +948,34 @@ class TestCmdInit(unittest.TestCase):
         self.assertEqual(profile.read_text().count(dev.ZSHRC_SOURCE_LINE), 1)
 
     @patch.dict(os.environ, {'SHELL': '/bin/bash'})
-    @patch('dev.get_os_type', return_value='linux')
-    @patch('shutil.which', return_value='/usr/bin/zsh')
-    def test_unix_creates_bashrc(self, mock_which, mock_os):
+    def test_unix_creates_bashrc(self):
         bashrc = self.home / '.bashrc'
-        with patch('dev.Path.home', return_value=self.home):
-            self.assertEqual(dev._init_unix(), 0)
+        self.assertEqual(dev._init_unix(), 0)
         self.assertIn('dev_cli/shell/bash.sh', bashrc.read_text())
 
     @patch.dict(os.environ, {'SHELL': '/bin/bash'})
-    @patch('dev.get_os_type', return_value='linux')
-    @patch('shutil.which', return_value='/usr/bin/zsh')
-    def test_unix_appends_to_bashrc(self, mock_which, mock_os):
+    def test_unix_appends_to_bashrc(self):
         bashrc = self.home / '.bashrc'
         bashrc.write_text('# existing\n')
-        with patch('dev.Path.home', return_value=self.home):
-            self.assertEqual(dev._init_unix(), 0)
+        self.assertEqual(dev._init_unix(), 0)
         content = bashrc.read_text()
         self.assertIn('# existing', content)
         self.assertIn('dev_cli/shell/bash.sh', content)
 
     @patch.dict(os.environ, {'SHELL': '/bin/bash'})
-    @patch('dev.get_os_type', return_value='linux')
-    @patch('shutil.which', return_value='/usr/bin/zsh')
-    def test_unix_bashrc_idempotent(self, mock_which, mock_os):
+    def test_unix_bashrc_idempotent(self):
         bashrc = self.home / '.bashrc'
-        bashrc.write_text(f'{dev.BASHRC_SOURCE_LINE}\n')
-        with patch('dev.Path.home', return_value=self.home):
-            self.assertEqual(dev._init_unix(), 0)
-        self.assertEqual(bashrc.read_text().count('dev_cli/shell/bash.sh'), 2)
+        original = f'{dev.BASHRC_SOURCE_LINE}\n'
+        bashrc.write_text(original)
+        self.assertEqual(dev._init_unix(), 0)
+        self.assertEqual(bashrc.read_text(), original)
 
     @patch.dict(os.environ, {'SHELL': '/bin/bash'})
     @patch('subprocess.run')
-    @patch('dev.get_os_type', return_value='linux')
     @patch('shutil.which', return_value=None)
-    def test_unix_does_not_require_or_install_zsh(self, mock_which, mock_os, mock_run):
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr='')
-        with patch('dev.Path.home', return_value=self.home):
-            self.assertEqual(dev._init_unix(), 0)
+    def test_unix_does_not_require_or_install_zsh(self, mock_which, mock_run):
+        self.assertEqual(dev._init_unix(), 0)
+        mock_which.assert_not_called()
         mock_run.assert_not_called()
         self.assertIn(dev.BASHRC_SOURCE_LINE, (self.home / '.bashrc').read_text())
 
@@ -1130,19 +1103,7 @@ class TestCmdInit(unittest.TestCase):
 class TestInitConfig(unittest.TestCase):
 
     def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
-        self.orig_config_dir = dev.CONFIG_DIR
-        self.orig_override_config_file = dev.OVERRIDE_CONFIG_FILE
-        self.orig_sample_config_file = dev.SAMPLE_CONFIG_FILE
-        dev.CONFIG_DIR = Path(self.temp_dir) / 'repoconfig'
-        dev.OVERRIDE_CONFIG_FILE = dev.CONFIG_DIR / 'dev_config.json'
-        dev.SAMPLE_CONFIG_FILE = Path(self.temp_dir) / 'dev_config.json'
-
-    def tearDown(self):
-        dev.CONFIG_DIR = self.orig_config_dir
-        dev.OVERRIDE_CONFIG_FILE = self.orig_override_config_file
-        dev.SAMPLE_CONFIG_FILE = self.orig_sample_config_file
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
+        self.temp_dir = _isolate_config(self, 'dev_config.json')
 
     def test_errors_when_sample_missing(self):
         self.assertEqual(dev._init_config(), 1)

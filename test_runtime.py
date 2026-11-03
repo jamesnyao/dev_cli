@@ -552,6 +552,7 @@ class LauncherTests(unittest.TestCase):
         input_read, input_write, output_read, output_write, console = [wintypes.HANDLE() for _ in range(5)]
         process = ProcessInfo()
         attributes = None
+        reader = None
         try:
             self.assertTrue(kernel.CreatePipe(ctypes.byref(input_read), ctypes.byref(input_write), None, 0))
             self.assertTrue(kernel.CreatePipe(ctypes.byref(output_read), ctypes.byref(output_write), None, 0))
@@ -559,8 +560,9 @@ class LauncherTests(unittest.TestCase):
                 Coord(120, 30), input_read, output_write, 0, ctypes.byref(console)), 0)
             size = ctypes.c_size_t()
             kernel.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(size))
-            attributes = ctypes.create_string_buffer(size.value)
-            self.assertTrue(kernel.InitializeProcThreadAttributeList(attributes, 1, 0, ctypes.byref(size)))
+            attribute_buffer = ctypes.create_string_buffer(size.value)
+            self.assertTrue(kernel.InitializeProcThreadAttributeList(attribute_buffer, 1, 0, ctypes.byref(size)))
+            attributes = attribute_buffer
             self.assertTrue(kernel.UpdateProcThreadAttribute(
                 attributes, 0, 0x00020016, console, ctypes.sizeof(console), None, None))
             startup = StartupInfoEx()
@@ -579,17 +581,25 @@ class LauncherTests(unittest.TestCase):
             self.assertTrue(kernel.CreateProcessW(
                 None, command, None, None, False, 0x00080000, None, str(self.directory),
                 ctypes.byref(startup), ctypes.byref(process)), ctypes.get_last_error())
+            self.assertTrue(kernel.CloseHandle(input_read))
+            input_read = None
+            self.assertTrue(kernel.CloseHandle(output_write))
+            output_write = None
             received = queue.Queue()
 
             def read_console():
-                buffer = ctypes.create_string_buffer(4096)
-                count = wintypes.DWORD()
-                while kernel.ReadFile(output_read, buffer, len(buffer), ctypes.byref(count), None):
-                    if not count.value:
-                        break
-                    received.put(buffer.raw[:count.value])
+                try:
+                    buffer = ctypes.create_string_buffer(4096)
+                    count = wintypes.DWORD()
+                    while kernel.ReadFile(output_read, buffer, len(buffer), ctypes.byref(count), None):
+                        if not count.value:
+                            break
+                        received.put(buffer.raw[:count.value])
+                finally:
+                    kernel.CloseHandle(output_read)
 
-            threading.Thread(target=read_console, daemon=True).start()
+            reader = threading.Thread(target=read_console, daemon=True)
+            reader.start()
             output = b''
             deadline = time.monotonic() + 15
             while b'Prompt without newline:' not in output:
@@ -608,13 +618,23 @@ class LauncherTests(unittest.TestCase):
         finally:
             if process.process and kernel.WaitForSingleObject(process.process, 0) != 0:
                 kernel.TerminateProcess(process.process, 1)
-            if console:
-                kernel.ClosePseudoConsole(console)
-            if attributes is not None:
-                kernel.DeleteProcThreadAttributeList(attributes)
-            for handle in (process.thread, process.process, input_read, input_write, output_read, output_write):
+            for handle in (input_read, output_write):
                 if handle:
                     kernel.CloseHandle(handle)
+            reader_started = reader is not None and reader.ident is not None
+            if output_read and not reader_started:
+                kernel.CloseHandle(output_read)
+            if console:
+                kernel.ClosePseudoConsole(console)
+            if reader_started:
+                reader.join(timeout=15)
+            if attributes is not None:
+                kernel.DeleteProcThreadAttributeList(attributes)
+            for handle in (process.thread, process.process, input_write):
+                if handle:
+                    kernel.CloseHandle(handle)
+            if reader_started and reader.is_alive():
+                self.fail('Console output reader did not stop after the pseudoconsole closed')
 
     @unittest.skipUnless(os.name == 'nt', 'native Windows shell test')
     def test_windows_bootstrap_installer_cache_pin_and_failure(self):
