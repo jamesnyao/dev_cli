@@ -23,8 +23,24 @@ number of concepts a maintainer must understand, not just shorten the code.
 4. **Keep necessary explanations.** Use short docstrings and comments for
    non-obvious constraints or reasons. Remove comments that merely narrate code.
 5. **Remove unused imports and unnecessary namespace prefixes.**
+6. **Keep invariant failures visible.** Reject unsupported cases and stop invalid
+   execution when an internal invariant fails, with actionable diagnostics and
+   the repository's appropriate failure scope. Use checks that work in production;
+   logging or debug-only assertions alone do not enforce a contract, and assertion
+   expressions must not have required side effects.
+7. **Handle expected failures at the boundary.** Validate external input, stale or
+   corrupt data, and operational failures through ordinary error handling, not
+   process-fatal assertions. Avoid catch-all recovery and success-shaped defaults.
+   Recover narrowly only when recovery restores or preserves valid state; bound
+   retries to transient errors.
 
 Do not remove a safeguard just because it looks defensive. Identify the condition
 it protects, and verify that the simpler design still handles that condition.
-Keep regression tests focused on that behavior, not the implementation being
-removed. Preserve real privacy protections and visible failure handling.
+Test violated internal contracts and expected failures without weakening invariants.
+Keep regression tests focused on behavior, not the implementation being removed.
+Preserve real privacy protections and visible failure handling.
+
+For context, see Chromium's [defensive versus offensive coding guidance]. Apply
+the repository's own error-handling conventions and language-specific check semantics.
+
+[defensive versus offensive coding guidance]: https://www.chromium.org/chromium-os/developer-library/reference/cpp/cpp-invariant-checks/#defensive-vs-offensive-coding
