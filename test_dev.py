@@ -802,7 +802,7 @@ class TestShellWorkspace(unittest.TestCase):
         self.home = Path(self.temp.name)
         tool = self.home / 'dev_cli'
         (tool / 'shell').mkdir(parents=True)
-        for name in ('dev', 'dev.py', 'configuration.py', 'environments.py', 'terminal.py',
+        for name in ('dev', 'dev.py', 'configuration.py', 'diff_view.py', 'environments.py', 'terminal.py',
                      'dev_config.json', 'shell/zsh.sh'):
             shutil.copy2(Path(__file__).parent / name, tool / name)
         (tool / 'dev').write_text(

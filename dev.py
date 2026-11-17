@@ -26,6 +26,7 @@ from pathlib import Path
 
 import ai
 import configuration
+import diff_view
 import environments
 import runtime
 import terminal
@@ -2171,9 +2172,24 @@ def cmd_test(args):
     print(f"\n{Colors.BLUE}Running pylint...{Colors.NC}", flush=True)
     lint = subprocess.run(
         [sys.executable, '-u', '-m', 'pylint', 'dev.py', 'configuration.py',
-         'environments.py', 'runtime.py', 'ai.py', 'terminal.py'],
+         'environments.py', 'runtime.py', 'ai.py', 'terminal.py', 'diff_view.py'],
         cwd=str(SCRIPT_DIR))
     return lint.returncode
+
+
+def cmd_diff(args):
+    """Open a manifest's existing files as isolated, editable VS Code diffs."""
+    try:
+        workspace = diff_view.open_review(args.review_file)
+    except subprocess.CalledProcessError as error:
+        detail = error.stderr.strip() if error.stderr else str(error)
+        emit_error(f'Diff review failed: {detail}')
+        return 1
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        emit_error(f'Diff review failed: {error}')
+        return 1
+    emit_ok(f'Diff review opened: {workspace}')
+    return 0
 
 
 # =============================================================================
@@ -3377,6 +3393,7 @@ def main():
             '  dev repo old --days 30        List stale user branches (add --delete to prune)\n'
             '  dev pr create -t "Title"      Open a draft PR from the current branch\n'
             '  dev pr diff --id 12345        Show a PR diff by id\n'
+            '  dev diff --review-file review.json  Open isolated VS Code diffs\n'
             '  dev pr comments --active      List only unresolved PR threads\n'
             '  dev pr policy --id 12345       Print pending or failed policy run links\n'
             '  dev pr tag --id 12345          List PR tags\n'
@@ -3389,6 +3406,10 @@ def main():
     parser.add_argument('--version', '-V', action='version', version=f'dev {__version__}')
     parser.add_argument('--no-color', action='store_true', help='Disable colored output')
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
+
+    diff_parser = subparsers.add_parser('diff', help='Open isolated VS Code review diffs')
+    diff_parser.add_argument('--review-file', required=True, type=Path,
+                             help='JSON manifest with 1-8 [before, working_file] pairs in diffs')
 
     # repo subcommand
     repo_parser = subparsers.add_parser('repo', help='Manage tracked repositories')
@@ -3559,6 +3580,8 @@ def main():
         return cmd_init(args)
     elif args.command == 'test':
         return cmd_test(args)
+    elif args.command == 'diff':
+        return cmd_diff(args)
     elif args.command == 'python':
         return cmd_python(args)
     elif args.command == 'config':

@@ -122,6 +122,21 @@ Repository updates are non-destructive:
 - Recover any stash with `git stash list` and `git stash pop`. Failed updates or
   clones make the exit status nonzero; intentional skips do not.
 
+## Local diff reviews
+
+Use `dev diff --review-file <manifest.json>` to open 1-8 ordered
+`[before, working_file]` pairs from the manifest's `diffs` array.
+An optional `title` labels the repository/branch. Paths resolve relative to the
+manifest; absolute paths also work. Keep the manifest and before snapshots in
+scratch storage outside the checkout.
+
+The command creates a fresh folderless VS Code workspace and opens only diff tabs.
+Left editors are read-only; right editors are the actual writable working files.
+Reopening uses fresh editor state, not another window's restored tabs.
+It never opens commit-message tabs, modifies input files or global editor settings,
+or commits/pushes. Keep generated workspace files until the review window is no longer needed.
+Launch/manifest errors fail explicitly; inspect the result before requesting approval.
+
 ## PR workflows and validation
 
 The `dev pr` commands target Azure DevOps. Inspect `dev pr -h` and the relevant

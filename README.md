@@ -284,6 +284,33 @@ Sync can commit and push changes in the bootstrap repository. Commit and push
 tool submodule changes separately; dirty or unpublished submodules stop sync.
 Run `dev <command> -h` for options.
 
+## Local diff reviews
+
+`dev diff --review-file review.json` opens up to eight ordered diff pairs in one
+fresh VS Code window. Each pair is a saved baseline on the left and the actual
+working file on the right, so saved edits directly update your checkout.
+
+```json
+{
+  "title": "project main",
+  "diffs": [
+    ["before/module.py", "/absolute/path/to/project/module.py"]
+  ]
+}
+```
+
+Paths may be absolute or relative to the manifest. On Windows, use Windows paths
+with JSON-escaped backslashes. Prepare baseline snapshots and keep the manifest
+in a scratch directory outside your checkout. The command creates a uniquely
+named, folderless `.code-workspace` there and opens only diff tabs, not standalone
+files or commit messages. Baseline editors are read-only; working files remain
+editable. Rerunning the command creates fresh editor state without changing the
+input files or your global VS Code settings.
+
+VS Code's `code` command must be on PATH. Missing files, invalid manifests, and
+launch errors return a nonzero exit code. The command does not commit, push, or
+approve changes. Keep review artifacts until the window is no longer needed.
+
 ## Pull requests
 
 `dev pr` targets Azure DevOps. Commands accept `--id <PR_ID>`, or infer the
