@@ -208,9 +208,10 @@ def trust_claude_workspace(base_path):
 
 def run_git(repo_path, *args):
     try:
+        # Keep MSYS helpers from changing console modes through inherited input.
         result = subprocess.run(
             ['git', '-C', str(repo_path)] + list(args),
-            capture_output=True, text=True, timeout=30
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30
         )
         output = result.stdout if result.returncode == 0 else result.stderr or result.stdout
         return result.returncode == 0, output.strip()

@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import configuration
 import runtime
+import terminal
 
 
 class RuntimeTests(unittest.TestCase):
@@ -498,6 +499,51 @@ class LauncherTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == 'nt', 'native Windows shell test')
     def test_windows_no_newline_prompt_is_visible_before_input(self):
+        self.create_native_runtime_fixture()
+        powershell = shutil.which('pwsh') or (
+            Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe')
+        self.assert_windows_console_prompt([
+            str(powershell), '-NoProfile', '-ExecutionPolicy', 'Bypass',
+            '-File', str(self.directory / 'dev.ps1'), 'prompt'])
+
+    @unittest.skipUnless(os.name == 'nt', 'native Windows shell test')
+    def test_git_bash_submodule_update_preserves_console_and_prompt(self):
+        bash = terminal._git_bash()  # pylint: disable=protected-access
+        if not bash:
+            self.skipTest('Git Bash is required for the native console regression')
+        with patch.dict(os.environ, {
+                'TERM': 'xterm-256color',
+                'WT_SESSION': 'dev-cli-console-fixture'}):
+            self.create_native_runtime_fixture()
+            shutil.copyfile(self.source / 'dev.cmd', self.directory / 'dev.cmd')
+            (self.directory / 'runtime.py').write_text(
+                'import ctypes, sys\n'
+                'from ctypes import wintypes\n'
+                f'sys.path.insert(0, {str(self.source)!r})\n'
+                'from test_bootstrap_sync import TestPrivateBootstrapSync\n'
+                'fixture = TestPrivateBootstrapSync()\n'
+                'kernel = ctypes.WinDLL("kernel32", use_last_error=True)\n'
+                'kernel.GetStdHandle.restype = wintypes.HANDLE\n'
+                'kernel.GetConsoleMode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]\n'
+                'kernel.SetConsoleMode.argtypes = [wintypes.HANDLE, wintypes.DWORD]\n'
+                'handle = kernel.GetStdHandle(-11)\n'
+                'before, after = wintypes.DWORD(), wintypes.DWORD()\n'
+                'assert kernel.GetConsoleMode(handle, ctypes.byref(before)) and before.value\n'
+                'try:\n'
+                '    fixture.setUp()\n'
+                '    result = fixture.private_sync()\n'
+                '    assert kernel.GetConsoleMode(handle, ctypes.byref(after))\n'
+                'finally:\n'
+                '    kernel.SetConsoleMode(handle, before.value)\n'
+                '    fixture.doCleanups()\n'
+                'answer = input("Prompt without newline: ")\n'
+                'assert result == 0, result\n'
+                'assert after.value == before.value, (before.value, after.value)\n'
+                'assert answer == "answer input", answer\n', encoding='utf-8')
+            command = '"$(cygpath -u ' + shlex.quote(str(self.directory / 'dev.cmd')) + ')"'
+            self.assert_windows_console_prompt([str(bash), '--noprofile', '--norc', '-c', command])
+
+    def assert_windows_console_prompt(self, shell_command):
         import ctypes
         from ctypes import wintypes
 
@@ -546,9 +592,6 @@ class LauncherTests(unittest.TestCase):
         kernel.ClosePseudoConsole.argtypes = [wintypes.HANDLE]
         kernel.DeleteProcThreadAttributeList.argtypes = [ctypes.c_void_p]
 
-        self.create_native_runtime_fixture()
-        powershell = shutil.which('pwsh') or (
-            Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe')
         input_read, input_write, output_read, output_write, console = [wintypes.HANDLE() for _ in range(5)]
         process = ProcessInfo()
         attributes = None
@@ -568,9 +611,6 @@ class LauncherTests(unittest.TestCase):
             startup = StartupInfoEx()
             startup.startup.cb = ctypes.sizeof(startup)
             startup.attributes = ctypes.addressof(attributes)
-            shell_command = [
-                str(powershell), '-NoProfile', '-ExecutionPolicy', 'Bypass',
-                '-File', str(self.directory / 'dev.ps1'), 'prompt']
             # Give the shell console handles, not the test runner's redirected handles.
             bootstrap = (
                 'import subprocess,sys; '
