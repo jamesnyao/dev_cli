@@ -20,7 +20,7 @@ BUNDLED_SKILLS = Path(__file__).parent / 'skills'
 MODE_FLAGS = {'--mode', '--autopilot', '--plan'}
 MODEL_TIERS = {'auto': 'auto'}
 AI_OPTIONS = {'provider', 'skills', 'models', 'defaultModel', 'continueModel', 'profiles'}
-PROFILE_OPTIONS = {'command', 'addWorkspace', 'defaultModel', 'env', 'flags'}
+PROFILE_OPTIONS = {'command', 'addWorkspace', 'defaultModel', 'agent', 'env', 'flags'}
 DEFAULT_PROFILE = 'default'
 PROFILE_NAME = re.compile(r'^[A-Za-z0-9_-]+$')
 GITHUB_SHORTHAND = re.compile(r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')
@@ -312,6 +312,8 @@ def _profiles(options):
             raise ValueError(f'{where}.addWorkspace must be true or false.')
         if 'defaultModel' in profile and profile['defaultModel'] not in tiers:
             raise ValueError(f"{where}.defaultModel must be one of: {', '.join(tiers)}.")
+        if 'agent' in profile and (not isinstance(profile['agent'], str) or not profile['agent'].strip()):
+            raise ValueError(f'{where}.agent must be a nonempty agent name.')
         environments.resolve({'env': profile.get('env') or {}}, Path.home())
         flags = profile.get('flags', [])
         if not isinstance(flags, list) or not all(isinstance(flag, str) and FLAG.match(flag) for flag in flags):
@@ -529,9 +531,11 @@ def run_chat(config, arguments, workspace, dev):
                 command = _setup_ghcopilot(_skills_enabled(options), dev)
         mode = [] if any(arg in MODE_FLAGS or arg.startswith('--mode=') for arg in arguments) \
             else ['--mode', 'interactive']
+        agent = [] if not profile.get('agent') or any(
+            arg == '--agent' or arg.startswith('--agent=') for arg in arguments) else ['--agent', profile['agent']]
         add_dir = ['--add-dir', str(workspace)] if profile.get('addWorkspace', True) else []
         return subprocess.run(
-            [command, '--allow-all', *mode, *model, *add_dir, *plugins, *arguments],
+            [command, '--allow-all', *mode, *model, *agent, *add_dir, *plugins, *arguments],
             cwd=workspace, check=False, **launch).returncode
     except (OSError, ValueError, RuntimeError, http.client.HTTPException, subprocess.SubprocessError) as error:
         dev.emit_error(f"AI chat failed: {error}")

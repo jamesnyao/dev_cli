@@ -250,10 +250,11 @@ A folder alone is enough for a profile. Add `ai.profiles.<name>` to change how
 it launches:
 
 | Option | Meaning |
-|--------|---------|
+| --- | --- |
 | `command` | Launcher to run instead of `copilot` (`~`, `$HOME`, and `$DEV` expand). It receives the same arguments and environment. |
 | `addWorkspace` | `false` omits `--add-dir <workspace>` (default `true`). |
 | `defaultModel` | Tier used instead of `ai.defaultModel`. |
+| `agent` | Native custom agent selected with `--agent`; an explicit `--agent` overrides it. Set it on `default` to select an agent for ordinary `ai` launches. |
 | `env` | Variables to set, or remove with `null`, like environments. Applied last, so it can point `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` at another profile's folder. |
 | `flags` | Leading flags that select the profile (managed by `ai --add-env`). |
 
@@ -268,6 +269,7 @@ it launches:
 
 For a variant of a profile, add a separate profile with its own flag and
 settings.
+
 ## Sync
 
 ```text

@@ -58,7 +58,9 @@ settings without printing credentials or the entire configuration.
   creates the folder; `ai --profile <name>` or a registered flag launches it
   with only that profile's skills and instructions. Copilot state stays in
   `~/.copilot`. Optional `ai.profiles.<name>` also sets `command`,
-  `addWorkspace`, `defaultModel`, and `env`.
+  `addWorkspace`, `defaultModel`, `agent`, and `env`. `agent` selects a native custom
+  agent unless the launch explicitly supplies `--agent`; set it on the `default`
+  profile to select the agent used by ordinary `ai` launches.
   Authentication remains user-controlled: run `copilot`, then `/login` if needed.
 - Custom settings belong in `~/dev_env/env_windows.ps1` on Windows,
   `~/dev_env/env_mac.sh` on macOS, or `~/dev_env/env_linux.sh` on Linux, including

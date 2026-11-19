@@ -515,6 +515,38 @@ class TestAI(unittest.TestCase):
                 self.assertEqual(ai.run_chat(self.config, arguments, self.home, self.dev), 0)
                 self.assert_profile_env(self.run.call_args.kwargs['env'], 'scratch')
 
+    def test_default_profile_selects_its_native_agent(self):
+        self.which.return_value = 'native-copilot'
+        config = {'ai': {'profiles': {'default': {'agent': 'primary-agent'}}}}
+
+        self.assertEqual(ai.run_chat(config, [], self.home, self.dev), 0)
+
+        self.assertEqual(self.run.call_args.args[0], [
+            'native-copilot', '--allow-all', '--mode', 'interactive',
+            '--agent', 'primary-agent', '--add-dir', str(self.home)])
+        self.assert_profile_env(self.run.call_args.kwargs['env'], 'default')
+
+    def test_explicit_agent_overrides_the_profile_default(self):
+        self.which.return_value = 'native-copilot'
+        config = {'ai': {'profiles': {'default': {'agent': 'primary-agent'}}}}
+        for arguments in (['--agent', 'selected-agent'], ['--agent=selected-agent']):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(ai.run_chat(config, arguments, self.home, self.dev), 0)
+                self.assertEqual(self.run.call_args.args[0], [
+                    'native-copilot', '--allow-all', '--mode', 'interactive',
+                    '--add-dir', str(self.home), *arguments])
+
+    def test_agent_selection_belongs_to_the_selected_profile(self):
+        self.which.return_value = 'native-copilot'
+        config = {'ai': {'profiles': {'default': {'agent': 'primary-agent'},
+                                     'review': {'agent': 'review-agent'}, 'plain': {}}}}
+        for name, agent in (('review', ['--agent', 'review-agent']), ('plain', [])):
+            with self.subTest(profile=name):
+                self.assertEqual(ai.run_chat(config, ['--profile', name], self.home, self.dev), 0)
+                self.assertEqual(self.run.call_args.args[0], [
+                    'native-copilot', '--allow-all', '--mode', 'interactive',
+                    *agent, '--add-dir', str(self.home)])
+
     def test_chat_launches_a_configured_profile_with_its_command_env_and_model(self):
         workspace = self.home / 'workspace'
         workspace.mkdir()
@@ -691,6 +723,8 @@ class TestAI(unittest.TestCase):
     def test_invalid_profiles_are_explicit_errors(self):
         for profiles in ([], {'bad name': {}}, {'p': []}, {'p': {'unknown': 1}}, {'p': {'command': 1}},
                          {'p': {'addWorkspace': 'no'}}, {'p': {'defaultModel': 'missing'}},
+                         {'p': {'agent': ''}}, {'p': {'agent': '  '}}, {'p': {'agent': None}},
+                         {'p': {'agent': ['agent']}}, {'p': {'agent': False}},
                          {'p': {'env': {'PATH': 'x'}}}, {'p': {'env': {'X': 1}}},
                          {'p': {'flags': '-x'}}, {'p': {'flags': ['x']}}, {'p': {'flags': ['-xy']}},
                          {'p': {'flags': ['--profile']}}, {'p': {'flags': ['-p']}},
