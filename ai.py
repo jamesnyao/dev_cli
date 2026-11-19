@@ -13,10 +13,11 @@ import sys
 import urllib.request
 
 import environments
+import checkouts
 from configuration import load_jsonc
 
 
-BUNDLED_SKILLS = Path(__file__).parent / 'skills'
+BUNDLED_SKILLS = checkouts.resolve_context(Path(__file__).parent).primary_root / 'skills'
 MODE_FLAGS = {'--mode', '--autopilot', '--plan'}
 MODEL_TIERS = {'auto': 'auto'}
 AI_OPTIONS = {'provider', 'skills', 'models', 'defaultModel', 'continueModel', 'profiles'}
@@ -201,7 +202,7 @@ def _link_skills(dev):
 
 def profiles_root():
     """Directory holding one tracked configuration folder per AI profile."""
-    return Path.home() / 'dev_ai'
+    return checkouts.resolve_context(Path(__file__).parent).private_root / 'dev_ai'
 
 
 def plugin_cache():

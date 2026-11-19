@@ -4,6 +4,28 @@
 $DevScripts = Split-Path $PSScriptRoot -Parent
 $SETUP = Join-Path $DevScripts "setup"
 $env:PATH = "$DevScripts;$env:PATH"
+$DevPrivateRoot = $HOME
+$DevStartupDirectory = "$PWD"
+$DevContextual = $DevScripts -ne (Join-Path $HOME 'dev_cli') -or $env:DEV_CONFIG_OVERRIDE
+if (-not $DevContextual) {
+  $DevCwdRoot = $null | & git -C "$PWD" rev-parse --show-toplevel 2>$null
+  if ($DevCwdRoot -and (Resolve-Path -LiteralPath $DevCwdRoot).Path -notin @($HOME, $DevScripts)) {
+    $DevCwdCommon = $null | & git -C "$PWD" rev-parse --path-format=absolute --git-common-dir 2>$null
+    foreach ($DevAnchor in @($DevScripts, $HOME)) {
+      $DevAnchorCommon = $null | & git -C $DevAnchor rev-parse --path-format=absolute --git-common-dir 2>$null
+      if ($DevCwdCommon -and $DevCwdCommon -eq $DevAnchorCommon) {
+        $DevContextual = $true
+        break
+      }
+    }
+  }
+}
+if ($DevContextual) {
+  $DevPrivateRoot = & "$DevScripts\dev.ps1" config context --field privateRoot
+  if ($LASTEXITCODE -ne 0) {
+    throw 'Could not resolve the private checkout'
+  }
+}
 
 # Startup answers from `dev` are cached until DEVCONFIG or a config file changes,
 # so warm shells start without launching Python.
@@ -18,10 +40,17 @@ if (Test-Path -LiteralPath $DevCacheFile) {
 }
 function Invoke-DevCached {
   param([Parameter(Mandatory)][string[]]$Arguments, [string]$ErrorMessage)
+  if ($DevContextual -or $env:DEV_CONFIG_OVERRIDE -or "$PWD" -ne $DevStartupDirectory) {
+    $Value = & "$DevScripts\dev.ps1" @Arguments
+    if ($LASTEXITCODE -ne 0) {
+      throw $ErrorMessage
+    }
+    return $Value
+  }
   $Stamp = foreach ($File in @((Join-Path $DevScripts 'dev_config.json'), (Join-Path $HOME 'dev_config.json'))) {
     if (Test-Path -LiteralPath $File) { (Get-Item -LiteralPath $File).LastWriteTimeUtc.Ticks }
   }
-  $Key = (@($env:DEVCONFIG) + $Arguments + $Stamp) -join '|'
+  $Key = (@($DevScripts, $env:DEVCONFIG) + $Arguments + $Stamp) -join '|'
   if ($DevCache.ContainsKey($Key)) {
     return $DevCache[$Key]
   }
@@ -83,14 +112,14 @@ if (-not $env:DEV_PROMPT_USER) {
 
 # Skills and instructions in the default AI profile load in every Copilot session;
 # `ai --profile <name>` replaces them for that launch.
-$DevAiDefault = Join-Path $HOME 'dev_ai\default'
+$DevAiDefault = Join-Path $DevPrivateRoot 'dev_ai\default'
 if (Test-Path -LiteralPath $DevAiDefault -PathType Container) {
   $env:COPILOT_SKILLS_DIRS = Join-Path $DevAiDefault 'skills'
   $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = $DevAiDefault
 }
 
 # Private, work-specific setup -- runs last so it can override anything above.
-$WorkEnv = "$HOME\dev_env\env_windows.ps1"
+$WorkEnv = "$DevPrivateRoot\dev_env\env_windows.ps1"
 if (Test-Path $WorkEnv) {
   . $WorkEnv
 }

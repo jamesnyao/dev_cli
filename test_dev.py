@@ -7,6 +7,7 @@ Run with: dev test
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import dev
+from test_checkouts import CheckoutTestCase
 
 
 def _sanitize_environment():
@@ -310,7 +312,7 @@ class TestResolveOverrideConfigFile(unittest.TestCase):
 
     @patch.dict(os.environ, {'DEV_CONFIG_OVERRIDE': '/explicit/override.json'})
     def test_env_override_wins(self):
-        self.assertEqual(dev._resolve_override_config_file(), Path('/explicit/override.json'))
+        self.assertEqual(dev._resolve_override_config_file(), Path('/explicit/override.json').resolve())
 
     @patch.dict(os.environ, {}, clear=False)
     def test_defaults_to_parent_of_dev_cli(self):
@@ -344,7 +346,7 @@ class TestExpandConfigPath(unittest.TestCase):
     @patch('dev.Path.home', return_value=Path('/home/tester'))
     @patch.dict(os.environ, {'DEV_CONFIG_OVERRIDE': '$HOME/config/settings.json'})
     def test_override_path_expands_home(self, mock_home):
-        self.assertEqual(dev._resolve_override_config_file(), Path('/home/tester/config/settings.json'))
+        self.assertEqual(dev._resolve_override_config_file(), Path('/home/tester/config/settings.json').resolve())
 
 
 class TestConfigGet(unittest.TestCase):
@@ -383,6 +385,95 @@ class TestConfigGet(unittest.TestCase):
     def test_malformed_json_returns_1(self):
         dev.OVERRIDE_CONFIG_FILE.write_text('{not valid')
         self.assertEqual(dev.cmd_config_get(self._args('identity.gitEmail')), 1)
+
+
+class TestCheckoutConfigCommand(CheckoutTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.checkout.copy_modules(cls.checkout.primary)
+        cls.checkout.copy_modules(cls.checkout.paired)
+
+    def context(self, *arguments, environment=None):
+        return self.checkout.python(
+            [str(self.checkout.primary / 'dev.py'), 'config', 'context', *arguments],
+            cwd=self.checkout.private, environment=environment)
+
+    def test_context_fields_print_only_the_requested_derived_path(self):
+        expected = {
+            'toolRoot': self.checkout.paired, 'primaryRoot': self.checkout.primary,
+            'privateRoot': self.checkout.private, 'configFile': self.checkout.private / 'dev_config.json',
+            'stateDir': self.checkout.home / '.dev_temp',
+        }
+        for field, path in expected.items():
+            with self.subTest(field=field):
+                result = self.context('--field', field)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), str(path))
+
+    def test_context_json_contains_paths_not_configuration_values(self):
+        result = self.context()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {
+            'toolRoot': str(self.checkout.paired), 'primaryRoot': str(self.checkout.primary),
+            'privateRoot': str(self.checkout.private),
+            'configFile': str(self.checkout.private / 'dev_config.json'),
+            'stateDir': str(self.checkout.home / '.dev_temp'),
+        })
+
+    def test_context_explicit_override_does_not_change_private_root(self):
+        override = self.checkout.root / 'explicit settings.json'
+        environment = {'DEV_CONFIG_OVERRIDE': str(override)}
+        for field, expected in (('configFile', override), ('privateRoot', self.checkout.private)):
+            with self.subTest(field=field):
+                result = self.context('--field', field, environment=environment)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), str(expected))
+
+    def test_credentials_and_comment_history_stay_in_actual_home(self):
+        result = self.checkout.module_python(
+            'import dev\n'
+            'ctx = ("https://example.invalid", "project", "repo", "branch", 17)\n'
+            'print(json.dumps([str(dev.DEV_TEMP_DIR), str(dev.ADO_PAT_FILE), '
+            'str(dev.ADO_TOKEN_CACHE_FILE), str(dev._pr_comment_history_path(ctx).parent)]))\n',
+            cwd=self.checkout.private,
+            environment={'DEV_CONFIG_OVERRIDE': str(self.checkout.private / 'dev_config.json')})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state = self.checkout.home / '.dev_temp'
+        self.assertEqual(json.loads(result.stdout), [
+            str(state), str(state / 'ado_pat.txt'), str(state / 'ado_token_cache.json'),
+            str(state / 'pr-comment-history')])
+
+    def test_credential_helper_uses_stable_primary_not_linked_launcher(self):
+        result = self.checkout.module_python(
+            'import dev\nprint(dev._ado_credential_helper_value())\n',
+            tool=self.checkout.paired, cwd=self.checkout.private)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(shlex.split(result.stdout.strip()[1:]), [
+            sys.executable, str(self.checkout.primary / 'dev.py'), 'ado', 'credential-helper'])
+
+    def test_init_creates_private_hook_in_worktree_not_home(self):
+        result = self.checkout.module_python(
+            'import dev\n'
+            'dev._init_env_stub()\n'
+            'print(json.dumps(str(dev._env_path())))\n', cwd=self.checkout.private)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        hook = Path(json.loads(result.stdout.splitlines()[-1]))
+        self.assertEqual(hook.parent, self.checkout.private / 'dev_env')
+        self.assertTrue(hook.is_file())
+        self.assertFalse((self.checkout.home / 'dev_env').exists())
+
+    def test_standalone_credential_helper_uses_its_own_stable_primary(self):
+        primary, linked = self.checkout.standalone_pair()
+        self.checkout.copy_modules(linked)
+        standalone_home = self.checkout.root / 'standalone user home'
+        standalone_home.mkdir()
+        result = self.checkout.module_python(
+            'import dev\nprint(dev._ado_credential_helper_value())\n', tool=linked, cwd=linked,
+            environment={'HOME': str(standalone_home), 'USERPROFILE': str(standalone_home)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(shlex.split(result.stdout.strip()[1:]), [
+            sys.executable, str(primary / 'dev.py'), 'ado', 'credential-helper'])
 
 
 class TestCmdRepoOldIdentity(unittest.TestCase):
@@ -802,8 +893,8 @@ class TestShellWorkspace(unittest.TestCase):
         self.home = Path(self.temp.name)
         tool = self.home / 'dev_cli'
         (tool / 'shell').mkdir(parents=True)
-        for name in ('dev', 'dev.py', 'configuration.py', 'diff_view.py', 'environments.py', 'terminal.py',
-                     'dev_config.json', 'shell/zsh.sh'):
+        for name in ('dev', 'dev.py', 'configuration.py', 'checkouts.py', 'diff_view.py', 'environments.py', 'terminal.py',
+                     'dev_config.json', 'shell/zsh.sh', 'shell/context.sh'):
             shutil.copy2(Path(__file__).parent / name, tool / name)
         (tool / 'dev').write_text(
             f'#!/bin/sh\nexec "{sys.executable}" "{tool / "dev.py"}" "$@"\n')
@@ -969,6 +1060,15 @@ class TestCmdInit(unittest.TestCase):
         bashrc.write_text(original)
         self.assertEqual(dev._init_unix(), 0)
         self.assertEqual(bashrc.read_text(), original)
+
+    def test_existing_legacy_redirects_are_not_duplicated(self):
+        for source, legacy in dev.LEGACY_PROFILE_SOURCES.items():
+            with self.subTest(source=source):
+                profile = self.home / 'legacy-profile'
+                original = f'# keep custom settings\n{legacy}\n'
+                profile.write_text(original, encoding='utf-8')
+                dev._ensure_profile_source(profile, source)
+                self.assertEqual(profile.read_text(encoding='utf-8'), original)
 
     @patch.dict(os.environ, {'SHELL': '/bin/bash'})
     @patch('subprocess.run')

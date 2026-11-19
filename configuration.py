@@ -1,15 +1,14 @@
 """Shared configuration loading for bootstrap and CLI commands."""
 
 import json
-import os
 from pathlib import Path
-import re
+
+import checkouts
 
 
 def expand_config_path(value):
     """Expand home and environment variables, including $HOME on Windows."""
-    value = re.sub(r'\$(?:HOME\b|\{HOME\})', lambda _: str(Path.home()), value)
-    return os.path.expandvars(os.path.expanduser(value))
+    return checkouts.expand_config_path(value)
 
 
 def load_jsonc(path):
@@ -52,8 +51,7 @@ def load_jsonc(path):
 
 def resolve_override_config_file(script_dir):
     """Resolve the user override without depending on the command dispatcher."""
-    override = os.getenv('DEV_CONFIG_OVERRIDE')
-    return Path(expand_config_path(override)) if override else script_dir.parent / 'dev_config.json'
+    return checkouts.resolve_context(script_dir).config_file
 
 
 def load_config(sample=None, override=None):

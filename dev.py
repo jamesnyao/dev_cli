@@ -25,6 +25,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import ai
+import checkouts
 import configuration
 import diff_view
 import environments
@@ -148,7 +149,7 @@ def _resolve_override_config_file():
 
 OVERRIDE_CONFIG_FILE = _resolve_override_config_file()
 CONFIG_DIR = OVERRIDE_CONFIG_FILE.parent
-DEV_TEMP_DIR = CONFIG_DIR / '.dev_temp'  # local-only: secrets and caches, never tracked
+DEV_TEMP_DIR = Path.home().resolve() / '.dev_temp'
 ADO_PAT_FILE = DEV_TEMP_DIR / 'ado_pat.txt'
 ADO_TOKEN_CACHE_FILE = DEV_TEMP_DIR / 'ado_token_cache.json'
 ADO_TOKEN_CACHE_SECONDS = 2400  # 40 minute fallback when JWT exp can't be parsed
@@ -1523,7 +1524,7 @@ def cmd_set(args):
 def cmd_config_get(args):
     """Print a dotted-path value from the merged config (e.g. `identity.gitEmail`):
     SAMPLE_CONFIG_FILE (dev_cli/dev_config.json) overridden by
-    OVERRIDE_CONFIG_FILE (a private dev_config.json one level up).
+    OVERRIDE_CONFIG_FILE (the selected private checkout's dev_config.json).
 
     Lets non-Python callers (shell/PowerShell setup scripts) read the same
     config dev.py uses, instead of hardcoding personal values. Exits 1 with
@@ -1939,18 +1940,30 @@ def cmd_repo_old(args):
 # Init Command
 # =============================================================================
 
-BASHRC_SOURCE_LINE = '[ -f "$HOME/dev_cli/shell/bash.sh" ] && source "$HOME/dev_cli/shell/bash.sh"'
-ZSHRC_SOURCE_LINE = '[[ -f "$HOME/dev_cli/shell/zsh.sh" ]] && source "$HOME/dev_cli/shell/zsh.sh"'
-PSRC_SOURCE_LINE = '. "$HOME\\dev_cli\\shell\\profile.ps1"'
+BASHRC_SOURCE_LINE = (
+    '_dev_rc_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"\n'
+    '[ -f "$_dev_rc_root/dev_cli/shell/bash.sh" ] && source "$_dev_rc_root/dev_cli/shell/bash.sh"\n'
+    'unset _dev_rc_root')
+ZSHRC_SOURCE_LINE = (
+    '_dev_rc_root="${${(%):-%N}:A:h}"\n'
+    '[[ -f "$_dev_rc_root/dev_cli/shell/zsh.sh" ]] && source "$_dev_rc_root/dev_cli/shell/zsh.sh"\n'
+    'unset _dev_rc_root')
+PSRC_SOURCE_LINE = '. "$PSScriptRoot\\dev_cli\\shell\\profile.ps1"'
 PSRC_CONTENT = '. "$HOME\\.psrc.ps1"\n'
+LEGACY_PROFILE_SOURCES = {
+    BASHRC_SOURCE_LINE: '[ -f "$HOME/dev_cli/shell/bash.sh" ] && source "$HOME/dev_cli/shell/bash.sh"',
+    ZSHRC_SOURCE_LINE: '[[ -f "$HOME/dev_cli/shell/zsh.sh" ]] && source "$HOME/dev_cli/shell/zsh.sh"',
+    PSRC_SOURCE_LINE: '. "$HOME\\dev_cli\\shell\\profile.ps1"',
+}
 
 
 def _ensure_profile_source(path, source):
     """Append a missing redirect without replacing an existing shell profile."""
     content = path.read_text(encoding='utf-8') if path.exists() else ''
-    if source.strip() not in content:
+    candidates = (source.strip(), LEGACY_PROFILE_SOURCES.get(source, source).strip())
+    if not any(candidate in content for candidate in candidates):
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open('a', encoding='utf-8') as profile:
+        with path.open('a', encoding='utf-8', newline='\n') as profile:
             profile.write(f"\n{source.strip()}\n" if content else f"{source.strip()}\n")
 
 
@@ -2055,7 +2068,7 @@ def _env_path():
         'darwin': 'env_mac.sh',
         'linux': 'env_linux.sh',
     }[get_os_type()]
-    return Path.home() / 'dev_env' / name
+    return checkouts.resolve_context(SCRIPT_DIR).private_root / 'dev_env' / name
 
 
 def _init_env_stub(env_path=None):
@@ -2124,7 +2137,7 @@ def cmd_init(args):
             return rc
         if config.get('defaultShell', 'system') == 'bash':
             _init_bash()
-            rc = _init_env_stub(Path.home() / 'dev_env' / 'env_windows.sh')
+            rc = _init_env_stub(_env_path().with_name('env_windows.sh'))
             if rc != 0:
                 return rc
     rc = _init_env_stub()
@@ -2156,6 +2169,20 @@ def cmd_python(args):
     return 0
 
 
+def cmd_config_context(args):
+    """Print derived checkout paths without exposing configuration values."""
+    context = checkouts.resolve_context(SCRIPT_DIR)
+    paths = {
+        'toolRoot': str(context.tool_root),
+        'primaryRoot': str(context.primary_root),
+        'privateRoot': str(context.private_root),
+        'configFile': str(context.config_file),
+        'stateDir': str(context.state_dir),
+    }
+    print(paths[args.field] if args.field else json.dumps(paths, indent=2))
+    return 0
+
+
 def cmd_test(args):
     """Run the full unit suite and lint the production Python modules."""
     test_file = SCRIPT_DIR / 'test_dev.py'
@@ -2172,7 +2199,7 @@ def cmd_test(args):
 
     print(f"\n{Colors.BLUE}Running pylint...{Colors.NC}", flush=True)
     lint = subprocess.run(
-        [sys.executable, '-u', '-m', 'pylint', 'dev.py', 'configuration.py',
+        [sys.executable, '-u', '-m', 'pylint', 'dev.py', 'checkouts.py', 'configuration.py',
          'environments.py', 'runtime.py', 'ai.py', 'terminal.py', 'diff_view.py'],
         cwd=str(SCRIPT_DIR))
     return lint.returncode
@@ -2277,7 +2304,8 @@ def _ado_credential_helper_value():
     """
     home_copy = Path.home() / 'dev_cli' / 'dev.py'
     running = Path(__file__).resolve()
-    dev_py = home_copy if home_copy.exists() else running
+    dev_py = (home_copy if home_copy.exists()
+              else checkouts.resolve_context(running.parent).primary_root / 'dev.py')
     py = shlex.quote(sys.executable or 'python3')
     script = shlex.quote(str(dev_py))
     return f'!{py} {script} ado credential-helper'
@@ -3531,6 +3559,8 @@ def main():
     config_sub = config_parser.add_subparsers(dest='config_command')
     config_get_p = config_sub.add_parser('get', help='Print a dotted-path value (e.g. identity.gitEmail)')
     config_get_p.add_argument('key')
+    context_p = config_sub.add_parser('context', help='Show selected checkout and state paths')
+    context_p.add_argument('--field', choices=['toolRoot', 'primaryRoot', 'privateRoot', 'configFile', 'stateDir'])
 
     set_parser = subparsers.add_parser(
         'set', help='Switch this shell to a named environment from dev_config.json (no name lists them)')
@@ -3588,6 +3618,8 @@ def main():
     elif args.command == 'config':
         if args.config_command == 'get':
             return cmd_config_get(args)
+        elif args.config_command == 'context':
+            return cmd_config_context(args)
         else:
             config_parser.print_help()
     elif args.command == 'set':

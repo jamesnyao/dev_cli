@@ -18,6 +18,7 @@ if __name__ == '__main__':
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import configuration  # pylint: disable=wrong-import-position
+import checkouts  # pylint: disable=wrong-import-position
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -206,6 +207,12 @@ def main(arguments=None):
         if not isinstance(decoded, list) or not all(isinstance(value, str) for value in decoded):
             raise ValueError('Encoded arguments must be an array of strings')
         return main(decoded)
+    context = checkouts.resolve_context(SCRIPT_DIR)
+    if context.tool_root != SCRIPT_DIR:
+        command = [sys.executable, '-X', 'utf8', '-I', str(context.tool_root / 'runtime.py'), mode, *arguments]
+        if os.name != 'nt':
+            os.execve(sys.executable, command, os.environ.copy())
+        return subprocess.run(command, check=False).returncode
     if mode == '--run-dev':
         sys.path.insert(0, str(SCRIPT_DIR))
         sys.argv = [str(SCRIPT_DIR / 'dev.py'), *arguments]

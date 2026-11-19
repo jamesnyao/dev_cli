@@ -30,6 +30,14 @@ repository's bundled defaults to store personal settings. `DEV_CONFIG_OVERRIDE`
 can select another override. Use `dev config get <dotted.key>` to inspect merged
 settings without printing credentials or the entire configuration.
 
+For native Git worktrees, the installed launchers select only registered,
+related tool/private checkouts from cwd. Explicit linked launchers keep their
+checkout. Private profiles and hooks follow the selected private worktree;
+credentials, caches, installed skill links, and user-level CLI state stay in home.
+Use `dev config context` or `dev config context --field configFile` for derived
+paths; do not infer them from the linked tool's parent. An explicit
+`DEV_CONFIG_OVERRIDE` wins without relocating user state or private assets.
+
 - `pythonVersion` selects an exact managed Python version.
   Run `dev python update` after changing it; `dev python path` prints its directory.
 - `workspaceRoots` maps machine names to workspace paths. `DEVCONFIG` selects

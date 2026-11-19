@@ -84,6 +84,25 @@ Add a `workspaceRoots` entry for each machine and set `DEVCONFIG` to its key.
 See the annotated [configuration defaults](dev_config.json) for other settings.
 Keep `.dev_temp/` out of Git; it holds local runtimes, caches, and credentials.
 
+### Worktrees
+
+The installed `dev` and `ai` launchers automatically use a registered, related
+tool worktree containing the current directory. With a private Git superproject,
+its worktrees select their own configuration, AI profiles, and custom hooks;
+an initialized, related tool submodule is used when present. Without that child,
+the primary tool remains available with the private worktree's configuration.
+An explicitly invoked linked launcher stays on that checkout. Unrelated Git
+repositories never become executable tool roots.
+
+`DEV_CONFIG_OVERRIDE` still takes precedence. Run `dev config context` to see
+derived paths, or `dev config context --field configFile` for just one path.
+Credentials, plugin/runtime caches, installed skill links, and user-level CLI
+state remain in the actual user's home; no home or authentication directory is
+redirected into a worktree. Shell startup bypasses canonical cached answers in
+worktrees or with an explicit override; warm canonical shells still need no Python.
+Credentials previously stored beside a non-home override are not copied;
+reconfigure them through `dev ado set-pat` when needed.
+
 ### Named environments
 
 Define `environments` in `~/dev_config.json` to switch the current shell

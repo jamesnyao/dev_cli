@@ -30,15 +30,20 @@ if [[ "$platform" == "linux" ]]; then
 fi
 
 # Dev CLI
-export PATH="$HOME/dev_cli:$HOME/.local/bin:$PATH"
+_dev_cli_root="${${(%):-%N}:A:h:h}"
+export PATH="$_dev_cli_root:$HOME/.local/bin:$PATH"
+_dev_cli() {
+  "$_dev_cli_root/dev" "$@"
+}
+source "$_dev_cli_root/shell/context.sh" || return
 # `dev set <name>` prints shell code that must run in this shell.
 dev() {
   if [[ "$1" == set && $# -ge 2 && "$2" != -* ]]; then
     local dev_script
-    dev_script="$(command dev "$@" --shell zsh)" || return
+    dev_script="$(_dev_cli "$@" --shell zsh)" || return
     eval "$dev_script"
   else
-    command dev "$@"
+    _dev_cli "$@"
   fi
 }
 dev_python="$(dev python path)" || return
@@ -53,9 +58,9 @@ if [[ -z "$DEV_PROMPT_USER" ]]; then
 fi
 # Skills and instructions in the default AI profile load in every Copilot session;
 # `ai --profile <name>` replaces them for that launch.
-if [[ -d "$HOME/dev_ai/default" ]]; then
-  export COPILOT_SKILLS_DIRS="$HOME/dev_ai/default/skills"
-  export COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$HOME/dev_ai/default"
+if [[ -d "$_dev_private_root/dev_ai/default" ]]; then
+  export COPILOT_SKILLS_DIRS="$_dev_private_root/dev_ai/default/skills"
+  export COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$_dev_private_root/dev_ai/default"
 fi
 
 # zoxide (replaces cd)
@@ -81,9 +86,9 @@ command -v fzf &>/dev/null && source <(fzf --zsh) 2>/dev/null
 
 # Private, work-specific setup -- runs last so it can override anything above.
 if [[ "$platform" == "darwin" ]]; then
-  dev_hook="$HOME/dev_env/env_mac.sh"
+  dev_hook="$_dev_private_root/dev_env/env_mac.sh"
 else
-  dev_hook="$HOME/dev_env/env_linux.sh"
+  dev_hook="$_dev_private_root/dev_env/env_linux.sh"
 fi
 if [[ -f "$dev_hook" ]]; then
   source "$dev_hook"

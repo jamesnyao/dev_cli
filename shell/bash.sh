@@ -8,19 +8,21 @@ esac
 _dev_cli_bash_loaded=1
 
 export platform="$(uname | tr '[:upper:]' '[:lower:]')"
-export PATH="$HOME/dev_cli:$HOME/.local/bin:$PATH"
+_dev_cli_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)" || return
+export PATH="$_dev_cli_root:$HOME/.local/bin:$PATH"
 case "$platform" in
     mingw*|msys*|cygwin*)
         _dev_cli() {
-            "$HOME/dev_cli/dev.cmd" "$@"
+            "$_dev_cli_root/dev.cmd" "$@"
         }
         ;;
     *)
         _dev_cli() {
-            command dev "$@"
+            "$_dev_cli_root/dev" "$@"
         }
         ;;
 esac
+source "$_dev_cli_root/shell/context.sh" || return
 # `dev set <name>` prints shell code that must run in this shell.
 dev() {
     if [[ "$1" == set && $# -ge 2 && "$2" != -* ]]; then
@@ -36,10 +38,14 @@ export DEVCONFIG="${DEVCONFIG:-example-machine}"
 # Startup answers from `dev` are cached per DEVCONFIG until a config file
 # changes, so warm shells start without launching Python. Hooks can use it too.
 dev_cached() {
-    local key="${DEVCONFIG}_$*"
+    if (( _dev_contextual )) || [[ -n "${DEV_CONFIG_OVERRIDE:-}" || "$PWD" != "$_dev_startup_dir" ]]; then
+        dev "$@"
+        return
+    fi
+    local key="${_dev_cli_root}_${DEVCONFIG}_$*"
     local cache="$HOME/.dev_temp/dev_cli/profile-cache/${key//[^A-Za-z0-9._-]/_}"
     if [[ -f "$cache" && ! "$HOME/dev_config.json" -nt "$cache"
-          && ! "$HOME/dev_cli/dev_config.json" -nt "$cache" ]]; then
+          && ! "$_dev_cli_root/dev_config.json" -nt "$cache" ]]; then
         printf '%s\n' "$(<"$cache")"
         return
     fi
@@ -73,9 +79,9 @@ if [[ -z "$DEV_PROMPT_USER" ]]; then
 fi
 # Skills and instructions in the default AI profile load in every Copilot session;
 # `ai --profile <name>` replaces them for that launch.
-if [[ -d "$HOME/dev_ai/default" ]]; then
-    COPILOT_SKILLS_DIRS="$HOME/dev_ai/default/skills"
-    COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$HOME/dev_ai/default"
+if [[ -d "$_dev_private_root/dev_ai/default" ]]; then
+    COPILOT_SKILLS_DIRS="$_dev_private_root/dev_ai/default/skills"
+    COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$_dev_private_root/dev_ai/default"
     case "$platform" in
         mingw*|msys*|cygwin*)
             COPILOT_SKILLS_DIRS="$(cygpath -w "$COPILOT_SKILLS_DIRS")" || return
@@ -130,15 +136,15 @@ if [[ -z ${BLE_VERSION-} && ${BASH_VERSINFO[0]} -ge 4
       && -f "$HOME/.local/share/blesh/ble.sh" ]]; then
     export USER="${USER:-${USERNAME:-$(id -un)}}"
     source -- "$HOME/.local/share/blesh/ble.sh" --attach=none \
-        --rcfile "$HOME/dev_cli/shell/blerc.sh" || return
+        --rcfile "$_dev_cli_root/shell/blerc.sh" || return
 fi
 
 if [[ "$platform" == mingw* || "$platform" == msys* || "$platform" == cygwin* ]]; then
-    dev_hook="$HOME/dev_env/env_windows.sh"
+    dev_hook="$_dev_private_root/dev_env/env_windows.sh"
 elif [[ "$platform" == "darwin" ]]; then
-    dev_hook="$HOME/dev_env/env_mac.sh"
+    dev_hook="$_dev_private_root/dev_env/env_mac.sh"
 else
-    dev_hook="$HOME/dev_env/env_linux.sh"
+    dev_hook="$_dev_private_root/dev_env/env_linux.sh"
 fi
 if [[ -f "$dev_hook" ]]; then
     source "$dev_hook" || return

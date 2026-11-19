@@ -313,7 +313,9 @@ source "$TEST_BLERC"
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)
             tool = home / 'dev_cli'
-            tool.mkdir()
+            (tool / 'shell').mkdir(parents=True)
+            for name in ('bash.sh', 'context.sh'):
+                shutil.copy2(ROOT / 'shell' / name, tool / 'shell')
             (tool / 'dev').write_text(
                 '#!/bin/sh\ncase "$1" in\n'
                 'python) printf "%s/dev_cli\\n" "$HOME";;\n'
@@ -330,7 +332,7 @@ source "$TEST_BLERC"
             environment = dict(os.environ, HOME=str(home), DEVCONFIG='example-machine',
                                PATH='/usr/bin:/bin')
             command = ['/bin/bash', '--noprofile', '--norc', '-ic',
-                       f'source "{ROOT / "shell" / "bash.sh"}" || exit $?; printf "%s\\n" "$PWD"']
+                       f'source "{tool / "shell" / "bash.sh"}" || exit $?; printf "%s\\n" "$PWD"']
             for start, hook_cd, expected in (
                     (home, '', workspace), (project, '', project),
                     (home, 'builtin cd "$DEV/project"\n', project)):
@@ -360,6 +362,7 @@ source "$TEST_BLERC"
             tool = home / 'dev_cli'
             (tool / 'shell').mkdir(parents=True)
             shutil.copy2(ROOT / 'shell' / 'bash.sh', tool / 'shell')
+            shutil.copy2(ROOT / 'shell' / 'context.sh', tool / 'shell')
             (tool / 'dev').write_text(
                 '#!/bin/sh\ncase "$1" in\n'
                 'python) printf "%s/dev_cli\\n" "$HOME";;\n'
@@ -451,6 +454,7 @@ printf '%s\0' "${PS1@P}"
             tool = home / 'dev_cli'
             (tool / 'shell').mkdir(parents=True)
             shutil.copy2(ROOT / 'shell' / 'bash.sh', tool / 'shell')
+            shutil.copy2(ROOT / 'shell' / 'context.sh', tool / 'shell')
             managed = home / 'managed'
             managed.mkdir()
             (managed / 'python').write_text('#!/bin/sh\nexit 0\n')
@@ -502,6 +506,7 @@ printf '%s\0' "${PS1@P}"
             tool = home / 'dev_cli'
             (tool / 'shell').mkdir(parents=True)
             shutil.copy2(ROOT / 'shell' / 'bash.sh', tool / 'shell')
+            shutil.copy2(ROOT / 'shell' / 'context.sh', tool / 'shell')
             (tool / 'dev').write_text(
                 '#!/bin/sh\nprintf "%s\\n" "$1" >> "$HOME/dev-calls"\ncase "$1" in\n'
                 'python) printf "%s/dev_cli\\n" "$HOME";;\n'
@@ -535,6 +540,7 @@ printf '%s\0' "${PS1@P}"
             tool = home / 'dev_cli'
             (tool / 'shell').mkdir(parents=True)
             shutil.copy2(ROOT / 'shell' / 'bash.sh', tool / 'shell')
+            shutil.copy2(ROOT / 'shell' / 'context.sh', tool / 'shell')
             (tool / 'dev').write_text(
                 '#!/bin/sh\ncase "$1" in\n'
                 'python) printf "%s/dev_cli\\n" "$HOME";;\n'
@@ -563,7 +569,9 @@ printf '%s\0' "${PS1@P}"
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)
             tool = home / 'dev_cli'
-            tool.mkdir()
+            (tool / 'shell').mkdir(parents=True)
+            for name in ('bash.sh', 'context.sh'):
+                shutil.copy2(ROOT / 'shell' / name, tool / 'shell')
             (tool / 'dev').write_text(
                 '#!/bin/sh\ncase "$1" in\n'
                 'python) printf "%s/dev_cli\\n" "$HOME";;\n'
@@ -577,7 +585,7 @@ printf '%s\0' "${PS1@P}"
             (hooks / 'env.sh').write_text('echo "must not run zsh settings in bash"; return 42\n')
             result = subprocess.run(
                 ['/bin/bash', '--noprofile', '--norc', '-ic',
-                 f'source "{ROOT / "shell" / "bash.sh"}" || exit $?; printf "bash-retained\\n"'],
+                 f'source "{tool / "shell" / "bash.sh"}" || exit $?; printf "bash-retained\\n"'],
                 env=dict(os.environ, HOME=str(home), DEVCONFIG='example-machine',
                          PATH='/usr/bin:/bin'), text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -594,6 +602,7 @@ printf '%s\0' "${PS1@P}"
                 tool = home / 'dev_cli'
                 (tool / 'shell').mkdir(parents=True)
                 shutil.copy2(ROOT / 'shell' / f'{shell_name}.sh', tool / 'shell')
+                shutil.copy2(ROOT / 'shell' / 'context.sh', tool / 'shell')
                 managed = home / 'managed python'
                 override = home / 'custom python'
                 tools = home / 'bin'

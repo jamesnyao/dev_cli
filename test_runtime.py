@@ -18,6 +18,7 @@ from unittest.mock import patch
 import configuration
 import runtime
 import terminal
+from test_checkouts import CheckoutTestCase
 
 
 class RuntimeTests(unittest.TestCase):
@@ -31,6 +32,7 @@ class RuntimeTests(unittest.TestCase):
         self.home_patch = patch('runtime.Path.home', return_value=self.home)
         self.home_patch.start()
         self.addCleanup(self.home_patch.stop)
+        self.enterContext(patch.object(runtime.checkouts, '_git', return_value=None))
         self.pin = {'pythonVersion': '3.12.10'}
         self.python = self.root / 'venvs' / '3.12.10' / (
             'Scripts/python.exe' if os.name == 'nt' else 'bin/python')
@@ -294,6 +296,54 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(command[:6], [
             str(self.python), '-X', 'utf8', '-I', str(runtime.SCRIPT_DIR / 'runtime.py'), '--run-dev'])
         self.assertEqual(command[6:], ['config', 'get', 'pythonVersion'])
+
+
+class TestCheckoutRuntime(CheckoutTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.checkout.copy_modules(cls.checkout.primary)
+        marker = (
+            'import json, sys\nfrom pathlib import Path\n'
+            'print(json.dumps({"runtime": str(Path(__file__).resolve()), '
+            '"arguments": sys.argv[1:], "cwd": str(Path.cwd())}))\n'
+            'sys.exit(29)\n')
+        for tool in (cls.checkout.linked, cls.checkout.paired, cls.checkout.foreign):
+            (tool / 'runtime.py').write_text(marker, encoding='utf-8')
+
+    def redirect(self, arguments, *, cwd):
+        code = (
+            'import runtime\n'
+            'def unexpected_provisioning():\n'
+            '    raise AssertionError("launcher chose Python before checkout redirection")\n'
+            'runtime.ensure_python = unexpected_provisioning\n'
+            f'sys.exit(runtime.main({arguments!r}))\n')
+        return self.checkout.module_python(code, cwd=cwd)
+
+    def test_managed_tool_runtime_redirects_before_selecting_python(self):
+        arguments = ['--dev', 'config', 'get', 'identity.username', '', 'value with spaces']
+        result = self.redirect(arguments, cwd=self.checkout.linked)
+        self.assertEqual(result.returncode, 29, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {
+            'runtime': str(self.checkout.linked / 'runtime.py'),
+            'arguments': arguments, 'cwd': str(self.checkout.linked)})
+
+    def test_parent_worktree_runtime_redirects_ai_to_paired_tool(self):
+        arguments = ['--dev', 'ai', '--', '--profile', 'work', '-p', 'fixture prompt only']
+        result = self.redirect(arguments, cwd=self.checkout.private)
+        self.assertEqual(result.returncode, 29, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {
+            'runtime': str(self.checkout.paired / 'runtime.py'),
+            'arguments': arguments, 'cwd': str(self.checkout.private)})
+
+    def test_foreign_runtime_is_not_executed(self):
+        code = (
+            'import runtime\n'
+            'runtime.ensure_python = lambda: Path(sys.executable)\n'
+            'sys.exit(runtime.main(["--python", "-c", "print(\\\"stable interpreter\\\")"]))\n')
+        result = self.checkout.module_python(code, cwd=self.checkout.foreign)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'stable interpreter')
 
 
 class LauncherTests(unittest.TestCase):

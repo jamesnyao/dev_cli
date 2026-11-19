@@ -14,6 +14,7 @@ import urllib.error
 
 import ai
 import dev
+from test_checkouts import CheckoutTestCase
 
 
 ROOT = Path(__file__).resolve().parent
@@ -30,6 +31,7 @@ class TestAI(unittest.TestCase):
             load_config=Mock(return_value={'ai': {'provider': 'none'}}), get_base_path=Mock(return_value=self.home),
             emit_ok=Mock(), emit_info=Mock(), emit_warn=Mock(), emit_error=Mock())
         self.enterContext(patch.object(ai.Path, 'home', return_value=self.home))
+        self.enterContext(patch.object(ai.checkouts, '_git', return_value=None))
         self.enterContext(patch.dict(os.environ, {
             'LOCALAPPDATA': str(self.home / 'local'),
             'ProgramFiles': str(self.home / 'programs'),
@@ -734,6 +736,66 @@ class TestAI(unittest.TestCase):
                 self.assertEqual(self.setup_ai({'ai': {'provider': 'none', 'profiles': profiles}}), 1)
                 self.dev.emit_error.assert_called_once()
         self.run.assert_not_called()
+
+
+class TestCheckoutAI(CheckoutTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.checkout.copy_modules(cls.checkout.primary)
+        cls.checkout.copy_modules(cls.checkout.paired)
+        (cls.checkout.primary / 'skills').mkdir()
+
+    def test_private_profiles_follow_parent_worktree_but_plugin_cache_stays_home(self):
+        result = self.checkout.module_python(
+            'import ai\nprint(json.dumps([str(ai.profiles_root()), str(ai.plugin_cache())]))\n',
+            cwd=self.checkout.private)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), [
+            str(self.checkout.private / 'dev_ai'),
+            str(self.checkout.home / '.dev_temp' / 'dev_cli' / 'plugins')])
+
+    def test_bundled_skill_link_targets_stable_primary_from_linked_tool(self):
+        result = self.checkout.module_python(
+            'import ai\nfrom unittest.mock import Mock, patch\n'
+            'with patch.object(ai, "_create_directory_link") as link:\n'
+            '    ai._link_skills(Mock())\n'
+            '    print(json.dumps([str(path) for path in link.call_args.args]))\n',
+            tool=self.checkout.paired, cwd=self.checkout.private)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), [
+            str(self.checkout.home / '.agents' / 'skills'), str(self.checkout.primary / 'skills')])
+
+    def test_managed_ai_launch_uses_private_profile_without_moving_copilot_home(self):
+        copilot_home = self.checkout.home / 'custom copilot state'
+        result = self.checkout.module_python(
+            'import ai, subprocess\nfrom unittest.mock import Mock, patch\n'
+            'real_run = subprocess.run\nlaunches = []\n'
+            'def run(command, **kwargs):\n'
+            '    if command[0] == "fixture-copilot":\n'
+            '        keys = ("COPILOT_HOME", "COPILOT_SKILLS_DIRS", "COPILOT_CUSTOM_INSTRUCTIONS_DIRS")\n'
+            '        launches.append({"command": command, "env": {key: kwargs["env"][key] for key in keys}})\n'
+            '        return subprocess.CompletedProcess(command, 0)\n'
+            '    if command[0] == "git":\n'
+            '        return real_run(command, **kwargs)\n'
+            '    raise AssertionError(command)\n'
+            'with patch.object(ai, "_copilot_command", return_value="fixture-copilot"), '
+            'patch.object(ai.subprocess, "run", side_effect=run):\n'
+            '    status = ai.run_chat({"ai": {"provider": "ghcopilot"}}, '
+            '["-p", "fixture only"], Path.cwd(), Mock())\n'
+            'print(json.dumps({"status": status, "launches": launches}))\n',
+            cwd=self.checkout.private, environment={'COPILOT_HOME': str(copilot_home)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output['status'], 0)
+        self.assertEqual(len(output['launches']), 1)
+        launch = output['launches'][0]
+        self.assertEqual(launch['command'][-2:], ['-p', 'fixture only'])
+        self.assertEqual(launch['env']['COPILOT_HOME'], str(copilot_home))
+        self.assertEqual(launch['env']['COPILOT_SKILLS_DIRS'],
+                         str(self.checkout.private / 'dev_ai' / 'default' / 'skills'))
+        self.assertEqual(launch['env']['COPILOT_CUSTOM_INSTRUCTIONS_DIRS'],
+                         str(self.checkout.private / 'dev_ai' / 'default'))
 
 
 class TestChatCommand(unittest.TestCase):

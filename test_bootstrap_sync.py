@@ -57,6 +57,7 @@ class BootstrapFixture(unittest.TestCase):
             'dev_config.json': json.dumps(self.config),
             '.gitignore': (source_path.parent / '.gitignore').read_text(encoding='utf-8'),
             'ai.py': (source_path.parent / 'ai.py').read_text(encoding='utf-8'),
+            'checkouts.py': (source_path.parent / 'checkouts.py').read_text(encoding='utf-8'),
             'configuration.py': (source_path.parent / 'configuration.py').read_text(encoding='utf-8'),
             'diff_view.py': (source_path.parent / 'diff_view.py').read_text(encoding='utf-8'),
             'environments.py': (source_path.parent / 'environments.py').read_text(encoding='utf-8'),
