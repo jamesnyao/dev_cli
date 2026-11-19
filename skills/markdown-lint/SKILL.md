@@ -101,14 +101,24 @@ the entire file must be clean. Prioritize:
   A short document with 3 paragraphs doesn't need 3 `##` headings. Prefer flat
   prose or a single list over deeply nested heading hierarchies.
 
-## Configuration
+## Running Checks
 
-If the repository or workspace has a markdownlint config, pass it explicitly
-when running lint checks:
+Prefer the repository's existing Markdown check or an installed `markdownlint`.
+Do not download packages just to edit Markdown. If the linter is already in npm's
+cache, run it offline:
 
 ```shell
-npx markdownlint-cli -c <path-to>/.markdownlint.json <file-or-glob>
+npm exec --offline --yes --package=markdownlint-cli -- markdownlint --config <config-path> <file-or-glob>
 ```
+
+Pass the repository or workspace markdownlint config explicitly when present;
+omit `--config <config-path>` only when there is no config.
+
+`--offline` is required: `--no-install` alone can still contact the configured
+registry. Do not fall back to bare `npx`, package downloads, or registry and
+authentication changes for Markdown-only work. If no installed or cached linter
+is available, report automated lint as unavailable and review the changed lines
+against the rules above; do not claim the automated check passed.
 
 When wrapping long lines with URLs, put the descriptive link text inline and let
 the URL be the only long element. Never shorten link text to generic words like
