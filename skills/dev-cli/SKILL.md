@@ -204,6 +204,9 @@ an API error must stop work rather than bypass a tag-based stop signal.
 `show-pat`, and `clear-pat` manage a PAT for REST calls. Tokens and PATs live in
 the ignored `~/.dev_temp/`; never print or commit them.
 
+Git flags before the Git subcommand do not need an extra `--`; an explicit
+separator remains supported. A leading `-h` or `--help` shows the wrapper's help.
+
 After modifying dev_cli, run `dev test` from that checkout. It runs the existing
 unit tests and pylint. Validate Windows and Linux (including WSL) independently
 when changing shared launchers or shell integration. Never use real repository

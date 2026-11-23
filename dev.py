@@ -3534,7 +3534,9 @@ def main():
     ado_sub.add_parser('show-pat', help='Show if PAT is configured')
     ado_sub.add_parser('clear-pat', help='Clear stored PAT')
 
-    git_p = ado_sub.add_parser('git', help='Run git with ADO PAT auth')
+    # Git owns its options; NUL cannot occur in a real command-line argument.
+    git_p = ado_sub.add_parser('git', help='Run git with ADO PAT auth',
+                               prefix_chars='\0', add_help=False)
     git_p.add_argument('git_args', nargs=argparse.REMAINDER, help='Git command and arguments')
 
     ado_sub.add_parser('token', help='Get ADO access token (cached)')
@@ -3640,6 +3642,11 @@ def main():
     bg_p.add_argument('payload', help='JSON payload')
 
     args = parser.parse_args()
+
+    if (args.command == 'ado' and args.ado_command == 'git'
+            and args.git_args[:1] in (['-h'], ['--help'])):
+        git_p.print_help()
+        git_p.exit()
 
     if getattr(args, 'no_color', False):
         Colors.configure(False)

@@ -861,6 +861,85 @@ class TestAdoGit(unittest.TestCase):
         self.assertIn('https://dev.azure.com/org/proj/_git/repo', call_args)
 
 
+class TestAdoGitCli(unittest.TestCase):
+
+    def setUp(self):
+        self.token = self.enterContext(patch('dev.get_ado_token', return_value='parser-test-token'))
+        self.enterContext(patch('dev._heal_ado_auth', return_value=None))
+        self.enterContext(patch('dev.trust_claude_workspace'))
+        self.enterContext(patch('dev.get_base_path', return_value='.'))
+        self.colors = self.enterContext(patch('dev.Colors.configure'))
+        self.run = self.enterContext(patch(
+            'dev.subprocess.run', return_value=subprocess.CompletedProcess([], 19)))
+
+    def test_cli_forwards_git_arguments_unchanged(self):
+        cases = (
+            ('subcommand', [], ['status', '--short'], ['status', '--short']),
+            ('directory', [], ['-C', 'repo with spaces', 'status'],
+             ['-C', 'repo with spaces', 'status']),
+            ('ordered-global-options', [],
+             ['--no-pager', '-Couter', '-C', 'inner', '-c', 'example.value=',
+              '-c', 'example.other=a "quoted" value', 'log'],
+             ['--no-pager', '-Couter', '-C', 'inner', '-c', 'example.value=',
+              '-c', 'example.other=a "quoted" value', 'log']),
+            ('flag-only', [], ['--version'], ['--version']),
+            ('wrapper-color-option', ['--no-color'], ['-C', 'repo', 'status'],
+             ['-C', 'repo', 'status']),
+            ('git-color-option', [], ['--no-color', 'status'], ['--no-color', 'status']),
+            ('wrapper-separator', [], ['--', '-C', 'repo', 'status'], ['-C', 'repo', 'status']),
+            ('git-separator', [], ['log', '--', '--help', 'file with spaces'],
+             ['log', '--', '--help', 'file with spaces']),
+            ('new-git-option', [], ['--future-git-option', 'log'], ['--future-git-option', 'log']),
+            ('git-help-after-options', [], ['-C', 'repo', '--help'], ['-C', 'repo', '--help']),
+            ('explicit-git-help', [], ['--', '--help'], ['--help']),
+        )
+        for case, wrapper, arguments, expected in cases:
+            with self.subTest(case=case), patch('sys.argv', ['dev', *wrapper, 'ado', 'git', *arguments]):
+                self.run.reset_mock()
+                self.colors.reset_mock()
+                self.assertEqual(dev.main(), 19)
+                self.run.assert_called_once_with([
+                    'git', '-c', 'http.extraheader=Authorization: Bearer parser-test-token', *expected])
+                if wrapper:
+                    self.colors.assert_called_once_with(False)
+                else:
+                    self.colors.assert_not_called()
+
+    def test_cli_rejects_unknown_wrapper_options(self):
+        for case, arguments in (
+                ('root', ['--unknown-wrapper-option', 'ado', 'git', 'status']),
+                ('ado', ['ado', '--unknown-wrapper-option', 'git', 'status']),
+                ('other-command', ['repo', 'status', '--unknown-wrapper-option'])):
+            with self.subTest(case=case), patch('sys.argv', ['dev', *arguments]), \
+                    patch('sys.stderr', new_callable=StringIO) as error:
+                with self.assertRaises(SystemExit) as raised:
+                    dev.main()
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn('unrecognized arguments', error.getvalue())
+        self.token.assert_not_called()
+        self.run.assert_not_called()
+
+    def test_cli_help_does_not_authenticate(self):
+        for option in ('-h', '--help'):
+            with self.subTest(option=option), patch('sys.argv', ['dev', 'ado', 'git', option]), \
+                    patch('sys.stdout', new_callable=StringIO) as output:
+                with self.assertRaises(SystemExit) as raised:
+                    dev.main()
+                self.assertEqual(raised.exception.code, 0)
+                self.assertIn('usage: dev ado git', output.getvalue())
+        self.token.assert_not_called()
+        self.run.assert_not_called()
+
+    def test_cli_empty_arguments_do_not_authenticate(self):
+        for case, arguments in (('empty', []), ('separator-only', ['--'])):
+            with self.subTest(case=case), patch('sys.argv', ['dev', 'ado', 'git', *arguments]), \
+                    patch('sys.stdout', new_callable=StringIO) as output:
+                self.assertEqual(dev.main(), 1)
+                self.assertIn('Usage: dev ado git', output.getvalue())
+        self.token.assert_not_called()
+        self.run.assert_not_called()
+
+
 class TestParseAdoRemote(unittest.TestCase):
 
     def test_devazure_with_user_prefix(self):
