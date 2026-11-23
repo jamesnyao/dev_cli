@@ -17,7 +17,7 @@ hosting provider, or private configuration.
 working environment across machines, not just repair a one-off missing tool.
 
 As workflows need additional shared tools, confirm each addition with the user
-and onboard it through `dev init` rather than relying on manual installation.
+and onboard it through `dev init` rather than work arounds or relying on manual installation.
 Reuse working installations, verify real functionality, and report setup failures.
 Use the platform's package manager and preserve existing configuration and custom
 hooks. New tool installs belong in initialization, not shell startup; keep
