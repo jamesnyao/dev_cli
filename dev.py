@@ -2036,6 +2036,55 @@ def _init_bash_tools():
     return 0
 
 
+def _init_jq():
+    """Install missing jq with the native package manager and verify it works."""
+    system = get_os_type()
+    search_path = os.environ.get('PATH', os.defpath)
+    if system == 'windows' and os.environ.get('LOCALAPPDATA'):
+        links = Path(os.environ['LOCALAPPDATA']) / 'Microsoft' / 'WinGet' / 'Links'
+        search_path = os.pathsep.join((search_path, str(links)))
+    try:
+        jq = shutil.which('jq', path=search_path)
+        if not jq:
+            commands = {
+                'windows': [
+                    ['winget', 'install', '--id', 'jqlang.jq', '--exact', '--source', 'winget',
+                     '--scope', 'user', '--accept-package-agreements', '--accept-source-agreements',
+                     '--disable-interactivity']],
+                'darwin': [['brew', 'install', 'jq']],
+                'linux': [['apt-get', 'install', '-y', 'jq'], ['dnf', 'install', '-y', 'jq']],
+            }
+            command = next((candidate for candidate in commands[system]
+                            if shutil.which(candidate[0])), None)
+            if command is None:
+                emit_error("Install jq with your OS package manager, then rerun dev init.")
+                return 1
+            prefix = ['sudo'] if system == 'linux' and os.geteuid() != 0 else []  # pylint: disable=no-member
+            if command[0] == 'apt-get':
+                subprocess.run([*prefix, 'apt-get', 'update'], check=True, timeout=300)
+            subprocess.run([*prefix, *command], check=True, timeout=300)
+            jq = shutil.which('jq', path=search_path)
+            if not jq:
+                emit_error("jq is not available after installation; open a new terminal and rerun dev init.")
+                return 1
+        version = subprocess.run(
+            [jq, '--version'], check=True, capture_output=True, text=True, timeout=10).stdout.strip()
+        if not version.startswith('jq-'):
+            emit_error("jq --version returned unexpected output.")
+            return 1
+        query = subprocess.run(
+            [jq, '-e', '.value == 42'], input='{"value":42}\n',
+            check=True, capture_output=True, text=True, timeout=10)
+        if query.stdout.strip() != 'true':
+            emit_error("jq JSON verification returned unexpected output.")
+            return 1
+    except (OSError, subprocess.SubprocessError) as error:
+        emit_error(f"jq setup failed: {error}")
+        return 1
+    emit_ok(f"{version} verified ({jq})")
+    return 0
+
+
 def _init_config():
     """Create the private override config from the sample, prompting for a
     username when one isn't already configured and the terminal is interactive."""
@@ -2121,9 +2170,12 @@ def _init_ai():
 
 
 def cmd_init(args):
-    """Provision pinned Python, then register profiles and last-running hooks."""
+    """Bootstrap shared development tools, profiles, and last-running hooks."""
     python = runtime.ensure_python()
     rc = _init_config()
+    if rc != 0:
+        return rc
+    rc = _init_jq()
     if rc != 0:
         return rc
     system = get_os_type()

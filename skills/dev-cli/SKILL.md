@@ -13,9 +13,15 @@ hosting provider, or private configuration.
 
 ## Configuration and onboarding
 
-`dev init` provisions the exact configured Python version, registers shell
-profiles, creates missing custom environment hooks, and applies optional AI
-setup. Rerunning it preserves existing configuration and custom hooks.
+`dev init` is the shared tool-onboarding entry point. Use it to bootstrap a
+working environment across machines, not just repair a one-off missing tool.
+
+As workflows need additional shared tools, confirm each addition with the user
+and onboard it through `dev init` rather than relying on manual installation.
+Reuse working installations, verify real functionality, and report setup failures.
+Use the platform's package manager and preserve existing configuration and custom
+hooks. New tool installs belong in initialization, not shell startup; keep
+project-specific dependencies in their owning environments.
 
 For Bash, `dev init` provisions ble.sh on Linux/macOS and on Windows when
 `defaultShell` is `"bash"`. Bash 4+ terminal sessions get gray, history-only

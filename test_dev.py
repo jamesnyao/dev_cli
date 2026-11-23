@@ -1200,6 +1200,101 @@ class TestCmdInit(unittest.TestCase):
                 self.assertIn('setup failed', error.call_args.args[0])
 
 
+class TestInitJq(unittest.TestCase):
+
+    def setUp(self):
+        self.which = self.enterContext(patch('dev.shutil.which', return_value='existing-jq'))
+        self.run = self.enterContext(patch('dev.subprocess.run', side_effect=self.run_command))
+        self.error = self.enterContext(patch('dev.emit_error'))
+        self.enterContext(patch('dev.emit_ok'))
+
+    @staticmethod
+    def run_command(command, **_kwargs):
+        output = 'jq-1.8.2\n' if command[-1] == '--version' else 'true\n'
+        return subprocess.CompletedProcess(command, 0, stdout=output, stderr='')
+
+    def test_existing_jq_is_verified_without_installing(self):
+        self.assertEqual(dev._init_jq(), 0)
+        self.assertEqual([entry.args[0] for entry in self.run.call_args_list], [
+            ['existing-jq', '--version'], ['existing-jq', '-e', '.value == 42']])
+        self.assertEqual(json.loads(self.run.call_args.kwargs['input']), {'value': 42})
+        self.assertTrue(self.run.call_args.kwargs['check'])
+        self.error.assert_not_called()
+
+    def test_missing_jq_is_installed_with_the_native_package_manager(self):
+        cases = (
+            ('windows', 'winget', 1, [
+                ['winget', 'install', '--id', 'jqlang.jq', '--exact', '--source', 'winget',
+                 '--scope', 'user', '--accept-package-agreements', '--accept-source-agreements',
+                 '--disable-interactivity']]),
+            ('darwin', 'brew', 1, [['brew', 'install', 'jq']]),
+            ('linux', 'apt-get', 0, [
+                ['apt-get', 'update'], ['apt-get', 'install', '-y', 'jq']]),
+            ('linux', 'apt-get', 1, [
+                ['sudo', 'apt-get', 'update'], ['sudo', 'apt-get', 'install', '-y', 'jq']]),
+            ('linux', 'dnf', 1, [['sudo', 'dnf', 'install', '-y', 'jq']]),
+        )
+        for system, manager, uid, commands in cases:
+            with self.subTest(system=system, manager=manager, uid=uid), \
+                    patch('dev.get_os_type', return_value=system), \
+                    patch('dev.os.geteuid', return_value=uid, create=True):
+                installations = iter((None, 'installed-jq'))
+                self.which.side_effect = lambda name, **_kwargs: (
+                    next(installations) if name == 'jq' else name if name == manager else None)
+                self.run.reset_mock()
+                self.assertEqual(dev._init_jq(), 0)
+                self.assertEqual([entry.args[0] for entry in self.run.call_args_list], [
+                    *commands, ['installed-jq', '--version'],
+                    ['installed-jq', '-e', '.value == 42']])
+        self.error.assert_not_called()
+
+    @patch('dev.get_os_type', return_value='windows')
+    def test_windows_finds_winget_links_before_installing(self, _system):
+        local = str(Path(tempfile.gettempdir()) / 'jq-local-app-data')
+        links = str(Path(local) / 'Microsoft' / 'WinGet' / 'Links')
+        with patch.dict(os.environ, {'LOCALAPPDATA': local}):
+            self.which.side_effect = lambda _name, path: (
+                'linked-jq' if links in path.split(os.pathsep) else None)
+            self.assertEqual(dev._init_jq(), 0)
+        self.assertEqual(self.run.call_args_list[0].args[0], ['linked-jq', '--version'])
+        self.assertEqual(self.run.call_count, 2)
+
+    def test_missing_package_manager_fails_without_installing_other_tools(self):
+        self.which.return_value = None
+        for system in ('windows', 'darwin', 'linux'):
+            with self.subTest(system=system), patch('dev.get_os_type', return_value=system):
+                self.assertEqual(dev._init_jq(), 1)
+                self.assertIn('package manager', self.error.call_args.args[0])
+        self.run.assert_not_called()
+
+    @patch('dev.get_os_type', return_value='darwin')
+    def test_successful_installer_must_make_jq_available(self, _system):
+        self.which.side_effect = (None, 'brew', None)
+        self.assertEqual(dev._init_jq(), 1)
+        self.assertIn('not available', self.error.call_args.args[0])
+        self.assertEqual([entry.args[0] for entry in self.run.call_args_list], [
+            ['brew', 'install', 'jq']])
+
+    @patch('dev.get_os_type', return_value='darwin')
+    def test_installation_and_verification_failures_are_reported(self, _system):
+        version = self.run_command(['jq', '--version'])
+        cases = (
+            ('install', (None, 'brew'), [subprocess.CalledProcessError(7, 'brew')]),
+            ('version', ('jq',), [OSError('cannot execute jq')]),
+            ('query', ('jq',), [version, subprocess.CalledProcessError(1, 'jq')]),
+            ('timeout', ('jq',), [subprocess.TimeoutExpired('jq', 10)]),
+            ('wrong-version', ('jq',), [subprocess.CompletedProcess([], 0, stdout='')]),
+            ('wrong-query', ('jq',), [
+                version, subprocess.CompletedProcess([], 0, stdout='false\n')]),
+        )
+        for case, paths, results in cases:
+            with self.subTest(case=case):
+                self.which.side_effect = iter(paths)
+                self.run.side_effect = results
+                self.assertEqual(dev._init_jq(), 1)
+                self.assertIn('jq', self.error.call_args.args[0])
+
+
 class TestInitConfig(unittest.TestCase):
 
     def setUp(self):
@@ -1334,6 +1429,7 @@ class TestCmdInitSelfHealing(unittest.TestCase):
         tools_patch = patch('dev._init_bash_tools', return_value=0)
         self.bash_tools = tools_patch.start()
         self.addCleanup(tools_patch.stop)
+        self.jq_setup = self.enterContext(patch('dev._init_jq', return_value=0))
 
         self.orig_script_dir = dev.SCRIPT_DIR
         self.orig_config_dir = dev.CONFIG_DIR
@@ -1426,6 +1522,17 @@ class TestCmdInitSelfHealing(unittest.TestCase):
         stdin.isatty.return_value = False
         self.bash_tools.return_value = 1
         self.assertEqual(dev.cmd_init(None), 1)
+        ai_setup.assert_not_called()
+
+    @patch('dev._init_ai')
+    @patch('sys.stdin.isatty', return_value=False)
+    def test_jq_failure_stops_init_before_registering_profiles(self, _stdin, ai_setup):
+        self.jq_setup.return_value = 1
+        self.assertEqual(dev.cmd_init(None), 1)
+        self.assertFalse((self.home / '.psrc.ps1').exists())
+        self.assertFalse((self.home / '.bashrc').exists())
+        self.assertFalse((self.home / '.zshrc').exists())
+        self.bash_tools.assert_not_called()
         ai_setup.assert_not_called()
 
     def test_platform_hooks_do_not_adopt_legacy_files(self):

@@ -20,10 +20,10 @@ bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/jamesnyao/dev_
 ```
 
 The installer clones `~/dev_cli` (or initializes an existing submodule), then
-runs `dev init`. It provisions Python through uv, creates your configuration,
-and registers PowerShell, bash, or zsh startup hooks. Existing files are preserved.
-On a fresh Mac, finish Apple's Command Line Tools prompt; installation resumes automatically.
-Open a new terminal to use `dev`, `python`, and `python3`.
+runs `dev init` to bootstrap the working environment. It installs and verifies
+shared development tools and configures shell integration while preserving
+existing configuration and custom hooks. As workflows need additional tools,
+onboard them through `dev init` so setup stays repeatable across machines.
 
 ## Customize
 
